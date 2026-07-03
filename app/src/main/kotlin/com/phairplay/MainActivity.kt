@@ -1,5 +1,6 @@
 package com.phairplay
 
+import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -8,12 +9,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.widget.ScrollView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import com.phairplay.diagnostic.LogBuffer
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.phairplay.service.PhairPlayService
@@ -112,6 +115,7 @@ class MainActivity : AppCompatActivity() {
 
         // Start the service immediately so it's running before any sender discovers us
         ServiceController.start(this)
+        showLogViewerIfNeeded()
 
         // Android 13+ requires an explicit runtime grant for POST_NOTIFICATIONS
         requestNotificationPermission()
@@ -297,6 +301,10 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
+        if (overlayActive && keyCode == android.view.KeyEvent.KEYCODE_MENU) {
+            ServiceController.stop(this)
+            return true
+        }
         if (overlayActive) {
             val command = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
@@ -336,6 +344,27 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+    }
+
+    private fun showLogViewerIfNeeded() {
+        val log = LogBuffer.readFile().trim()
+        if (log.isEmpty()) return
+        val tv = TextView(this).apply {
+            text = log
+            textSize = 10f
+            setPadding(16, 16, 16, 16)
+            setTextIsSelectable(true)
+        }
+        val scroll = ScrollView(this).apply { addView(tv) }
+        AlertDialog.Builder(this)
+            .setTitle("Previous session log")
+            .setView(scroll)
+            .setPositiveButton("Clear") { _, _ -> LogBuffer.clearFile() }
+            .setNegativeButton("Dismiss", null)
+            .show()
+            .also {
+                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+            }
     }
 
     companion object {

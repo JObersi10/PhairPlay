@@ -36,6 +36,7 @@ class PhairPlayApp : Application() {
      * - The ability to swap the log backend (useful for crash reporting in future)
      */
     private fun initLogging() {
+        LogBuffer.init(filesDir)
         if (BuildConfig.DEBUG) {
             // Debug tree: logs everything, shows file names and line numbers
             Timber.plant(Timber.DebugTree())
