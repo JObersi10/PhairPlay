@@ -12,9 +12,12 @@ object LogBuffer {
     private val buf = mutableListOf<String>()
     private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private var logFile: File? = null
+    private var fileLineCount = 0
 
     fun init(filesDir: File) {
-        logFile = File(filesDir, "phairplay.log")
+        logFile = File(filesDir, "phairplay.log").also { f ->
+            fileLineCount = if (f.exists()) f.readLines().size else 0
+        }
     }
 
     fun add(msg: String) {
@@ -26,11 +29,13 @@ object LogBuffer {
         logFile?.let { f ->
             try {
                 f.appendText(line + "\n")
-                val lines = f.readLines()
-                if (lines.size > FILE_MAX_LINES) {
-                    f.writeText(lines.takeLast(FILE_MAX_LINES).joinToString("\n") + "\n")
+                fileLineCount++
+                if (fileLineCount > FILE_MAX_LINES) {
+                    val trimmed = f.readLines().takeLast(FILE_MAX_LINES)
+                    f.writeText(trimmed.joinToString("\n") + "\n")
+                    fileLineCount = trimmed.size
                 }
-            } catch (_: Exception) {}
+            } catch (e: Exception) { /* non-fatal */ }
         }
     }
 

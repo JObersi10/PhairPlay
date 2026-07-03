@@ -131,6 +131,7 @@ class AirPlayReceiver(
     // plus the latest DMAP metadata/artwork and recompute on every change (see [emitNowPlaying]).
     @Volatile private var audioPlaying = false
     @Volatile private var videoPlaying = false
+    @Volatile private var streamingStopped = false
     @Volatile private var npSenderName = "AirPlay"
     @Volatile private var npTitle: String? = null
     @Volatile private var npArtist: String? = null
@@ -274,6 +275,7 @@ class AirPlayReceiver(
      * - audio-only:   only [AudioPlayer], app stays on HomeScreen
      */
     private fun onStreamingStarted(session: SessionDescription) {
+        streamingStopped = false
         Logger.i("Streaming started — video=${session.hasVideo} audio=${session.hasAudio} " +
                  "audioOnly=${session.isAudioOnly}")
 
@@ -305,6 +307,8 @@ class AirPlayReceiver(
      * in sender pickers immediately.
      */
     private fun onStreamingStopped() {
+        if (streamingStopped) return
+        streamingStopped = true
         Logger.i("Streaming stopped — releasing media components")
         releaseMediaComponents()
         emitState(ProtocolState.ADVERTISING)
