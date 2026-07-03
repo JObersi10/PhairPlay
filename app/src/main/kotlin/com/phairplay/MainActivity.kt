@@ -302,10 +302,6 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
-        if (overlayActive && keyCode == android.view.KeyEvent.KEYCODE_MENU) {
-            nowPlayingScreen.toggleLyrics()
-            return true
-        }
         if (overlayActive) {
             val command = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,

@@ -268,16 +268,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         timeRemaining.visibility = if (timerRunning) View.VISIBLE else View.GONE
     }
 
-    private var lyricsVisible = true
-
     fun setLyrics(lines: List<LyricLine>) {
         lyricsState = lines
-        lyricsComposeView.visibility = if (lines.isEmpty() || !lyricsVisible) View.GONE else View.VISIBLE
-    }
-
-    fun toggleLyrics() {
-        lyricsVisible = !lyricsVisible
-        lyricsComposeView.visibility = if (lyricsState.isEmpty() || !lyricsVisible) View.GONE else View.VISIBLE
+        lyricsComposeView.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
     }
 
     fun clear() {
