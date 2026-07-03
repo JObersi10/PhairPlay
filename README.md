@@ -1,5 +1,7 @@
 # PhairPlay
 
+> Based on [PhairPlay by mazer666](https://github.com/mazer666/PhairPlay) — all credit for the original AirPlay receiver goes to them. This fork adds synced lyrics, a progress bar, diagnostic server, and UI improvements.
+
 PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and Fire TV. It lets your macOS or iOS/iPadOS device mirror its screen and audio directly to your TV — no Apple TV required.
 
 ```
