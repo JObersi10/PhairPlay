@@ -135,9 +135,13 @@ class AirPlayReceiver(
     @Volatile private var npTitle: String? = null
     @Volatile private var npArtist: String? = null
     @Volatile private var npAlbum: String? = null
+    @Volatile private var npGenre: String? = null
+    @Volatile private var npComposer: String? = null
+    @Volatile private var npYear: Int? = null
     @Volatile private var npArtwork: ByteArray? = null
     @Volatile private var npPositionSec: Double = 0.0
     @Volatile private var npDurationSec: Double = 0.0
+    @Volatile private var npDurationFromDmap: Double = 0.0
 
     /**
      * Starts the AirPlay receiver.
@@ -232,8 +236,10 @@ class AirPlayReceiver(
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
             onVolume = { v -> audioServer?.setVolume(v) },
-            onNowPlayingMetadata = { title, artist, album ->
+            onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
                 npTitle = title; npArtist = artist; npAlbum = album
+                npGenre = genre; npComposer = composer; npYear = year
+                if (durationMs != null && durationMs > 0) npDurationFromDmap = durationMs / 1000.0
                 emitNowPlaying()
             },
             onArtwork = { bytes ->
@@ -583,13 +589,20 @@ class AirPlayReceiver(
     private fun emitNowPlaying() {
         val show = audioPlaying && !videoPlaying
         onNowPlayingChanged(
-            if (show) NowPlayingInfo(npSenderName, npTitle, npArtist, npAlbum, npArtwork, npPositionSec, npDurationSec) else null
+            if (show) NowPlayingInfo(
+                npSenderName, npTitle, npArtist, npAlbum,
+                npGenre, npComposer, npYear, npArtwork,
+                npPositionSec,
+                if (npDurationSec > 0) npDurationSec else npDurationFromDmap
+            ) else null
         )
     }
 
     /** Drops stale track metadata/artwork when an audio stream ends (so it can't bleed into the next). */
     private fun clearNowPlayingMetadata() {
-        npTitle = null; npArtist = null; npAlbum = null; npArtwork = null
+        npTitle = null; npArtist = null; npAlbum = null
+        npGenre = null; npComposer = null; npYear = null
+        npArtwork = null; npDurationFromDmap = 0.0
     }
 
     // ─── Private: state emission ─────────────────────────────────────────────

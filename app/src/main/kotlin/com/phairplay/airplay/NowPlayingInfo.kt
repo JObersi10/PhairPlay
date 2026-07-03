@@ -11,6 +11,9 @@ data class NowPlayingInfo(
     val title: String? = null,
     val artist: String? = null,
     val album: String? = null,
+    val genre: String? = null,
+    val composer: String? = null,
+    val year: Int? = null,
     val artwork: ByteArray? = null,
     val positionSec: Double = 0.0,
     val durationSec: Double = 0.0,
@@ -26,6 +29,9 @@ data class NowPlayingInfo(
             title == other.title &&
             artist == other.artist &&
             album == other.album &&
+            genre == other.genre &&
+            composer == other.composer &&
+            year == other.year &&
             artwork.contentEquals(other.artwork) &&
             positionSec == other.positionSec &&
             durationSec == other.durationSec
@@ -57,24 +63,36 @@ data class NowPlayingInfo(
 object DmapParser {
 
     private val CONTAINER_TAGS = setOf("mlit", "mlcl", "mshl", "adbs")
-    private const val TRACK_TAG = "minm"
-    private const val ARTIST_TAG = "asar"
-    private const val ALBUM_TAG = "asal"
+    private const val TRACK_TAG    = "minm"  // track name
+    private const val ARTIST_TAG   = "asar"  // artist
+    private const val ALBUM_TAG    = "asal"  // album
+    private const val SONGTIME_TAG = "astm"  // duration in ms (4-byte int)
+    private const val GENRE_TAG    = "asgn"  // genre string
+    private const val COMPOSER_TAG = "ascp"  // composer string
+    private const val YEAR_TAG     = "asyr"  // year (2-byte int)
 
-    data class Metadata(val title: String?, val artist: String?, val album: String?) {
+    data class Metadata(
+        val title: String?, val artist: String?, val album: String?,
+        val genre: String?, val composer: String?, val year: Int?,
+        val durationMs: Long?,
+    ) {
         val isEmpty: Boolean get() = title == null && artist == null && album == null
     }
 
     fun parseNowPlaying(body: ByteArray): Metadata {
         val acc = MutableMetadata()
         runCatching { walk(body, 0, body.size, acc, depth = 0) }
-        return Metadata(acc.title, acc.artist, acc.album)
+        return Metadata(acc.title, acc.artist, acc.album, acc.genre, acc.composer, acc.year, acc.durationMs)
     }
 
     private class MutableMetadata {
         var title: String? = null
         var artist: String? = null
         var album: String? = null
+        var genre: String? = null
+        var composer: String? = null
+        var year: Int? = null
+        var durationMs: Long? = null
     }
 
     private fun walk(buf: ByteArray, start: Int, end: Int, acc: MutableMetadata, depth: Int) {
@@ -84,14 +102,17 @@ object DmapParser {
             val tag = String(buf, i, 4, Charsets.US_ASCII)
             val len = readBE32(buf, i + 4)
             val payloadStart = i + 8
-            // Malformed/overrun length → stop scanning this level rather than reading out of bounds.
             if (len < 0 || payloadStart + len > end) break
             when (tag) {
-                TRACK_TAG  -> if (acc.title == null)  acc.title  = utf8(buf, payloadStart, len)
-                ARTIST_TAG -> if (acc.artist == null) acc.artist = utf8(buf, payloadStart, len)
-                ALBUM_TAG  -> if (acc.album == null)  acc.album  = utf8(buf, payloadStart, len)
+                TRACK_TAG    -> if (acc.title == null)    acc.title    = utf8(buf, payloadStart, len)
+                ARTIST_TAG   -> if (acc.artist == null)   acc.artist   = utf8(buf, payloadStart, len)
+                ALBUM_TAG    -> if (acc.album == null)    acc.album    = utf8(buf, payloadStart, len)
+                GENRE_TAG    -> if (acc.genre == null)    acc.genre    = utf8(buf, payloadStart, len)
+                COMPOSER_TAG -> if (acc.composer == null) acc.composer = utf8(buf, payloadStart, len)
+                YEAR_TAG     -> if (acc.year == null && len >= 2) acc.year = readBE16(buf, payloadStart)
+                SONGTIME_TAG -> if (acc.durationMs == null && len >= 4) acc.durationMs = readBE32(buf, payloadStart).toLong() and 0xFFFFFFFFL
                 in CONTAINER_TAGS -> walk(buf, payloadStart, payloadStart + len, acc, depth + 1)
-                else -> { /* unknown tag — skip its payload */ }
+                else -> { /* skip */ }
             }
             i = payloadStart + len
         }
@@ -105,6 +126,9 @@ object DmapParser {
         ((buf[off + 1].toInt() and 0xFF) shl 16) or
         ((buf[off + 2].toInt() and 0xFF) shl 8) or
         (buf[off + 3].toInt() and 0xFF)
+
+    private fun readBE16(buf: ByteArray, off: Int): Int =
+        ((buf[off].toInt() and 0xFF) shl 8) or (buf[off + 1].toInt() and 0xFF)
 
     private const val MAX_DEPTH = 8
 }

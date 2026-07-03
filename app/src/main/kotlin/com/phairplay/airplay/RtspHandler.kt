@@ -54,7 +54,7 @@ open class RtspHandler(
     /** Sender volume change (AirPlay dB: −30…0, or ≤ −144 = mute) via SET_PARAMETER. */
     private val onVolume: (Float) -> Unit = {},
     /** Now-playing track metadata (DMAP) from SET_PARAMETER — any field may be null. */
-    private val onNowPlayingMetadata: (title: String?, artist: String?, album: String?) -> Unit = { _, _, _ -> },
+    private val onNowPlayingMetadata: (title: String?, artist: String?, album: String?, genre: String?, composer: String?, year: Int?, durationMs: Long?) -> Unit = { _, _, _, _, _, _, _ -> },
     /** Album artwork (JPEG/PNG bytes) from SET_PARAMETER; empty bytes = artwork cleared. */
     private val onArtwork: (ByteArray) -> Unit = {},
     /** Playback position + duration (seconds) from SET_PARAMETER text/parameters. */
@@ -868,6 +868,21 @@ open class RtspHandler(
                     Logger.d("SET_PARAMETER volume=$v")
                 }
             }
+            body.startsWith("progress:") || body.contains("\nprogress:") -> {
+                val raw = body.lineSequence().firstOrNull { it.startsWith("progress:") }
+                    ?.substringAfter(":")?.trim() ?: return RtspResponse(200, "OK")
+                val parts = raw.split("/")
+                if (parts.size == 3) {
+                    val start = parts[0].toLongOrNull() ?: return RtspResponse(200, "OK")
+                    val curr  = parts[1].toLongOrNull() ?: return RtspResponse(200, "OK")
+                    val end   = parts[2].toLongOrNull() ?: return RtspResponse(200, "OK")
+                    // RTP clock is 44100 Hz; handle 32-bit wrap-around with unsigned subtraction
+                    val pos = ((curr - start) and 0xFFFFFFFFL) / 44100.0
+                    val dur = ((end  - start) and 0xFFFFFFFFL) / 44100.0
+                    Logger.i("SET_PARAMETER progress: pos=${pos.toInt()}s dur=${dur.toInt()}s")
+                    onPlaybackPosition(pos, dur)
+                }
+            }
             contentType.contains("text/parameters") || body.contains("position:") -> {
                 val params = body.lines().associate { line ->
                     val i = line.indexOf(':'); if (i > 0) line.substring(0, i).trim() to line.substring(i + 1).trim() else "" to ""
@@ -884,8 +899,8 @@ open class RtspHandler(
             }
             contentType.contains("dmap") || looksLikeDmap(request.bodyBytes) -> {
                 val meta = DmapParser.parseNowPlaying(request.bodyBytes)
-                onNowPlayingMetadata(meta.title, meta.artist, meta.album)
-                Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}'")
+                onNowPlayingMetadata(meta.title, meta.artist, meta.album, meta.genre, meta.composer, meta.year, meta.durationMs)
+                Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}' genre='${meta.genre}' dur=${meta.durationMs?.div(1000)}s")
             }
             else -> Logger.d("SET_PARAMETER unhandled ct='$contentType' body=${body.take(120)}")
         }
