@@ -27,8 +27,13 @@ import com.phairplay.ui.PhotoScreen
 import com.phairplay.ui.PinScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import com.phairplay.lyrics.LyricsRepository
+import com.phairplay.settings.SettingsRepository
 import timber.log.Timber
 
 /**
@@ -70,6 +75,7 @@ class MainActivity : AppCompatActivity() {
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
+    private var currentVideoPlaying = false
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -132,13 +138,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (currentNowPlaying != null || currentAirPlayState == com.phairplay.service.ProtocolState.CONNECTED) {
+            ServiceController.stop(this)
+        }
+        @Suppress("DEPRECATION")
+        super.onBackPressed()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        // A user-initiated exit (Back out of the app) should end any active mirror — closing the
-        // service stops the receiver, which drops the RTSP connection so the sender stops mirroring
-        // too. isFinishing distinguishes a real exit from a config-change recreation (where the
-        // service must keep running). Backgrounding via Home goes through onStop only (no destroy),
-        // so the receiver keeps advertising for a quick return.
         if (isFinishing) {
             Timber.d("MainActivity finishing — stopping service so mirroring doesn't linger")
             ServiceController.stop(this)
@@ -163,7 +173,10 @@ class MainActivity : AppCompatActivity() {
     private fun setupOverlayScreens() {
         streamingScreen = StreamingScreen(this)
         photoScreen = PhotoScreen(this)
-        nowPlayingScreen = NowPlayingScreen(this)
+        nowPlayingScreen = NowPlayingScreen(this).also {
+            it.onPlayPauseClick = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE) }
+            it.attachLifecycleOwners(this, this)
+        }
         pinScreen = PinScreen(this)
         streamingContainer.addView(streamingScreen)
         streamingContainer.addView(photoScreen)
@@ -289,6 +302,10 @@ class MainActivity : AppCompatActivity() {
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
+        if (overlayActive && keyCode == android.view.KeyEvent.KEYCODE_MENU) {
+            nowPlayingScreen.toggleLyrics()
+            return true
+        }
         if (overlayActive) {
             val command = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
@@ -358,8 +375,36 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
-            svc.nowPlaying.collectLatest { info ->
+            var lastLyricsKey = ""
+            var fetchJob: kotlinx.coroutines.Job? = null
+            svc.nowPlaying.collect { info ->
                 currentNowPlaying = info
+                updateOverlay()
+                val key = "${info?.title}|${info?.artist}"
+                if (info != null && !info.title.isNullOrBlank() && key != lastLyricsKey) {
+                    lastLyricsKey = key
+                    fetchJob?.cancel()
+                    nowPlayingScreen.setLyrics(emptyList())
+                    fetchJob = launch {
+                        val lyricsOn = SettingsRepository(this@MainActivity).settingsFlow.first().lyricsEnabled
+                        if (!lyricsOn) return@launch
+                        val lines = LyricsRepository.fetch(
+                            title = info.title,
+                            artist = info.artist ?: "",
+                            album = info.album,
+                            durationSec = info.durationSec
+                        )
+                        nowPlayingScreen.setLyrics(lines)
+                    }
+                } else if (info == null) {
+                    lastLyricsKey = ""
+                    nowPlayingScreen.setLyrics(emptyList())
+                }
+            }
+        }
+        lifecycleScope.launch {
+            svc.videoPlaying.collectLatest { playing ->
+                currentVideoPlaying = playing
                 updateOverlay()
             }
         }
@@ -378,10 +423,8 @@ class MainActivity : AppCompatActivity() {
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
             pin != null -> showPinScreen(pin)
-            // Audio-only AirPlay (system audio, Music, podcasts): show the now-playing card instead
-            // of the black video surface. Set whenever audio plays without video.
+            currentVideoPlaying || (currentAirPlayState == ProtocolState.CONNECTED && nowPlaying == null) -> showStreamingScreen()
             nowPlaying != null -> showNowPlayingScreen(nowPlaying)
-            currentAirPlayState == ProtocolState.CONNECTED -> showStreamingScreen()
             photoFrame != null -> showPhotoScreen(photoFrame)
             else -> hideStreamingScreen()
         }

@@ -12,6 +12,8 @@ data class NowPlayingInfo(
     val artist: String? = null,
     val album: String? = null,
     val artwork: ByteArray? = null,
+    val positionSec: Double = 0.0,
+    val durationSec: Double = 0.0,
 ) {
     /** True when the sender supplied at least a track title (vs. a bare "audio is playing" state). */
     val hasMetadata: Boolean get() = !title.isNullOrBlank()
@@ -24,7 +26,9 @@ data class NowPlayingInfo(
             title == other.title &&
             artist == other.artist &&
             album == other.album &&
-            artwork.contentEquals(other.artwork)
+            artwork.contentEquals(other.artwork) &&
+            positionSec == other.positionSec &&
+            durationSec == other.durationSec
     }
 
     override fun hashCode(): Int {
@@ -33,6 +37,8 @@ data class NowPlayingInfo(
         result = 31 * result + (artist?.hashCode() ?: 0)
         result = 31 * result + (album?.hashCode() ?: 0)
         result = 31 * result + (artwork?.contentHashCode() ?: 0)
+        result = 31 * result + positionSec.hashCode()
+        result = 31 * result + durationSec.hashCode()
         return result
     }
 }

@@ -19,6 +19,8 @@ import com.phairplay.cast.CastReceiver
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
+import com.phairplay.diagnostic.DiagnosticServer
+import com.phairplay.diagnostic.LogBuffer
 import com.phairplay.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -29,6 +31,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import timber.log.Timber
 
 /**
  * PhairPlayService — Android ForegroundService that hosts all receiver protocols.
@@ -71,6 +74,9 @@ class PhairPlayService : Service() {
     private val _castState = MutableStateFlow(ProtocolState.DISABLED)
     val castState: StateFlow<ProtocolState> = _castState.asStateFlow()
 
+    private val _videoPlaying = MutableStateFlow(false)
+    val videoPlaying: StateFlow<Boolean> = _videoPlaying.asStateFlow()
+
     private val _activeConnection = MutableStateFlow<ActiveConnection?>(null)
     val activeConnection: StateFlow<ActiveConnection?> = _activeConnection.asStateFlow()
 
@@ -105,6 +111,7 @@ class PhairPlayService : Service() {
         Logger.i("PhairPlayService created")
         settingsRepository = SettingsRepository(applicationContext)
         createNotificationChannel()
+        DiagnosticServer.start(serviceScope)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -130,9 +137,8 @@ class PhairPlayService : Service() {
      * START_STICKY silently resurrect it as a zombie that keeps advertising/streaming invisibly.
      */
     override fun onTaskRemoved(rootIntent: Intent?) {
-        Logger.i("App task removed — stopping receivers + service")
-        stopReceivers()
-        stopSelf()
+        // Keep the service alive after task removal so AirPlay keeps advertising in the background.
+        Logger.i("App task removed — service continues in background")
         super.onTaskRemoved(rootIntent)
     }
 
@@ -164,6 +170,7 @@ class PhairPlayService : Service() {
     override fun onDestroy() {
         Logger.i("PhairPlayService destroying")
         stopAllReceiversInternal()
+        DiagnosticServer.stop()
         serviceJob.cancel()
         super.onDestroy()
     }
@@ -269,6 +276,7 @@ class PhairPlayService : Service() {
             },
             onNowPlayingChanged = { info ->
                 _nowPlaying.value = info
+                _videoPlaying.value = (info == null && _airPlayState.value == ProtocolState.CONNECTED)
             },
             onPinChanged = { pin ->
                 _pairingPin.value = pin
@@ -281,6 +289,7 @@ class PhairPlayService : Service() {
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
+                        bringAppToFront()
                     }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
@@ -332,15 +341,18 @@ class PhairPlayService : Service() {
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            manager.createNotificationChannel(NotificationChannel(
                 CHANNEL_ID,
                 getString(R.string.notification_channel_name),
-                NotificationManager.IMPORTANCE_LOW  // LOW: no sound, minimal visual interruption
-            ).apply {
-                description = getString(R.string.notification_channel_description)
-            }
-            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            manager.createNotificationChannel(channel)
+                NotificationManager.IMPORTANCE_LOW
+            ).apply { description = getString(R.string.notification_channel_description) })
+            // High-importance channel required for full-screen intents (auto-open on connect)
+            manager.createNotificationChannel(NotificationChannel(
+                CHANNEL_ID_INCOMING,
+                "AirPlay Connection",
+                NotificationManager.IMPORTANCE_HIGH
+            ))
         }
     }
 
@@ -395,6 +407,27 @@ class PhairPlayService : Service() {
             .build()
     }
 
+    private fun bringAppToFront() {
+        val pi = PendingIntent.getActivity(
+            this, 99,
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val n = NotificationCompat.Builder(this, CHANNEL_ID_INCOMING)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(getString(R.string.app_name))
+            .setContentText(getString(R.string.notification_status_running))
+            .setFullScreenIntent(pi, true)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setAutoCancel(true)
+            .build()
+        (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(NOTIFICATION_ID_INCOMING, n)
+    }
+
     private fun updateNotification(isRunning: Boolean, streamingSenderName: String? = null) {
         val contentText = streamingSenderName?.let {
             getString(R.string.notification_status_streaming, it)
@@ -417,8 +450,10 @@ class PhairPlayService : Service() {
     }
 
     companion object {
-        const val CHANNEL_ID      = "phairplay_service_channel"
-        const val NOTIFICATION_ID = 1001
+        const val CHANNEL_ID          = "phairplay_service_channel"
+        const val CHANNEL_ID_INCOMING = "phairplay_incoming_channel"
+        const val NOTIFICATION_ID          = 1001
+        const val NOTIFICATION_ID_INCOMING = 1002
         const val ACTION_START    = "com.phairplay.action.START"
         const val ACTION_STOP     = "com.phairplay.action.STOP"
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"

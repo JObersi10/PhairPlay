@@ -56,6 +56,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowMirrorAudio: View
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
+    private lateinit var rowLyrics: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowForceHighRes: View
     private lateinit var textVersionValue: TextView
@@ -94,6 +95,7 @@ class SettingsFragment : Fragment() {
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
+        rowLyrics           = view.findViewById(R.id.row_lyrics)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         textVersionValue    = view.findViewById(R.id.text_version_value)
@@ -118,10 +120,28 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
+        configureToggleRow(rowLyrics,       R.string.setting_lyrics,             R.string.setting_lyrics_subtitle)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
         textVersionValue.text = BuildConfig.VERSION_NAME
+        showNetworkInfo()
+    }
+
+    private fun showNetworkInfo() {
+        val ip = getWifiIp() ?: return
+        val port = com.phairplay.diagnostic.DiagnosticServer.PORT
+        val tailPort = com.phairplay.diagnostic.DiagnosticServer.TAIL_PORT
+        textVersionValue.text = "${BuildConfig.VERSION_NAME}\nLogs: http://$ip:$port  Tail: http://$ip:$tailPort"
+    }
+
+    private fun getWifiIp(): String? {
+        val wm = requireContext().applicationContext
+            .getSystemService(android.content.Context.WIFI_SERVICE) as? android.net.wifi.WifiManager
+            ?: return null
+        val ip = wm.connectionInfo.ipAddress
+        if (ip == 0) return null
+        return "%d.%d.%d.%d".format(ip and 0xff, ip shr 8 and 0xff, ip shr 16 and 0xff, ip shr 24 and 0xff)
     }
 
     /**
@@ -167,6 +187,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
+        setToggle(rowLyrics,       settings.lyricsEnabled)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowForceHighRes, settings.forceHighResolution)
     }
@@ -191,6 +212,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
+        setToggleListener(rowLyrics)       { enabled -> save { it.copy(lyricsEnabled = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
 

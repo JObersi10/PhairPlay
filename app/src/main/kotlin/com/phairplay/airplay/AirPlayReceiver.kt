@@ -136,6 +136,8 @@ class AirPlayReceiver(
     @Volatile private var npArtist: String? = null
     @Volatile private var npAlbum: String? = null
     @Volatile private var npArtwork: ByteArray? = null
+    @Volatile private var npPositionSec: Double = 0.0
+    @Volatile private var npDurationSec: Double = 0.0
 
     /**
      * Starts the AirPlay receiver.
@@ -236,6 +238,10 @@ class AirPlayReceiver(
             },
             onArtwork = { bytes ->
                 npArtwork = bytes.takeIf { it.isNotEmpty() }
+                emitNowPlaying()
+            },
+            onPlaybackPosition = { pos, dur ->
+                npPositionSec = pos; npDurationSec = dur
                 emitNowPlaying()
             },
             onVideoPlay = { url, start -> startUrlVideo(url, start) },
@@ -576,7 +582,7 @@ class AirPlayReceiver(
     private fun emitNowPlaying() {
         val show = audioPlaying && !videoPlaying
         onNowPlayingChanged(
-            if (show) NowPlayingInfo(npSenderName, npTitle, npArtist, npAlbum, npArtwork) else null
+            if (show) NowPlayingInfo(npSenderName, npTitle, npArtist, npAlbum, npArtwork, npPositionSec, npDurationSec) else null
         )
     }
 

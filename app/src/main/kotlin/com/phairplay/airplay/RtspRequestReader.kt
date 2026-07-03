@@ -73,10 +73,13 @@ internal class RtspRequestReader(
         headers: Map<String, String>
     ): ByteArray? {
         val contentLength = headers["Content-Length"]?.toIntOrNull() ?: 0
-        val bodyLimit = if (method == "PUT" && uri.substringBefore("?") == PhotoHandler.PHOTO_PATH) {
-            maxPhotoBytes
-        } else {
-            maxMessageBytes
+        val contentType = headers["Content-Type"] ?: ""
+        val bodyLimit = when {
+            method == "PUT" && uri.substringBefore("?") == PhotoHandler.PHOTO_PATH -> maxPhotoBytes
+            // SET_PARAMETER can carry album artwork (image/jpeg, image/png) which may exceed 64 KB.
+            // Reject it with the same generous limit as photos so large covers don't kill the session.
+            method == "SET_PARAMETER" && contentType.startsWith("image/") -> maxPhotoBytes
+            else -> maxMessageBytes
         }
 
         if (contentLength > bodyLimit) {

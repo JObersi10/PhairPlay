@@ -57,6 +57,8 @@ open class RtspHandler(
     private val onNowPlayingMetadata: (title: String?, artist: String?, album: String?) -> Unit = { _, _, _ -> },
     /** Album artwork (JPEG/PNG bytes) from SET_PARAMETER; empty bytes = artwork cleared. */
     private val onArtwork: (ByteArray) -> Unit = {},
+    /** Playback position + duration (seconds) from SET_PARAMETER text/parameters. */
+    private val onPlaybackPosition: (positionSec: Double, durationSec: Double) -> Unit = { _, _ -> },
     /** AirPlay video URL mode: POST /play with a media URL + start fraction (0..1). */
     private val onVideoPlay: (url: String, startFraction: Double) -> Unit = { _, _ -> },
     /** AirPlay video transport: POST /rate (≤0 pause, >0 resume). */
@@ -866,6 +868,15 @@ open class RtspHandler(
                     Logger.d("SET_PARAMETER volume=$v")
                 }
             }
+            contentType.contains("text/parameters") || body.contains("position:") -> {
+                val params = body.lines().associate { line ->
+                    val i = line.indexOf(':'); if (i > 0) line.substring(0, i).trim() to line.substring(i + 1).trim() else "" to ""
+                }
+                val pos = params["position"]?.toDoubleOrNull() ?: return RtspResponse(200, "OK")
+                val dur = params["duration"]?.toDoubleOrNull() ?: 0.0
+                Logger.i("SET_PARAMETER position=$pos duration=$dur")
+                onPlaybackPosition(pos, dur)
+            }
             contentType.startsWith("image/") -> {
                 // Album artwork (image/jpeg, image/png). A zero-length body clears it.
                 onArtwork(request.bodyBytes)
@@ -876,7 +887,7 @@ open class RtspHandler(
                 onNowPlayingMetadata(meta.title, meta.artist, meta.album)
                 Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}'")
             }
-            else -> Logger.d("SET_PARAMETER (${request.bodyBytes.size}B, $contentType, unhandled)")
+            else -> Logger.d("SET_PARAMETER unhandled ct='$contentType' body=${body.take(120)}")
         }
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }

@@ -1,6 +1,7 @@
 package com.phairplay
 
 import android.app.Application
+import com.phairplay.diagnostic.LogBuffer
 import timber.log.Timber
 
 /**
@@ -38,8 +39,15 @@ class PhairPlayApp : Application() {
         if (BuildConfig.DEBUG) {
             // Debug tree: logs everything, shows file names and line numbers
             Timber.plant(Timber.DebugTree())
+            Timber.plant(LogBuffer.Tree())
         }
         // In release builds, we deliberately plant no tree to avoid
         // exposing debug information. Critical errors use android.util.Log directly.
+
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            LogBuffer.add("[CRASH/${thread.name}] UNCAUGHT: ${throwable.javaClass.name}: ${throwable.message}\n${throwable.stackTraceToString()}")
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
     }
 }

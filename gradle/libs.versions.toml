@@ -13,6 +13,9 @@ appcompat = "1.7.0"
 constraintlayout = "2.1.4"
 core-ktx = "1.13.1"
 leanback = "1.2.0"                     # TV navigation, focus management, on-screen keyboard
+palette = "1.0.0"                      # Color extraction from bitmaps (album art → background gradient)
+compose-bom = "2024.05.00"            # Compose BOM — pins all compose artifact versions
+compose-compiler = "1.5.13"           # Must match Kotlin 1.9.23
 
 # Kotlin Coroutines — for all async I/O (network, media)
 coroutines = "1.8.1"
@@ -45,6 +48,17 @@ androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version
 androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 androidx-leanback = { group = "androidx.leanback", name = "leanback", version.ref = "leanback" }
+androidx-palette = { group = "androidx.palette", name = "palette", version.ref = "palette" }
+
+# Jetpack Compose — used for lyrics animation panel
+compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
+compose-ui = { group = "androidx.compose.ui", name = "ui" }
+compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+compose-runtime = { group = "androidx.compose.runtime", name = "runtime" }
+compose-animation = { group = "androidx.compose.animation", name = "animation" }
+compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
+activity-compose = { group = "androidx.activity", name = "activity-compose", version = "1.9.0" }
 
 # DataStore — async, type-safe settings persistence
 androidx-datastore-preferences = { group = "androidx.datastore", name = "datastore-preferences", version.ref = "datastore" }

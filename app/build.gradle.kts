@@ -182,9 +182,12 @@ android {
     }
 
     buildFeatures {
-        // BuildConfig is disabled by default in AGP 8.x — enable it explicitly
-        // because PhairPlayApp.kt and SettingsFragment.kt use BuildConfig.VERSION_NAME etc.
         buildConfig = true
+        compose = true
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = libs.versions.compose.compiler.get()
     }
 
     testOptions {
@@ -203,6 +206,17 @@ dependencies {
 
     // Leanback — TV focus management, on-screen keyboard, TV-specific widgets
     implementation(libs.androidx.leanback)
+    implementation(libs.androidx.palette)
+
+    // Jetpack Compose — lyrics animation panel
+    implementation(platform(libs.compose.bom))
+    implementation(libs.compose.ui)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material3)
+    implementation(libs.compose.runtime)
+    implementation(libs.compose.animation)
+    implementation(libs.compose.ui.graphics)
+    implementation(libs.activity.compose)
 
     // DataStore — async, type-safe replacement for SharedPreferences
     implementation(libs.androidx.datastore.preferences)
