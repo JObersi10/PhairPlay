@@ -1,117 +1,85 @@
 package com.phairplay.airplay
 
-import android.media.AudioAttributes
-import android.media.MediaPlayer
+import android.content.Context
+import android.net.Uri
 import android.view.Surface
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import com.phairplay.util.Logger
 
 /** Snapshot of URL-video playback for `GET /playback-info`. */
 data class PlaybackInfo(
     val durationSec: Double,
     val positionSec: Double,
-    val rate: Double,        // 0.0 = paused, 1.0 = playing
+    val rate: Double,
     val readyToPlay: Boolean,
 )
 
-/**
- * AirPlayVideoPlayer — plays an AirPlay "video URL" stream (the non-mirroring mode: a sender app
- * like Safari or a TV app says "AirPlay this video" and POSTs a URL via `/play`). We hand the URL to
- * Android's [MediaPlayer] and render to the same streaming [Surface] the mirror decoder uses.
- *
- * Distinct from screen mirroring (H.264 over a data stream): here the TV fetches and plays the media
- * itself, and the sender only drives transport (`/rate`, `/scrub`, `/stop`) + polls `/playback-info`.
- *
- * Methods are `@Synchronized` because RTSP control verbs arrive on the RTSP thread while MediaPlayer
- * callbacks fire on its own thread.
- */
 class AirPlayVideoPlayer(
+    private val context: Context,
     private val surfaceProvider: () -> Surface?,
     private val onEnded: () -> Unit = {},
 ) {
-    private var mp: MediaPlayer? = null
-    @Volatile private var prepared = false
-    @Volatile private var startFraction = 0.0
+    @Volatile private var player: ExoPlayer? = null
+    @Volatile private var ready = false
 
-    /** Starts playing [url], seeking to [startPositionFraction] (0..1 of duration) once prepared. */
-    @Synchronized
     fun play(url: String, startPositionFraction: Double) {
         release()
-        startFraction = startPositionFraction.coerceIn(0.0, 1.0)
-        Logger.i("AirPlay video: play url=$url start=$startFraction")
-        val player = MediaPlayer()
-        mp = player
-        prepared = false
-        runCatching {
-            player.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
-                    .build()
-            )
-            surfaceProvider()?.let { player.setSurface(it) }
-            player.setOnPreparedListener { onPrepared(it) }
-            player.setOnCompletionListener { Logger.i("AirPlay video: completed"); onEnded() }
-            player.setOnErrorListener { _, what, extra ->
-                Logger.e("AirPlay video error what=$what extra=$extra")
-                true   // handled — don't also fire onCompletion
+        Logger.i("AirPlay video: play url=$url start=$startPositionFraction")
+        val exo = ExoPlayer.Builder(context).build()
+        player = exo
+        ready = false
+        surfaceProvider()?.let { exo.setVideoSurface(it) }
+        exo.addListener(object : Player.Listener {
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_READY) {
+                    ready = true
+                    if (startPositionFraction > 0.0)
+                        exo.seekTo((startPositionFraction * exo.duration).toLong())
+                    Logger.i("AirPlay video: ready dur=${exo.duration}ms")
+                } else if (state == Player.STATE_ENDED) {
+                    Logger.i("AirPlay video: ended")
+                    onEnded()
+                }
             }
-            player.setDataSource(url)
-            player.prepareAsync()
-        }.onFailure { Logger.e("AirPlay video: setup failed", it); release() }
+            override fun onPlayerError(error: PlaybackException) {
+                Logger.e("AirPlay video error: ${error.message}")
+            }
+        })
+        exo.setMediaItem(MediaItem.fromUri(Uri.parse(url)))
+        exo.prepare()
+        exo.playWhenReady = true
     }
 
-    @Synchronized
-    private fun onPrepared(player: MediaPlayer) {
-        // onPrepared fires on MediaPlayer's own thread and can race release()/a new play(): if the
-        // player was released (or replaced) while preparing, mp no longer points at it — bail before
-        // touching a dead MediaPlayer (which would throw IllegalStateException).
-        if (mp !== player) return
-        // The Surface usually doesn't exist at setDataSource() time (the Activity creates it only
-        // after CONNECTED) — attach it now that prepare has completed.
-        surfaceProvider()?.let { runCatching { player.setSurface(it) } }
-        if (startFraction > 0.0) runCatching { player.seekTo((startFraction * player.duration).toInt()) }
-        prepared = true
-        runCatching { player.start() }
-        Logger.i("AirPlay video: prepared dur=${runCatching { player.duration }.getOrDefault(0)}ms → playing")
-    }
-
-    /** rate ≤ 0 pauses, > 0 resumes. */
-    @Synchronized
     fun setRate(rate: Float) {
-        val player = mp ?: return
-        runCatching {
-            if (rate <= 0f) { if (player.isPlaying) player.pause() }
-            else { if (!player.isPlaying) player.start() }
-        }
+        val exo = player ?: return
+        if (rate <= 0f) exo.pause() else exo.play()
     }
 
-    /** Seeks to [positionSec] seconds. */
-    @Synchronized
     fun scrub(positionSec: Double) {
-        runCatching { mp?.seekTo((positionSec * 1000).toInt()) }
+        player?.seekTo((positionSec * 1000).toLong())
     }
 
-    /** Current playback snapshot for `/playback-info`, or null if nothing is loaded. */
-    @Synchronized
-    fun info(): PlaybackInfo? {
-        val player = mp ?: return null
-        if (!prepared) return PlaybackInfo(0.0, 0.0, 0.0, readyToPlay = false)
-        val dur = runCatching { player.duration }.getOrDefault(0)
-        val pos = runCatching { player.currentPosition }.getOrDefault(0)
-        val playing = runCatching { player.isPlaying }.getOrDefault(false)
-        return PlaybackInfo(dur / 1000.0, pos / 1000.0, if (playing) 1.0 else 0.0, readyToPlay = true)
-    }
-
-    /** Re-attach the streaming surface (after the Activity recreates it on foreground). */
-    @Synchronized
     fun attachSurface() {
-        surfaceProvider()?.let { runCatching { mp?.setSurface(it) } }
+        player?.let { surfaceProvider()?.let { s -> it.setVideoSurface(s) } }
     }
 
-    @Synchronized
+    fun info(): PlaybackInfo? {
+        val exo = player ?: return null
+        if (!ready) return PlaybackInfo(0.0, 0.0, 0.0, readyToPlay = false)
+        return PlaybackInfo(
+            durationSec = exo.duration.coerceAtLeast(0) / 1000.0,
+            positionSec = exo.currentPosition / 1000.0,
+            rate = if (exo.isPlaying) 1.0 else 0.0,
+            readyToPlay = true
+        )
+    }
+
     fun release() {
-        mp?.let { p -> runCatching { p.stop() }; runCatching { p.release() } }
-        mp = null
-        prepared = false
+        player?.release()
+        player = null
+        ready = false
     }
 }

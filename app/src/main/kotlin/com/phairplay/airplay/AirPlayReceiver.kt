@@ -504,6 +504,7 @@ class AirPlayReceiver(
         onSenderNameChanged("AirPlay")
         emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
         val player = urlVideoPlayer ?: AirPlayVideoPlayer(
+            context = context,
             surfaceProvider = videoSurfaceProvider,
             onEnded = { stopUrlVideo() }
         ).also { urlVideoPlayer = it }

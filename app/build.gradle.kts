@@ -233,6 +233,11 @@ dependencies {
     // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
     implementation(libs.ddplist)
 
+    // ExoPlayer — HLS/DASH video playback for AirPlay URL mode
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.exoplayer.hls)
+    implementation(libs.media3.exoplayer.dash)
+
     // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
     // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.
     "googletvImplementation"(libs.play.services.cast.tv)

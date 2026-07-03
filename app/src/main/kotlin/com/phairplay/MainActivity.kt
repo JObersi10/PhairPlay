@@ -27,13 +27,9 @@ import com.phairplay.ui.PhotoScreen
 import com.phairplay.ui.PinScreen
 import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import com.phairplay.lyrics.LyricsRepository
-import com.phairplay.settings.SettingsRepository
 import timber.log.Timber
 
 /**
@@ -175,7 +171,6 @@ class MainActivity : AppCompatActivity() {
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this).also {
             it.onPlayPauseClick = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE) }
-            it.attachLifecycleOwners(this, this)
         }
         pinScreen = PinScreen(this)
         streamingContainer.addView(streamingScreen)
@@ -371,31 +366,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
-            var lastLyricsKey = ""
-            var fetchJob: kotlinx.coroutines.Job? = null
             svc.nowPlaying.collect { info ->
                 currentNowPlaying = info
                 updateOverlay()
-                val key = "${info?.title}|${info?.artist}"
-                if (info != null && !info.title.isNullOrBlank() && key != lastLyricsKey) {
-                    lastLyricsKey = key
-                    fetchJob?.cancel()
-                    nowPlayingScreen.setLyrics(emptyList())
-                    fetchJob = launch {
-                        val lyricsOn = SettingsRepository(this@MainActivity).settingsFlow.first().lyricsEnabled
-                        if (!lyricsOn) return@launch
-                        val lines = LyricsRepository.fetch(
-                            title = info.title,
-                            artist = info.artist ?: "",
-                            album = info.album,
-                            durationSec = info.durationSec
-                        )
-                        nowPlayingScreen.setLyrics(lines)
-                    }
-                } else if (info == null) {
-                    lastLyricsKey = ""
-                    nowPlayingScreen.setLyrics(emptyList())
-                }
             }
         }
         lifecycleScope.launch {

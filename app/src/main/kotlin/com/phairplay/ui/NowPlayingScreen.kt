@@ -17,23 +17,9 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.platform.ComposeView
-import androidx.lifecycle.LifecycleOwner
-import androidx.lifecycle.ViewModelStoreOwner
-import androidx.lifecycle.setViewTreeLifecycleOwner
-import androidx.lifecycle.setViewTreeViewModelStoreOwner
-import androidx.savedstate.SavedStateRegistryOwner
-import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import androidx.palette.graphics.Palette
 import com.phairplay.R
 import com.phairplay.airplay.NowPlayingInfo
-import com.phairplay.lyrics.LyricLine
-import com.phairplay.lyrics.LyricsPanel
 import com.phairplay.util.Logger
 
 class NowPlayingScreen @JvmOverloads constructor(
@@ -43,7 +29,6 @@ class NowPlayingScreen @JvmOverloads constructor(
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
     var onPlayPauseClick: (() -> Unit)? = null
-    var onSeek: ((Long) -> Unit)? = null
 
     private val handler = Handler(Looper.getMainLooper())
     private var positionBaseMs = 0L
@@ -56,7 +41,6 @@ class NowPlayingScreen @JvmOverloads constructor(
             if (positionBaseEpoch > 0L) {
                 val now = positionBaseMs + (SystemClock.elapsedRealtime() - positionBaseEpoch)
                 val clamped = if (durationMs > 0L) now.coerceAtMost(durationMs) else now
-                progressMsState = clamped
                 timeElapsed.text = formatTime(clamped / 1000.0)
                 if (durationMs > 0L) {
                     progressBar.progress = ((clamped.toFloat() / durationMs) * 1000).toInt()
@@ -78,7 +62,6 @@ class NowPlayingScreen @JvmOverloads constructor(
         colors = intArrayOf(Color.parseColor("#1a1a2e"), Color.parseColor("#16213e"))
     }
 
-    // Art + metadata column (left side when lyrics present)
     private val artwork: ImageView
     private val titleView: TextView
     private val artistView: TextView
@@ -87,14 +70,6 @@ class NowPlayingScreen @JvmOverloads constructor(
     private val timeElapsed: TextView
     private val timeRemaining: TextView
     private val artColumn: LinearLayout
-
-    // Compose view for lyrics (right side)
-    private val lyricsComposeView: ComposeView
-
-    // Compose state
-    private var lyricsState by mutableStateOf<List<LyricLine>>(emptyList())
-    private var progressMsState by mutableLongStateOf(0L)
-    private var durationMsState by mutableLongStateOf(0L)
 
     init {
         background = bgGradient
@@ -182,37 +157,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         artColumn.addView(progressWrapper)
         artColumn.addView(senderView)
 
-        // ── Lyrics ComposeView ─────────────────────────────────────────────
-        lyricsComposeView = ComposeView(context).apply {
-            visibility = View.GONE
-            setContent {
-                MaterialTheme {
-                    LyricsPanel(
-                        lyrics = lyricsState,
-                        progressMs = progressMsState,
-                        durationMs = durationMsState,
-                        onSeek = { ms -> onSeek?.invoke(ms) }
-                    )
-                }
-            }
-        }
-
-        // Root horizontal layout: art left, lyrics right
-        val root = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        root.addView(artColumn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        root.addView(lyricsComposeView, LinearLayout.LayoutParams(0, 1080, 1f))
-
-        addView(root, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-    }
-
-    /** Must be called after the screen is added to the window so Compose lifecycle owners are set. */
-    fun attachLifecycleOwners(lifecycleOwner: LifecycleOwner, savedStateOwner: SavedStateRegistryOwner) {
-        lyricsComposeView.setViewTreeLifecycleOwner(lifecycleOwner)
-        lyricsComposeView.setViewTreeSavedStateRegistryOwner(savedStateOwner)
-        (lifecycleOwner as? ViewModelStoreOwner)?.let { lyricsComposeView.setViewTreeViewModelStoreOwner(it) }
+        addView(artColumn, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).also {
+            it.gravity = Gravity.CENTER
+        })
     }
 
     fun update(info: NowPlayingInfo) {
@@ -247,7 +194,6 @@ class NowPlayingScreen @JvmOverloads constructor(
         if (info.durationSec > 0) {
             // Received explicit position from AirPlay SET_PARAMETER
             durationMs = (info.durationSec * 1000).toLong()
-            durationMsState = durationMs
             val newPosMs = (info.positionSec * 1000).toLong()
             val expectedMs = if (positionBaseEpoch > 0L)
                 positionBaseMs + (SystemClock.elapsedRealtime() - positionBaseEpoch)
@@ -268,19 +214,11 @@ class NowPlayingScreen @JvmOverloads constructor(
         timeRemaining.visibility = if (timerRunning) View.VISIBLE else View.GONE
     }
 
-    fun setLyrics(lines: List<LyricLine>) {
-        lyricsState = lines
-        lyricsComposeView.visibility = if (lines.isEmpty()) View.GONE else View.VISIBLE
-    }
-
     fun clear() {
         artwork.setImageDrawable(null)
-        lyricsState = emptyList()
-        lyricsComposeView.visibility = View.GONE
         positionBaseEpoch = 0L
         positionBaseMs = 0L
         durationMs = 0L
-        durationMsState = 0L
         currentTitle = null
         progressBar.progress = 0
         progressBar.visibility = View.GONE
@@ -316,15 +254,6 @@ class NowPlayingScreen @JvmOverloads constructor(
             maxLines = 2
             if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
         }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        if (h > 0) {
-            val lp = lyricsComposeView.layoutParams as LinearLayout.LayoutParams
-            lp.height = h
-            lyricsComposeView.layoutParams = lp
-        }
-    }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 }
