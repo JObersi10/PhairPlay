@@ -56,7 +56,10 @@ sourceSets {
                 // VideoDecoder is shadowed by src/stubs/VideoDecoder.kt which has no
                 // MediaCodec/Surface dependencies but exposes the companion-object
                 // members (parseSpsResolution, SpsBitReader) needed by VideoDecoderSpsTest.
-                "**/airplay/VideoDecoder.kt"
+                "**/airplay/VideoDecoder.kt",
+                // AirPlayVideoPlayer wraps ExoPlayer (androidx.media3) which is not
+                // available in the JVM test classpath.
+                "**/airplay/AirPlayVideoPlayer.kt"
             )
         }
     }
