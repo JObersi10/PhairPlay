@@ -163,7 +163,9 @@ android {
             "UnusedResources",
             // Advisory: the project deliberately supports a wide API range for old TVs;
             // targetSdk is bumped deliberately, not on every new platform release.
-            "OldTargetApi"
+            "OldTargetApi",
+            // Time and debug-URL strings are technical, not translatable UI text.
+            "SetTextI18n"
         )
     }
 

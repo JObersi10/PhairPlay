@@ -53,10 +53,10 @@ sourceSets {
                 // NetworkUtilsTest mocks ContentResolver which triggers android.os.Build
                 // via ContentResolver.<clinit> → SystemProperties.native_get (JNI).
                 "**/NetworkUtilsTest.kt",
-                // VideoDecoder is shadowed by src/stubs/VideoDecoder.kt which has no
-                // MediaCodec/Surface dependencies but exposes the companion-object
-                // members (parseSpsResolution, SpsBitReader) needed by VideoDecoderSpsTest.
-                "**/airplay/VideoDecoder.kt"
+                // VideoDecoder and AirPlayVideoPlayer are shadowed by stubs in
+                // src/stubs/ which strip Android/ExoPlayer dependencies.
+                "**/airplay/VideoDecoder.kt",
+                "**/airplay/AirPlayVideoPlayer.kt"
             )
         }
     }

@@ -16,6 +16,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "PhairPlay"
 include(":app")
-// test-runner excluded from device builds (requires Java 17 toolchain)
-// include(":test-runner")
-// project(":test-runner").projectDir = file("test-runner")
+include(":test-runner")
+project(":test-runner").projectDir = file("test-runner")
