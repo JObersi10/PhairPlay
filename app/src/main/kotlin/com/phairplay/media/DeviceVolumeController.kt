@@ -111,7 +111,20 @@ class DeviceVolumeController(context: Context) {
             Logger.w("Could not set device volume: ${it.message}")
         }.isSuccess
 
-        return VolumeReport(percent, step, maxStep, route, appliedToDevice = ok)
+        // setStreamVolume() returns normally even when the platform drops the change, so trusting
+        // it made the receiver claim success while nothing got quieter — and because a "successful"
+        // hardware change tells AirPlayReceiver to leave its software gain at unity, the slider did
+        // nothing at all. Read the index back: if it didn't move where we asked, report failure so
+        // software gain stays in charge.
+        val actual = runCatching { audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) }
+            .getOrDefault(-1)
+        val took = ok && actual == step
+        if (ok && !took) {
+            Logger.w("Device volume rejected: asked for $step/$maxStep, stream reports $actual " +
+                "— falling back to software gain")
+        }
+
+        return VolumeReport(percent, actual.coerceAtLeast(0), maxStep, route, appliedToDevice = took)
     }
 
     /** Current level as a report, without changing anything — used to seed the UI. */
