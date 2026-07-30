@@ -114,7 +114,7 @@ class PhairPlayService : Service() {
     val lastSender: StateFlow<LastSender?> = _lastSender.asStateFlow()
 
     private val deviceVolume by lazy { DeviceVolumeController(applicationContext) }
-    @Volatile private var senderVolumeMode: VolumeControlMode = VolumeControlMode.EXTERNAL_ONLY
+    @Volatile private var senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF
 
     private val _pairingPin = MutableStateFlow<String?>(null)
     val pairingPin: StateFlow<String?> = _pairingPin.asStateFlow()

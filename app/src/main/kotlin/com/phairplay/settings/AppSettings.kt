@@ -108,10 +108,15 @@ data class AppSettings(
 
     // ─── Volume ────────────────────────────────────────────────────────────
     /**
-     * Whether the sender's volume slider drives the real output level. See [VolumeControlMode] for
-     * why the default only takes over on external routes.
+     * Whether the sender's volume slider drives the real output level, or only the software gain on
+     * the decoded PCM. See [VolumeControlMode] for what each mode does.
+     *
+     * Defaults to [VolumeControlMode.OFF] — software gain always works, whereas driving the device
+     * volume proved unreliable on Fire OS even with MODIFY_AUDIO_SETTINGS granted and the route
+     * reporting itself as eligible (Bluetooth, `volumeFixed=false`). The other modes remain
+     * available for routes where the hardware does follow.
      */
-    val senderVolumeMode: VolumeControlMode = VolumeControlMode.EXTERNAL_ONLY,
+    val senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF,
 
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */

@@ -22,11 +22,13 @@ import com.phairplay.util.Logger
  *  - **The TV's own speakers** — generally does not. Fire TV delegates that to the panel over CEC or
  *    IR, which an app cannot drive, and [AudioManager.isVolumeFixed] reports true on those routes.
  *
- * Hence the default of [EXTERNAL_ONLY]: take over the hardware volume when the route can follow it,
- * and quietly fall back to software gain when it can't, rather than appearing to do nothing.
+ * In practice none of it proved dependable on this Fire TV. With MODIFY_AUDIO_SETTINGS granted and
+ * the route reporting itself as fully eligible — `route=Bluetooth volumeFixed=false eligible=true` —
+ * setStreamVolume moved the index and nothing got quieter. So [OFF] is the default: software gain on
+ * the decoded PCM always works, and the hardware modes stay available for routes that do follow.
  */
 enum class VolumeControlMode {
-    /** Never touch device volume — software gain only (the original behaviour). */
+    /** Never touch device volume — software gain only. The reliable default. */
     OFF,
 
     /** Drive device volume for Bluetooth and HDMI/external routes; software gain for TV speakers. */
@@ -37,7 +39,7 @@ enum class VolumeControlMode {
 
     companion object {
         fun fromKey(key: String?): VolumeControlMode =
-            entries.firstOrNull { it.name == key } ?: EXTERNAL_ONLY
+            entries.firstOrNull { it.name == key } ?: OFF
     }
 }
 
