@@ -18,6 +18,16 @@
 #define LOG_TAG "AlacJni"
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+/*
+ * Largest ALAC frame we will decode: 4096 samples (the biggest spf any AirPlay sender uses) at
+ * 2 channels / 16 bit, which is also the incompressible worst case. Real AirPlay frames are
+ * spf=352 → well under 1.5 KB.
+ */
+static constexpr uint32_t MAX_ALAC_FRAME_BYTES = 4096 * 2 * 2;
+
+/* Zeroed slack after the frame so Apple's unchecked bit-reader look-ahead stays in mapped memory. */
+static constexpr uint32_t ALAC_READAHEAD_PAD = 64;
+
 extern "C" {
 
 /*
@@ -72,26 +82,45 @@ Java_com_phairplay_airplay_handshake_AlacDecoder_nativeDecode(
     const jsize outCap = env->GetArrayLength(output);
     if (outCap < static_cast<jsize>(frameLength * numChannels * 2)) return -1;
 
-    jbyte *inBytes = env->GetByteArrayElements(input, nullptr);
-    if (inBytes == nullptr) return -1;
-    jbyte *outBytes = env->GetByteArrayElements(output, nullptr);
-    if (outBytes == nullptr) {
-        env->ReleaseByteArrayElements(input, inBytes, JNI_ABORT);
+    // Apple's ag_dec.c reads ahead past the current bit position without bounds checking
+    // (dyn_get_32bit pulls 32 bits plus look-ahead). Handing it a buffer sized exactly to the
+    // packet means one corrupt or truncated frame walks off the end of the allocation and takes
+    // the whole process down with SIGSEGV — observed as a page-aligned SEGV_MAPERR in
+    // dyn_get_32bit. Decode from a padded copy so any over-read lands in our own zeroed slack;
+    // the BitBuffer still gets the true length, so the decoder's own end-of-stream checks fire
+    // and Decode() returns an error we can report normally.
+    uint8_t padded[MAX_ALAC_FRAME_BYTES + ALAC_READAHEAD_PAD];
+    if (inputLen > static_cast<jint>(MAX_ALAC_FRAME_BYTES)) {
+        LOGE("ALAC frame too large: %d bytes", inputLen);
         return -1;
     }
+    env->GetByteArrayRegion(input, 0, inputLen, reinterpret_cast<jbyte *>(padded));
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return -1;
+    }
+    memset(padded + inputLen, 0, ALAC_READAHEAD_PAD);
+
+    jbyte *outBytes = env->GetByteArrayElements(output, nullptr);
+    if (outBytes == nullptr) return -1;
 
     BitBuffer bits;
-    BitBufferInit(&bits, reinterpret_cast<uint8_t *>(inBytes), static_cast<uint32_t>(inputLen));
+    BitBufferInit(&bits, padded, static_cast<uint32_t>(inputLen));
 
     uint32_t outNumSamples = 0;
     const int32_t status = decoder->Decode(
             &bits, reinterpret_cast<uint8_t *>(outBytes), frameLength, numChannels, &outNumSamples);
 
-    env->ReleaseByteArrayElements(input, inBytes, JNI_ABORT);
-
     if (status != 0) {
         env->ReleaseByteArrayElements(output, outBytes, JNI_ABORT);
         LOGE("ALACDecoder.Decode failed: %d", status);
+        return -1;
+    }
+    // Decode() reports how many samples it produced; a corrupt frame can claim more than the
+    // frameLength the output buffer was sized for, so clamp before trusting it downstream.
+    if (outNumSamples > frameLength) {
+        env->ReleaseByteArrayElements(output, outBytes, JNI_ABORT);
+        LOGE("ALAC decoded %u samples > frameLength %u — dropping frame", outNumSamples, frameLength);
         return -1;
     }
 

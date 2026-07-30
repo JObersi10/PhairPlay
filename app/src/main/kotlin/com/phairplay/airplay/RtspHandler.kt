@@ -953,7 +953,7 @@ open class RtspHandler(
                 body.substringAfter(":").trim().toFloatOrNull()?.let { v ->
                     currentVolume = v
                     onVolume(v)
-                    Logger.d("SET_PARAMETER volume=$v")
+                    Logger.i("SET_PARAMETER volume=$v")
                 }
             }
             body.startsWith("progress:") || body.contains("\nprogress:") -> {

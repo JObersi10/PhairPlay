@@ -177,6 +177,7 @@
     <string name="onboarding_prefs_pin_always">Yes, every time</string>
     <string name="onboarding_prefs_receivers">Receivers to run</string>
     <string name="onboarding_prefs_screensaver">Screensaver when idle</string>
+    <string name="onboarding_prefs_quality">Playback quality</string>
     <!-- Quit -->
     <string name="setting_quit">Quit PhairPlay</string>
     <string name="setting_quit_subtitle">Stops all receivers and closes the app</string>

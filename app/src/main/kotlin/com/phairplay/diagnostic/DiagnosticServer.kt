@@ -40,7 +40,10 @@ object DiagnosticServer {
                         }
                     }
                 }
-            }.onFailure { Logger.e("DiagnosticServer (dump) error", it) }
+            // stop() clears `started` before closing the socket, so a throw while stopped is the
+            // expected accept() interruption — logging it at ERROR flooded the ring buffer with
+            // stack traces on every clean shutdown.
+            }.onFailure { if (started) Logger.e("DiagnosticServer (dump) error", it) }
         }
         // Streaming tail server
         scope.launch(Dispatchers.IO) {
@@ -70,7 +73,7 @@ object DiagnosticServer {
                         }.onFailure { client.runCatching { close() } }
                     }
                 }
-            }.onFailure { Logger.e("DiagnosticServer (tail) error", it) }
+            }.onFailure { if (started) Logger.e("DiagnosticServer (tail) error", it) }
         }
     }
 }

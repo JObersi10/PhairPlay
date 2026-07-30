@@ -436,6 +436,10 @@ class PhairPlayService : Service() {
                 _videoPlaying.value = (info == null && _airPlayState.value == ProtocolState.CONNECTED)
                 if (info != null) {
                     val name = info.senderName.takeIf { it.isNotBlank() }
+                    // The name known at CONNECTED time is the RTSP User-Agent fallback ("AirPlay").
+                    // The sender's actual device name only arrives later in the now-playing plist,
+                    // so re-remember here — otherwise the Home card stays stuck on "AirPlay".
+                    if (name != null) rememberSender(name)
                     updateNotification(isRunning = true, streamingSenderName = name, artworkBytes = info.artwork)
                 }
             },
@@ -456,6 +460,7 @@ class PhairPlayService : Service() {
                         // Activity backgrounds, the SurfaceView destroys its Surface, and the
                         // rebuilt decoder stalls on awaitingKeyframe until the sender sends an IDR.
                         acquireStreamLocks()
+                        Logger.i("Volume capability: ${deviceVolume.describeCapability(senderVolumeMode)}")
                         rememberSender(pendingSenderName)
                         _videoPlaying.value = (_nowPlaying.value == null)
                         _activeConnection.value =
@@ -494,6 +499,15 @@ class PhairPlayService : Service() {
      */
     private fun rememberSender(name: String) {
         if (name.isBlank()) return
+        if (name == _lastSender.value?.name) return
+        // Within one session the generic fallback always arrives first and the real name second.
+        // Refuse the downgrade so a late generic emission can't undo the upgrade; across sessions
+        // (no active connection) a generic name is the best we have and is allowed through.
+        val isGeneric = name in GENERIC_SENDER_NAMES
+        if (isGeneric && _activeConnection.value != null &&
+            _lastSender.value?.name?.let { it !in GENERIC_SENDER_NAMES } == true) {
+            return
+        }
         val now = System.currentTimeMillis()
         _lastSender.value = LastSender(name, now)
         serviceScope.launch {
@@ -510,7 +524,7 @@ class PhairPlayService : Service() {
     private fun applySenderVolume(db: Float): Boolean {
         val report = deviceVolume.apply(db, senderVolumeMode)
         _volumeReport.value = report
-        Logger.d("Sender volume ${db}dB -> ${report.display}")
+        Logger.i("Sender volume ${db}dB -> ${report.display}")
         return report.appliedToDevice
     }
 
@@ -711,6 +725,12 @@ class PhairPlayService : Service() {
         const val ACTION_START    = "com.phairplay.action.START"
         const val ACTION_STOP     = "com.phairplay.action.STOP"
         const val ACTION_RESTART  = "com.phairplay.action.RESTART"
+
+        /**
+         * Placeholder names derived from the RTSP User-Agent rather than the sender itself. They
+         * are all we know until the now-playing plist arrives with the real device name.
+         */
+        private val GENERIC_SENDER_NAMES = setOf("AirPlay", "AirPlay Sender", "iTunes")
 
         private const val WAKE_LOCK_TAG = "PhairPlay:session"
         private const val WIFI_LOCK_TAG = "PhairPlay:advertising"

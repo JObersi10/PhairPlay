@@ -55,6 +55,9 @@ class TimingHandler {
     // The UDP socket — null when not running; @Volatile so stop() is visible to runLoop()
     @Volatile private var socket: DatagramSocket? = null
 
+    /** Set by [stop] before the socket is closed, so the receive loop knows the throw was intentional. */
+    @Volatile private var stopping = false
+
     /**
      * Estimated offset between our local clock and the sender's RTP timestamp clock,
      * in microseconds. Updated on every received timing probe.
@@ -90,6 +93,10 @@ class TimingHandler {
      * Safe to call before [start] or multiple times.
      */
     fun stop() {
+        // Set before close(): close() unblocks receive() immediately, so the loop's catch block can
+        // run and read `socket` before the null assignment below lands. That race is what made every
+        // clean shutdown log a full "Timing handler error (unexpected)" stack trace.
+        stopping = true
         try {
             socket?.close()
         } catch (e: Exception) {
@@ -124,7 +131,7 @@ class TimingHandler {
             }
         } catch (e: Exception) {
             // SocketException thrown when socket.close() is called from stop() — expected
-            if (socket != null) {
+            if (!stopping && socket != null) {
                 Logger.e("Timing handler error (unexpected)", e)
             } else {
                 Logger.d("Timing socket closed (expected during shutdown)")

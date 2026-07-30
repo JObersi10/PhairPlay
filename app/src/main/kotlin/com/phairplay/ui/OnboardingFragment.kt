@@ -302,6 +302,12 @@ class OnboardingFragment : Fragment() {
             R.string.setting_screensaver, isCheckbox = true,
             isSelectedProvider = { draft?.screensaverEnabled == true },
         ) { updateDraft { it.copy(screensaverEnabled = !it.screensaverEnabled) } }
+
+        addSectionLabel(R.string.onboarding_prefs_quality)
+        addChoiceRow(
+            R.string.setting_force_high_res, isCheckbox = true,
+            isSelectedProvider = { draft?.forceHighResolution == true },
+        ) { updateDraft { it.copy(forceHighResolution = !it.forceHighResolution) } }
     }
 
     private fun updateDraft(transform: (AppSettings) -> AppSettings) {

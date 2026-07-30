@@ -124,6 +124,24 @@ class DeviceVolumeController(context: Context) {
         return VolumeReport(percent, step, maxStep, describeRoute(), appliedToDevice = false)
     }
 
+    /**
+     * One-line description of whether this route can follow a sender's volume slider at all, for
+     * the log at session start. Without it, "volume doesn't work" is ambiguous between *the sender
+     * never sent a change* and *we received it but the route refused it*.
+     */
+    fun describeCapability(mode: VolumeControlMode): String {
+        val maxStep = runCatching { audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC) }
+            .getOrDefault(0)
+        val eligible = when (mode) {
+            VolumeControlMode.OFF           -> false
+            VolumeControlMode.ALWAYS        -> true
+            VolumeControlMode.EXTERNAL_ONLY -> isExternalRoute()
+        }
+        return "route=${describeRoute()} mode=$mode steps=$maxStep " +
+            "volumeFixed=${isVolumeFixed()} eligible=$eligible " +
+            "outputs=${outputTypes().joinToString(",")}"
+    }
+
     /** AirPlay sends −30 dB … 0 dB, with anything at or below −144 meaning muted. */
     private fun toFraction(airplayDb: Float): Float =
         if (airplayDb <= MUTE_DB) 0f else ((airplayDb - MIN_DB) / -MIN_DB).coerceIn(0f, 1f)
