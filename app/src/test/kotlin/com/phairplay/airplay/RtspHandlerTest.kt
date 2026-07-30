@@ -226,22 +226,27 @@ class RtspHandlerTest {
     }
 
     @Test
-    fun `TEARDOWN naming all streams ends the session`() {
+    fun `TEARDOWN naming all streams stops them but leaves the session open`() {
         val handler = createTestHandler()
         handler.seedActiveStreams(96, 110)
         handler.handleTeardownPublic(teardownRequest(teardownBody(96, 110)))
         assertTrue("audio should be stopped", audioStopped)
         assertTrue("video should be stopped", videoStopped)
-        assertTrue("session should end when the last stream is removed", streamingStopped)
+        // Only a bodyless TEARDOWN (or the socket closing) ends a session — see the single-stream
+        // case below for why.
+        assertFalse("stream-level teardown must not end the session", streamingStopped)
     }
 
     @Test
-    fun `TEARDOWN of the last remaining stream ends the session`() {
+    fun `TEARDOWN of the last remaining stream keeps the session alive for renegotiation`() {
         val handler = createTestHandler()
         handler.seedActiveStreams(110)
         handler.handleTeardownPublic(teardownRequest(teardownBody(110)))
         assertTrue("video should be stopped", videoStopped)
-        assertTrue("session should end when no streams remain", streamingStopped)
+        // iOS removes a stream and immediately adds a replacement on the same session. Ending the
+        // session here made the sender give up the instant audio started; a sender that is really
+        // finished closes the socket, and that path does the full cleanup.
+        assertFalse("stream-level teardown must not end the session", streamingStopped)
     }
 
     @Test

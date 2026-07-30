@@ -898,20 +898,19 @@ open class RtspHandler(
     open fun handleTeardownInternal(request: RtspRequest): RtspResponse {
         val streamTypes = parseTeardownStreamTypes(request.bodyBytes)
         if (streamTypes != null && streamTypes.isNotEmpty()) {
-            // Stream-level teardown: stop ONLY the listed streams. Keep the session (keys, NTP,
-            // event channel) alive so the remaining stream keeps running and a stopped one can be
-            // re-added later — e.g. audio keeps playing with video gone, or video keeps mirroring
-            // with audio stopped. But if this removes the LAST active stream (e.g. macOS names both
-            // 96 and 110 to end the session), fall through to a full teardown so cleanup isn't left
-            // to the eventual socket close.
+            // Stream-level teardown: stop ONLY the listed streams and keep the session (keys, NTP,
+            // event channel) alive, even when no streams remain. iOS renegotiates by removing a
+            // stream and immediately adding a replacement on the same session — it announces
+            // supportsDynamicStreamID and sends POST /audioMode just before. Treating an emptied
+            // stream list as "session over" tore the session down mid-renegotiation and the sender
+            // gave up, which looked like the receiver killing itself the instant audio started.
+            // When the sender really is finished it closes the socket, and that path already does
+            // the full cleanup.
             if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
             if (streamTypes.contains(110)) { onMirrorVideoStop(); activeStreamTypes.remove(110) }
             if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
-            if (activeStreamTypes.isNotEmpty()) {
-                Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
-                return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
-            }
-            Logger.i("TEARDOWN streams=$streamTypes — last stream removed, ending session")
+            Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
+            return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
         } else {
             Logger.i("TEARDOWN (session, body=${request.bodyBytes.size}B) — streaming stopping")
         }
