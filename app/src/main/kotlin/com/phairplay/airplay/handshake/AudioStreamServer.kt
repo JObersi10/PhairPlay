@@ -281,6 +281,7 @@ class AudioStreamServer(
         try {
             initDecoder()
             initAudioTrack()
+            awaitPrimedQueue()
             while (running) {
                 val payload = frameQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                 try {
@@ -289,6 +290,7 @@ class AudioStreamServer(
                 } catch (e: Exception) {
                     if (running) Logger.e("Audio: frame decode error", e)
                 }
+                resyncIfBacklogged()
             }
         } catch (e: Exception) {
             if (running) Logger.e("Audio playback error", e)
@@ -404,6 +406,39 @@ class AudioStreamServer(
         Logger.i("Audio decoder: ${if (isAacLc) "AAC-LC" else "AAC-ELD"} ${sampleRate}Hz x$channels (ct=$codecType)")
     }
 
+    /**
+     * Waits for a few frames to accumulate before decoding the first one.
+     *
+     * Starting on packet zero meant playback began with an empty pipeline, so the very first
+     * scheduling delay was already an underrun — the "choppy for the first second" symptom. Bounded
+     * by [PRIME_TIMEOUT_MS] so a sender that opens the stream and sends nothing can't stall here.
+     */
+    private fun awaitPrimedQueue() {
+        val deadline = System.currentTimeMillis() + PRIME_TIMEOUT_MS
+        while (running && frameQueue.size < PRIME_FRAMES && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5)
+        }
+        Logger.i("Audio: primed with ${frameQueue.size} frames before playback")
+    }
+
+    /**
+     * Drops the oldest frames when the queue is running persistently deep.
+     *
+     * AudioTrack.write with WRITE_BLOCKING paces at exactly realtime, so nothing ever drains an
+     * accumulated backlog: once playback falls ~700ms behind it stays there, and the queue's own
+     * overflow eviction becomes the only relief — one audible glitch per dropped frame, forever.
+     * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
+     */
+    private fun resyncIfBacklogged() {
+        if (frameQueue.size < RESYNC_HIGH_WATER) return
+        var dropped = 0
+        while (frameQueue.size > RESYNC_TARGET && frameQueue.poll() != null) dropped++
+        if (dropped > 0) {
+            qDropCount += dropped
+            Logger.i("Audio: backlog resync — dropped $dropped frames, queue=${frameQueue.size}")
+        }
+    }
+
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
     fun setVolume(airplayVolume: Float) {
         volumeGain = if (airplayVolume <= -144f) 0f else ((airplayVolume + 30f) / 30f).coerceIn(0f, 1f)
@@ -414,8 +449,15 @@ class AudioStreamServer(
         val channelMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
         val bytesPerSec = sampleRate * channels * 2
+        // A floor-sized buffer left no slack for scheduling hiccups: pressing Home destroys the
+        // Surface and busies the main thread, the writer misses its window, and the upstream queue
+        // hits its 96-frame ceiling and evicts (observed queue=89, qDrop=10 — audible glitches).
+        // The sender advertises latencyMin=11025 (250ms), so it expects far more buffering than the
+        // ~40ms floor. Take the larger of the floor and TARGET_BUFFER_MS.
+        val targetBytes = bytesPerSec * TARGET_BUFFER_MS / 1000
+        val bufferBytes = maxOf(minBuf, targetBytes)
         Logger.i("AudioTrack: minBuf=${minBuf}B (~${minBuf * 1000 / bytesPerSec}ms), " +
-            "buffer=${minBuf * 2}B (~${minBuf * 2 * 1000 / bytesPerSec}ms latency)")
+            "buffer=${bufferBytes}B (~${bufferBytes * 1000 / bytesPerSec}ms latency)")
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -430,10 +472,7 @@ class AudioStreamServer(
                     .setChannelMask(channelMask)
                     .build()
             )
-            // Minimum buffer for LOW LATENCY so audio lines up with the (immediately-rendered)
-            // video. The upstream dedup jitter queue absorbs network jitter, so AudioTrack itself
-            // only needs the floor. (If this underruns/crackles on load, raise toward minBuf*2.)
-            .setBufferSizeInBytes(minBuf)
+            .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             .also { it.setVolume(volumeGain); it.play() }
@@ -464,6 +503,17 @@ class AudioStreamServer(
 
         // Jitter buffer depth between the receive and playback threads (~1 s at 92 frames/s).
         private const val AUDIO_QUEUE_CAPACITY = 96
+
+        /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
+        private const val TARGET_BUFFER_MS = 300
+
+        /** Frames to accumulate before the first decode (~8ms each at spf=352). */
+        private const val PRIME_FRAMES = 12
+        private const val PRIME_TIMEOUT_MS = 400L
+
+        /** Backlog resync thresholds, in frames. High water is 2/3 of capacity. */
+        private const val RESYNC_HIGH_WATER = 64
+        private const val RESYNC_TARGET = 16
 
         // Sliding window of recently-played RTP sequence numbers for duplicate suppression.
         // ~11 s at 92 packets/s — far longer than any retransmit gap, far shorter than the

@@ -74,46 +74,34 @@ procedure. Needs the type-5 payload hex before anything can be attempted. Nothin
 was guessed at deliberately: decrypting an unknown payload type would desync the
 AES-CTR keystream.
 
-### Audio buffering — undersized (offered twice, user deferred both times)
+### Audio buffering — FIXED, unverified on device
 
-Causes two separate symptoms the user reported: choppy audio at session start, and
-glitching when pressing Home mid-session. Same root cause. **Not** an underpowered
-Fire TV — the user suspected that, and the stats rule it out.
+Caused both reported symptoms: choppy audio at session start, and glitching when
+pressing Home mid-session. Not an underpowered Fire TV — `dup 0%`, `resendReq=2`
+out of 5000 and a keeping-up decoder ruled that out.
 
-```
-AudioTrack: minBuf=7184B (~40ms), buffer=14368B (~81ms latency)
-Audio stats: recv=5000 dup=2 (0% dup) qDrop=10 resendReq=2 resendFill=2 queue=89
-```
+Evidence was `queue=89` against `AUDIO_QUEUE_CAPACITY = 96` (a frame count, not a
+percent — the trailing `%` in a pasted zsh log is the no-newline marker), i.e. a
+~710ms backlog while AudioTrack held ~40ms. `AudioTrack.write` with
+WRITE_BLOCKING paces at exactly realtime, so nothing drained that lead and the
+queue's overflow eviction became the only relief — one glitch per dropped frame.
 
-Read those numbers carefully:
+Three changes in `AudioStreamServer`:
 
-- `queue=89` is a **frame count**, not a percent — the format string is
-  `queue=${frameQueue.size}` and `AUDIO_QUEUE_CAPACITY` is 96. So the queue was
-  93% full. (In a pasted terminal log a trailing `%` is usually zsh's
-  no-newline marker, not part of the output. Cost time to notice.)
-- At 352 samples/frame, 89 queued frames is ~710 ms of audio backed up, while
-  AudioTrack holds only 81 ms.
-- `qDrop=10` is the overflow eviction at `AudioStreamServer:246` —
-  `frameQueue.poll()` then re-offer. Each eviction is an audible glitch.
-- `dup 0%` and `resendReq=2` out of 5000 mean the network is fine, and decode is
-  keeping up. A CPU-bound decoder would show a pinned queue and drops in the
-  hundreds.
+1. `TARGET_BUFFER_MS = 300` — the builder had `setBufferSizeInBytes(minBuf)` (~40ms)
+   while its own log line printed `minBuf * 2`, so the logged latency never matched
+   reality. Both now agree.
+2. `awaitPrimedQueue()` — accumulate `PRIME_FRAMES = 12` before the first decode,
+   bounded by `PRIME_TIMEOUT_MS`. Playback used to start on packet zero with an
+   empty pipeline, so the first scheduling delay was already an underrun.
+3. `resyncIfBacklogged()` — at `RESYNC_HIGH_WATER = 64` frames, drop down to
+   `RESYNC_TARGET = 16` in one go. One artefact instead of a permanent backlog.
 
-`AudioTrack.write` with `WRITE_BLOCKING` paces at exactly realtime, so once
-playback falls ~700 ms behind it stays there permanently — nothing drains the lead,
-and eviction is the only relief valve. Pressing Home tips it over: the Surface is
-destroyed, the main thread does teardown work, the writer thread is descheduled
-briefly, and 81 ms of slack isn't enough to absorb it.
-
-The sender advertises `latencyMin=11025, latencyMax=88200` — 250 ms to 2 s at
-44100 Hz. We run at a third of its stated *minimum*.
-
-Fix, all contained to `AudioStreamServer`:
-
-1. Size the AudioTrack buffer to ~250–400 ms instead of 81 ms.
-2. Prime several frames before calling `play()` rather than starting on packet zero.
-3. Add a high-water mark that resyncs when the queue runs persistently deep, so one
-   delay can't leave playback permanently behind.
+To verify: play audio, press Home, then check the stats line. Expect
+`buffer=...(~300ms latency)`, `queue=` well under 64, and `qDrop` flat. A
+`backlog resync` line is the safety net working, not a regression — but if it
+appears repeatedly, the producer is genuinely outrunning the consumer and needs a
+real clock-rate fix rather than periodic dropping.
 
 ### Not started
 
