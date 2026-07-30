@@ -74,21 +74,46 @@ procedure. Needs the type-5 payload hex before anything can be attempted. Nothin
 was guessed at deliberately: decrypting an unknown payload type would desync the
 AES-CTR keystream.
 
-### Audio choppiness at session start (offered, user deferred)
+### Audio buffering — undersized (offered twice, user deferred both times)
 
-The user reported it and asked whether it was their fault. It isn't.
+Causes two separate symptoms the user reported: choppy audio at session start, and
+glitching when pressing Home mid-session. Same root cause. **Not** an underpowered
+Fire TV — the user suspected that, and the stats rule it out.
 
 ```
 AudioTrack: minBuf=7184B (~40ms), buffer=14368B (~81ms latency)
+Audio stats: recv=5000 dup=2 (0% dup) qDrop=10 resendReq=2 resendFill=2 queue=89
 ```
 
-An 81 ms output buffer for Wi-Fi audio is very tight, and playback starts on the
-first packet with no jitter buffer — arrival timing paces playback directly. The
-sender advertises `latencyMin=11025, latencyMax=88200` (250 ms – 2 s at 44100 Hz),
-so it tolerates far more buffering than we use.
+Read those numbers carefully:
 
-Fix: size the AudioTrack buffer to a few hundred ms, and prime several packets
-before calling `play()`. Contained to `AudioStreamServer`.
+- `queue=89` is a **frame count**, not a percent — the format string is
+  `queue=${frameQueue.size}` and `AUDIO_QUEUE_CAPACITY` is 96. So the queue was
+  93% full. (In a pasted terminal log a trailing `%` is usually zsh's
+  no-newline marker, not part of the output. Cost time to notice.)
+- At 352 samples/frame, 89 queued frames is ~710 ms of audio backed up, while
+  AudioTrack holds only 81 ms.
+- `qDrop=10` is the overflow eviction at `AudioStreamServer:246` —
+  `frameQueue.poll()` then re-offer. Each eviction is an audible glitch.
+- `dup 0%` and `resendReq=2` out of 5000 mean the network is fine, and decode is
+  keeping up. A CPU-bound decoder would show a pinned queue and drops in the
+  hundreds.
+
+`AudioTrack.write` with `WRITE_BLOCKING` paces at exactly realtime, so once
+playback falls ~700 ms behind it stays there permanently — nothing drains the lead,
+and eviction is the only relief valve. Pressing Home tips it over: the Surface is
+destroyed, the main thread does teardown work, the writer thread is descheduled
+briefly, and 81 ms of slack isn't enough to absorb it.
+
+The sender advertises `latencyMin=11025, latencyMax=88200` — 250 ms to 2 s at
+44100 Hz. We run at a third of its stated *minimum*.
+
+Fix, all contained to `AudioStreamServer`:
+
+1. Size the AudioTrack buffer to ~250–400 ms instead of 81 ms.
+2. Prime several frames before calling `play()` rather than starting on packet zero.
+3. Add a high-water mark that resyncs when the queue runs persistently deep, so one
+   delay can't leave playback permanently behind.
 
 ### Not started
 
