@@ -190,6 +190,10 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         // Re-read on every foregrounding: the user may have just changed these in Settings.
         applyNowPlayingSettings()
+        // Start before binding. BIND_AUTO_CREATE on its own creates a bound-only service that never
+        // receives onStartCommand and dies at unbind, so the receiver only lived while this Activity
+        // was on screen. Both calls are idempotent.
+        ServiceController.start(this)
         // Bind so we can observe StateFlows and supply the video Surface
         val intent = Intent(this, PhairPlayService::class.java)
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import androidx.core.content.ContextCompat
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Binder
@@ -151,6 +152,17 @@ class PhairPlayService : Service() {
         createNotificationChannel()
         registerNetworkWatcher()
         DiagnosticServer.start(serviceScope)
+        // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
+        // starts the receivers and the service dies as soon as the last client unbinds — seen as
+        // "created" then "destroying" 200ms later, with no "Starting receivers" between them. That
+        // left the receiver running only while the Activity was on screen, so a sender could not
+        // connect in the background. Promote any bind-created instance to a properly started
+        // foreground service; onStartCommand is idempotent and the receivers guard against
+        // duplicate starts.
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, PhairPlayService::class.java).setAction(ACTION_START)
+        )
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
