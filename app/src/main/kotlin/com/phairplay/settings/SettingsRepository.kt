@@ -114,6 +114,7 @@ class SettingsRepository(private val context: Context) {
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
         showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
+        backQuitsApp       = this[Keys.BACK_QUITS_APP]           ?: false,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
@@ -137,6 +138,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
         this[Keys.START_ON_BOOT]        = settings.startOnBoot
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
+        this[Keys.BACK_QUITS_APP]       = settings.backQuitsApp
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
@@ -162,6 +164,7 @@ class SettingsRepository(private val context: Context) {
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")
         val START_ON_BOOT       = booleanPreferencesKey("start_on_boot")
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
+        val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")

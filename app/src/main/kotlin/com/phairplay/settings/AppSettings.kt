@@ -118,6 +118,14 @@ data class AppSettings(
      */
     val senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF,
 
+    /**
+     * When true, Back from the home screen stops the receiver and removes the app from the recents
+     * list, rather than just navigating away and leaving the service running in the background.
+     * Off by default — a background receiver is the point of the app — but useful while testing,
+     * where repeatedly backing out of a still-running app is a nuisance.
+     */
+    val backQuitsApp: Boolean = false,
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

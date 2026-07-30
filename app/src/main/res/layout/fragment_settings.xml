@@ -267,6 +267,11 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_back_quits"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
         <!-- ── Section: About ─────────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_about"

@@ -52,6 +52,28 @@ class NowPlayingScreen @JvmOverloads constructor(
     private var seekMultiplier = 1f
 
     // ── Idle screensaver state ───────────────────────────────────────────────
+    /** Debug HUD (Settings → "Debug overlay"), mirroring the one on [StreamingScreen]. */
+    private val debugView = TextView(context).apply {
+        setTextColor(Color.parseColor("#FF00FF66"))
+        setBackgroundColor(Color.parseColor("#A6000000"))
+        textSize = 13f
+        typeface = Typeface.MONOSPACE
+        setPadding(24, 16, 24, 16)
+        visibility = GONE
+    }
+
+    private val debugTick = object : Runnable {
+        override fun run() {
+            if (com.phairplay.airplay.StreamStats.overlayEnabled) {
+                debugView.visibility = VISIBLE
+                debugView.text = com.phairplay.airplay.StreamStats.summary()
+            } else if (debugView.visibility != GONE) {
+                debugView.visibility = GONE
+            }
+            handler.postDelayed(this, DEBUG_REFRESH_MS)
+        }
+    }
+
     // Declared above the init block so onVisibilityChanged can safely run before the views exist.
     private var screensaverEnabled = true
     private var screensaverDelayMs = DEFAULT_SCREENSAVER_MINUTES * 60_000L
@@ -292,6 +314,14 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         infoPanel = buildInfoPanel()
         addView(infoPanel)
+
+        // Same debug HUD as StreamingScreen. Audio-only sessions never show that screen, so with the
+        // overlay setting on there was nowhere for the stats to appear during AirPlay audio.
+        addView(debugView, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).also {
+            it.gravity = Gravity.TOP or Gravity.START
+            it.topMargin = DEBUG_MARGIN
+            it.leftMargin = DEBUG_MARGIN
+        })
 
         // Long titles scroll instead of clipping. Marquee only animates on a "selected" view, and
         // these are non-focusable, so selection is forced on once here rather than per update.
@@ -678,7 +708,14 @@ class NowPlayingScreen @JvmOverloads constructor(
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)
         if (changedView !== this) return
-        if (visibility == View.VISIBLE) notifyActivity() else cancelScreensaver()
+        if (visibility == View.VISIBLE) {
+            notifyActivity()
+            handler.removeCallbacks(debugTick)
+            handler.post(debugTick)
+        } else {
+            cancelScreensaver()
+            handler.removeCallbacks(debugTick)
+        }
     }
 
     /**
@@ -733,6 +770,10 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         /** Screensaver default, mirrored by AppSettings.screensaverTimeoutMin. */
         const val DEFAULT_SCREENSAVER_MINUTES = 15
+
+        /** Debug HUD refresh cadence and inset, matching StreamingScreen. */
+        private const val DEBUG_REFRESH_MS = 500L
+        private const val DEBUG_MARGIN = 32
 
         private const val FADE_TO_BLACK_MS = 2500L
         private const val WAKE_MS = 600L

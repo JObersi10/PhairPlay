@@ -58,6 +58,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
+    private lateinit var rowBackQuits: View
     private lateinit var rowForceHighRes: View
     private lateinit var rowRememberPin: View
     private lateinit var rowForgetPairings: LinearLayout
@@ -105,6 +106,7 @@ class SettingsFragment : Fragment() {
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
+        rowBackQuits        = view.findViewById(R.id.row_back_quits)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         rowRememberPin      = view.findViewById(R.id.row_remember_pin)
         rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
@@ -140,6 +142,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
+        configureToggleRow(rowBackQuits,    R.string.setting_back_quits,         R.string.setting_back_quits_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
         textVersionValue.text = BuildConfig.VERSION_NAME
@@ -206,6 +209,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
+        setToggle(rowBackQuits, settings.backQuitsApp)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
         showSenderVolumeMode(settings.senderVolumeMode)
@@ -277,6 +281,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
+        setToggleListener(rowBackQuits) { enabled -> save { it.copy(backQuitsApp = enabled) } }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }

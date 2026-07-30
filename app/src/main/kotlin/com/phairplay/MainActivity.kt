@@ -77,6 +77,9 @@ class MainActivity : AppCompatActivity() {
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
     private var currentVideoPlaying = false
+
+    /** Cached copy of AppSettings.backQuitsApp — onBackPressed can't suspend to read DataStore. */
+    private var backQuitsApp = false
     private var isSeekActive = false
 
     // True while a stream is on screen — used to detect the active→idle edge in trackSessionEnd().
@@ -220,6 +223,14 @@ class MainActivity : AppCompatActivity() {
         ) {
             Timber.d("Back pressed during session — ending AirPlay session")
             service?.endCurrentSession()
+            return
+        }
+        // Settings → "Back exits PhairPlay": stop the receiver and drop the task instead of leaving
+        // a background service behind. Same effect as the Quit row, without the dialog.
+        if (backQuitsApp) {
+            Timber.d("Back pressed with backQuitsApp — stopping service and finishing task")
+            ServiceController.stop(this)
+            finishAndRemoveTask()
             return
         }
         @Suppress("DEPRECATION")
@@ -443,6 +454,9 @@ class MainActivity : AppCompatActivity() {
             nowPlayingScreen.setScreensaverConfig(
                 settings.screensaverEnabled, settings.screensaverTimeoutMin
             )
+            // Cached because onBackPressed is synchronous and can't await DataStore. Re-read on every
+            // resume, so toggling the setting takes effect without restarting the app.
+            backQuitsApp = settings.backQuitsApp
         }
     }
 
