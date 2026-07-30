@@ -376,8 +376,16 @@ class AudioStreamServer(
             // macOS sends ALAC (lossless) for system-audio AirPlay regardless of our advertised
             // formats, and this TV has no hardware ALAC codec — so we decode in software via the
             // bundled Apple ALAC decoder (libalac.so). frameLength comes from the SETUP spf.
-            alac = AlacDecoder(sampleRate, channels, framesPerPacket)
-            Logger.i("Audio decoder: ALAC ${sampleRate}Hz x$channels spf=$framesPerPacket (ct=2)")
+            // System.loadLibrary throws UnsatisfiedLinkError — an Error, not an Exception, so the
+            // playback loop's `catch (e: Exception)` let it kill the whole app when the packaged
+            // libalac.so was unreadable. Silence beats a crash: the session stays up, and the log
+            // says why there is no audio.
+            alac = runCatching { AlacDecoder(sampleRate, channels, framesPerPacket) }
+                .onFailure { Logger.e("ALAC decoder unavailable — audio will be silent", it) }
+                .getOrNull()
+            if (alac != null) {
+                Logger.i("Audio decoder: ALAC ${sampleRate}Hz x$channels spf=$framesPerPacket (ct=2)")
+            }
             return
         }
         // ct=8 AAC-ELD (mirroring, spf 480) vs ct=4 AAC-LC (audio-only / Apple Music, spf 1024).
