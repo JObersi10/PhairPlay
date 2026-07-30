@@ -153,6 +153,14 @@ class MainActivity : AppCompatActivity() {
                 navPanelVisible(true)
                 navigateTo(HomeFragment(), navItemHome)
                 requestNotificationPermission()
+                // The receivers started in onCreate, seconds before onboarding wrote the user's
+                // answers, so they are still running on pre-onboarding defaults — a chosen PIN
+                // showed up in DataStore while the RTSP handler kept logging pinAuth=false. Restart
+                // so every choice on the preferences page actually takes effect now, not on the next
+                // launch. Same for the screensaver and high-resolution settings.
+                Timber.i("Onboarding finished — restarting receivers to pick up chosen settings")
+                ServiceController.restart(this)
+                applyNowPlayingSettings()
             }
         }
         supportFragmentManager.beginTransaction()

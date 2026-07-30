@@ -102,7 +102,10 @@ before calling `play()`. Contained to `AudioStreamServer`.
   see `CLAUDE.md`. It can in principle corrupt source files too — if a file starts
   behaving impossibly, check `git status` before debugging the logic.
 - **Nothing is pushed.** The user has not asked for it.
-- The user's `pinAuth` choice reads `false` in the last log. They believe PIN auth
-  is on and said not to worry about it, but the flag reflects
-  `airPlayPinAuthEnabled`, not remembered-pairing state — so it is genuinely off.
-  Worth confirming with them rather than assuming.
+- **Resolved:** the `pinAuth=false` log line was not a wrong setting. DataStore held
+  `airplay_pin_auth` as `12 02 08 01` (true) — the user's choice saved fine. The
+  receivers had simply started in `onCreate` nine seconds before onboarding wrote
+  the answers, and nothing restarted them. Fixed by restarting the service from
+  `onFinished`. The user was right and the log was right; only the ordering was
+  wrong. Worth remembering that "the setting didn't save" and "the setting saved but
+  nothing re-read it" look identical from a log line.
