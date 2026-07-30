@@ -65,7 +65,7 @@ class HomeFragment : Fragment() {
     private lateinit var dotServiceState: View
     private lateinit var cardAirPlay: View
     private lateinit var cardMiracast: View
-    private lateinit var cardCast: View
+    private lateinit var cardDlna: View
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
     private lateinit var btnRestart: Button
@@ -104,7 +104,7 @@ class HomeFragment : Fragment() {
         dotServiceState  = view.findViewById(R.id.dot_service_state)
         cardAirPlay      = view.findViewById(R.id.card_airplay)
         cardMiracast     = view.findViewById(R.id.card_miracast)
-        cardCast         = view.findViewById(R.id.card_cast)
+        cardDlna         = view.findViewById(R.id.card_dlna)
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
@@ -117,7 +117,7 @@ class HomeFragment : Fragment() {
     private fun configureProtocolCards() {
         setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
         setupCard(cardMiracast,  R.drawable.ic_miracast, R.string.protocol_miracast)
-        setupCard(cardCast,      R.drawable.ic_cast,     R.string.protocol_cast)
+        setupCard(cardDlna,      R.drawable.ic_cast,     R.string.protocol_dlna)
     }
 
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
@@ -167,13 +167,22 @@ class HomeFragment : Fragment() {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state -> updateProtocolCard(cardAirPlay, state) }
+            svc.airPlayState.collectLatest { state ->
+                airPlayState = state
+                updateProtocolCard(cardAirPlay, state, showLastSender = true)
+            }
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.miracastState.collectLatest { state -> updateProtocolCard(cardMiracast, state) }
         }
         viewLifecycleOwner.lifecycleScope.launch {
-            svc.castState.collectLatest { state -> updateProtocolCard(cardCast, state) }
+            svc.dlnaState.collectLatest { state -> updateProtocolCard(cardDlna, state) }
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            svc.lastSender.collectLatest { sender ->
+                lastSender = sender
+                updateProtocolCard(cardAirPlay, airPlayState, showLastSender = true)
+            }
         }
     }
 
@@ -192,13 +201,31 @@ class HomeFragment : Fragment() {
         dotServiceState.background.setTint(requireContext().getColor(colorRes))
     }
 
+    /** Coarse "2h ago" style age — precision past the hour is noise on a status card. */
+    private fun relativeTime(atMs: Long): String {
+        if (atMs <= 0L) return getString(R.string.last_sender_just_now)
+        val minutes = (System.currentTimeMillis() - atMs) / 60_000L
+        return when {
+            minutes < 1    -> getString(R.string.last_sender_just_now)
+            minutes < 60   -> "${minutes}m ago"
+            minutes < 1440 -> "${minutes / 60}h ago"
+            else           -> "${minutes / 1440}d ago"
+        }
+    }
+
     /**
      * Updates a single protocol status card with the current [ProtocolState].
      *
      * @param card      The card root view (cardAirPlay, cardMiracast, or cardCast).
      * @param state     The current state of this protocol.
      */
-    private fun updateProtocolCard(card: View, state: ProtocolState) {
+    /** Latest AirPlay state, kept so the last-sender line can be re-rendered on its own. */
+    private var airPlayState: ProtocolState = ProtocolState.DISABLED
+    private var lastSender: com.phairplay.service.PhairPlayService.LastSender? = null
+
+    private fun updateProtocolCard(
+        card: View, state: ProtocolState, showLastSender: Boolean = false
+    ) {
         val dot    = card.findViewById<View>(R.id.dot_protocol_status)
         val stateText = card.findViewById<TextView>(R.id.text_protocol_state)
         val detail = card.findViewById<TextView>(R.id.text_protocol_detail)
@@ -211,7 +238,15 @@ class HomeFragment : Fragment() {
         }
 
         stateText.setText(stateRes)
-        detail.setText(detailRes)
+        // While idle, naming the device we last saw is more reassuring than "Waiting for sender…".
+        val sender = lastSender
+        if (showLastSender && state == ProtocolState.ADVERTISING && sender != null) {
+            detail.text = getString(
+                R.string.protocol_detail_last_sender, sender.name, relativeTime(sender.atMs)
+            )
+        } else {
+            detail.setText(detailRes)
+        }
         dot.background.setTint(requireContext().getColor(colorRes))
     }
 }

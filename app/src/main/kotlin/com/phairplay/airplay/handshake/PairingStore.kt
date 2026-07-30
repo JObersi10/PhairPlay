@@ -29,6 +29,24 @@ class PairingStore(context: Context) {
     // A 4–8 digit PIN is low-entropy, so the real defence against guessing is bounding the number of
     // failed pair-setup attempts. The count is persistent (survives reconnect/restart) and only a
     // successful pairing resets it, mirroring HAP's "lock out until reset" behaviour.
+    /**
+     * Records that a PIN pairing succeeded on this receiver, so later connections can skip the code.
+     *
+     * Receiver-level rather than per-sender: the legacy AirPlay PIN exchange is SRP spread across
+     * separate TCP connections and exposes no stable controller identity at the point pair-verify is
+     * gated, so there is nothing to key a per-device record on. See AppSettings.rememberPinPairing.
+     */
+    fun setPinTrusted() {
+        prefs.edit().putBoolean(KEY_PIN_TRUSTED, true).apply()
+    }
+
+    fun isPinTrusted(): Boolean = prefs.getBoolean(KEY_PIN_TRUSTED, false)
+
+    /** Forgets every pairing and the PIN-trust marker — the "forget paired senders" action. */
+    fun clearAll() {
+        prefs.edit().clear().apply()
+    }
+
     fun failedAttempts(): Int = prefs.getInt(KEY_FAILS, 0)
 
     fun recordFailedAttempt(): Int {
@@ -48,5 +66,6 @@ class PairingStore(context: Context) {
         private const val PREFS = "phairplay_pairings"
         private const val KEY_PREFIX = "ltpk_"
         private const val KEY_FAILS = "pair_failed_attempts"
+        private const val KEY_PIN_TRUSTED = "pin_trusted"
     }
 }

@@ -59,9 +59,17 @@ class AirPlayReceiver(
     private val audioEnabled: Boolean = false,
     /** Require HomeKit-style SRP PIN pairing before streaming (AppSettings.airPlayPinAuthEnabled). */
     private val pinAuthEnabled: Boolean = false,
+    /** Whether a previously PIN-paired sender may skip the code (AppSettings.rememberPinPairing). */
+    private val rememberPinPairing: Boolean = true,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
+    /**
+     * Offered every sender volume change (dB, −30…0). Return true if the level was applied to the
+     * output device, in which case the software gain stays at unity so the two don't compound —
+     * a 50% slider must not become 25% by being attenuated twice.
+     */
+    private val onVolumeRequest: (Float) -> Boolean = { false },
     /**
      * Called with the sender name when a streaming session starts (RECORD received).
      *
@@ -90,6 +98,7 @@ class AirPlayReceiver(
      * surface; emits null when video is mirroring (the video screen takes over) or audio stops.
      */
     private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
+    private val onEnergyChanged: (Float) -> Unit = {},
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
     private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
@@ -133,6 +142,8 @@ class AirPlayReceiver(
     @Volatile private var videoPlaying = false
     @Volatile private var streamingStopped = false
     @Volatile private var npSenderName = "AirPlay"
+    @Volatile private var npSenderDeviceType = SenderDeviceType.UNKNOWN
+    @Volatile private var npPaused = false
     @Volatile private var npTitle: String? = null
     @Volatile private var npArtist: String? = null
     @Volatile private var npAlbum: String? = null
@@ -236,20 +247,26 @@ class AirPlayReceiver(
             onMirrorVideoStop = { stopMirrorVideo() },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
-            onVolume = { v -> audioServer?.setVolume(v) },
+            onVolume = { v ->
+                // 0f is 0 dB, i.e. unity gain — the right software setting when the hardware is
+                // doing the attenuation for us.
+                audioServer?.setVolume(if (onVolumeRequest(v)) 0f else v)
+            },
             onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
+                val changed = title != npTitle || artist != npArtist || album != npAlbum
                 npTitle = title; npArtist = artist; npAlbum = album
                 npGenre = genre; npComposer = composer; npYear = year
                 if (durationMs != null && durationMs > 0) npDurationFromDmap = durationMs / 1000.0
-                emitNowPlaying()
+                if (changed) emitNowPlaying()
             },
             onArtwork = { bytes ->
                 npArtwork = bytes.takeIf { it.isNotEmpty() }
                 emitNowPlaying()
             },
             onPlaybackPosition = { pos, dur ->
+                val changed = kotlin.math.abs(pos - npPositionSec) > 2.0 || dur != npDurationSec
                 npPositionSec = pos; npDurationSec = dur
-                emitNowPlaying()
+                if (changed) emitNowPlaying()
             },
             onVideoPlay = { url, start -> startUrlVideo(url, start) },
             onVideoRate = { rate -> urlVideoPlayer?.setRate(rate) },
@@ -258,8 +275,15 @@ class AirPlayReceiver(
             onPlaybackInfo = { urlVideoPlayer?.info() },
             onRemoteControlInfo = { dacpId, activeRemote -> dacpClient.configure(dacpId, activeRemote) },
             pinAuthEnabled = pinAuthEnabled,
+            rememberPinPairing = rememberPinPairing,
             pairingStore = pairingStore,
-            onShowPin = { pin -> onPinChanged(pin) }
+            onShowPin = { pin -> onPinChanged(pin) },
+            onPlaybackPaused = { paused -> npPaused = paused; emitNowPlaying() },
+            onSenderInfoChanged = { name, type ->
+                if (name.isNotBlank()) npSenderName = name
+                npSenderDeviceType = type
+                emitNowPlaying()
+            }
         ).also { it.start(scope) }
         Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
     }
@@ -286,6 +310,7 @@ class AirPlayReceiver(
                 // Legacy (SDP) session: reflect its stream kinds into now-playing state so an
                 // audio-only RAOP session shows the now-playing card.
                 npSenderName = session.senderName.ifBlank { npSenderName }
+                npSenderDeviceType = session.senderDeviceType
                 videoPlaying = session.hasVideo
                 audioPlaying = session.hasAudio
                 emitNowPlaying()
@@ -479,7 +504,7 @@ class AirPlayReceiver(
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket, onEnergy = { e -> onEnergyChanged(e) })
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()
@@ -594,10 +619,14 @@ class AirPlayReceiver(
         val show = audioPlaying && !videoPlaying
         onNowPlayingChanged(
             if (show) NowPlayingInfo(
-                npSenderName, npTitle, npArtist, npAlbum,
-                npGenre, npComposer, npYear, npArtwork,
-                npPositionSec,
-                if (npDurationSec > 0) npDurationSec else npDurationFromDmap
+                senderName = npSenderName,
+                senderDeviceType = npSenderDeviceType,
+                title = npTitle, artist = npArtist, album = npAlbum,
+                genre = npGenre, composer = npComposer, year = npYear,
+                artwork = npArtwork,
+                positionSec = npPositionSec,
+                durationSec = if (npDurationSec > 0) npDurationSec else npDurationFromDmap,
+                paused = npPaused
             ) else null
         )
     }
@@ -606,13 +635,20 @@ class AirPlayReceiver(
     private fun clearNowPlayingMetadata() {
         npTitle = null; npArtist = null; npAlbum = null
         npGenre = null; npComposer = null; npYear = null
-        npArtwork = null; npDurationFromDmap = 0.0
+        npArtwork = null; npDurationFromDmap = 0.0; npPaused = false
     }
 
     // ─── Private: state emission ─────────────────────────────────────────────
 
     /** Dispatches [state] on the Main thread (Android UI rule). */
     private fun emitState(state: ProtocolState) {
+        // Re-arm the one-shot teardown guard whenever a new session begins. onStreamingStarted()
+        // also clears it, but that only runs for legacy SDP/RECORD sessions — AirPlay 2 mirroring
+        // reaches CONNECTED via startMirrorKeys() and never touched the flag. The result was that
+        // the second and every later mirror session hit `if (streamingStopped) return` in
+        // onStreamingStopped(), never emitted ADVERTISING, and left the UI stuck on a black
+        // StreamingScreen. Resetting here covers every path that can start a session.
+        if (state == ProtocolState.CONNECTED) streamingStopped = false
         scope.launch {
             withContext(Dispatchers.Main) {
                 onStateChanged(state)

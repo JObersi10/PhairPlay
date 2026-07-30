@@ -98,7 +98,7 @@
             android:layout_height="72dp" />
 
         <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_cast"
+            android:id="@+id/row_dlna"
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
@@ -118,6 +118,126 @@
             android:id="@+id/row_pin_auth"
             android:layout_width="match_parent"
             android:layout_height="72dp" />
+
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_remember_pin"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
+        <LinearLayout
+            android:id="@+id/row_forget_pairings"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:background="@drawable/focus_ring_selector"
+            android:focusable="true">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/setting_forget_pairings"
+                android:textColor="@color/text_primary"
+                android:textSize="18sp" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_chevron_right"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
+
+        <!-- ── Section: Now Playing ───────────────────────────── -->
+        <include layout="@layout/settings_section_header"
+            android:id="@+id/header_now_playing"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp" />
+
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_screensaver"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
+        <!-- Sender volume mode — opens a picker -->
+        <LinearLayout
+            android:id="@+id/row_sender_volume"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:background="@drawable/focus_ring_selector"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_sender_volume"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/text_sender_volume_value"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_chevron_right"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
+
+        <!-- Screensaver timeout — opens a picker, so it mirrors the display-name row -->
+        <LinearLayout
+            android:id="@+id/row_screensaver_timeout"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:background="@drawable/focus_ring_selector"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_screensaver_timeout"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:id="@+id/text_screensaver_timeout_value"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_chevron_right"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
 
         <!-- ── Section: Service ───────────────────────────────── -->
         <include layout="@layout/settings_section_header"
@@ -196,6 +316,33 @@
                 android:text="@string/setting_reset_defaults"
                 android:textColor="@color/status_stopped"
                 android:textSize="18sp" />
+        </LinearLayout>
+
+        <!-- Quit — last item, deliberately after Reset -->
+        <LinearLayout
+            android:id="@+id/row_quit"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:orientation="vertical"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/focus_ring_selector"
+            android:focusable="true">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/setting_quit"
+                android:textColor="@color/status_stopped"
+                android:textSize="18sp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/setting_quit_subtitle"
+                android:textColor="@color/text_secondary"
+                android:textSize="14sp" />
         </LinearLayout>
 
     </LinearLayout>

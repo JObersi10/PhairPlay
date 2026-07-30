@@ -46,8 +46,10 @@ class AudioStreamServer(
     aesIv: ByteArray,
     private val sampleRate: Int,
     private val channels: Int,
-    private val codecType: Int = CT_AAC_ELD,   // SETUP ct: 8 = AAC-ELD (mirror), 4 = AAC-LC (audio-only)
-    private val framesPerPacket: Int = DEFAULT_ALAC_FRAMES,   // SETUP spf — ALAC frameLength (352)
+    private val codecType: Int = CT_AAC_ELD,
+    private val framesPerPacket: Int = DEFAULT_ALAC_FRAMES,
+    /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
+    val onEnergy: (Float) -> Unit = {},
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
@@ -180,9 +182,11 @@ class AudioStreamServer(
                 }
                 handleRtpPacket(packet.data, 0, packet.length)
                 StreamStats.audioQueue = frameQueue.size
-                if (recv % 500 == 0) {
+                // Every 500 packets is roughly every 4s — enough to flush a whole day of real
+                // events out of the diagnostic ring buffer. Sample 10x less often, at debug level.
+                if (recv % 5000 == 0) {
                     StreamStats.audioDupPct = dupCount * 100 / (recv + dupCount)
-                    Logger.i("Audio stats: recv=$recv dup=$dupCount (${StreamStats.audioDupPct}% dup) " +
+                    Logger.d("Audio stats: recv=$recv dup=$dupCount (${StreamStats.audioDupPct}% dup) " +
                         "qDrop=$qDropCount resendReq=$resendReqCount resendFill=$resendFillCount queue=${frameQueue.size}")
                 }
             }
@@ -307,6 +311,7 @@ class AudioStreamServer(
         val pcm = alac?.decode(frame) ?: return
         if (firstPcm) { Logger.i("Audio: first decoded ALAC PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
         audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+        emitEnergy(pcm)
     }
 
     /** True if this RTP sequence was already processed (a redundant retransmission). */
@@ -344,9 +349,26 @@ class AudioStreamServer(
             // Blocking write paces playback to the audio clock and drops no PCM. Safe here because
             // this runs on the dedicated playback thread, not the socket-receive thread.
             audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+            emitEnergy(pcm)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
         }
+    }
+
+    private var lastEnergyMs = 0L
+    private fun emitEnergy(pcm: ByteArray) {
+        val now = System.currentTimeMillis()
+        if (now - lastEnergyMs < 100) return
+        lastEnergyMs = now
+        var sum = 0.0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            val s = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()
+            sum += s * s.toDouble()
+            i += 2
+        }
+        val rms = if (i > 0) Math.sqrt(sum / (i / 2)) / 32768.0 else 0.0
+        onEnergy(rms.toFloat().coerceIn(0f, 1f))
     }
 
     private fun initDecoder() {

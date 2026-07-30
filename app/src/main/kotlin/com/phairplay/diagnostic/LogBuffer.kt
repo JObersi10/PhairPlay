@@ -13,11 +13,38 @@ object LogBuffer {
     private val fmt = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
     private var logFile: File? = null
     private var fileLineCount = 0
+    private var previousSession: String = ""
 
     fun init(filesDir: File) {
-        logFile = File(filesDir, "phairplay.log").also { f ->
-            fileLineCount = if (f.exists()) f.readLines().size else 0
+        val f = File(filesDir, "phairplay.log")
+        if (f.exists()) {
+            val lines = f.readLines()
+            previousSession = last5Seconds(lines)
+            f.delete()
+            fileLineCount = 0
         }
+        logFile = f
+    }
+
+    private fun last5Seconds(lines: List<String>): String {
+        if (lines.isEmpty()) return ""
+        val lastTs = parseTs(lines.last()) ?: return lines.takeLast(50).joinToString("\n")
+        val cutoff = lastTs - 5000L
+        return lines.filter { line ->
+            val ts = parseTs(line)
+            ts == null || ts >= cutoff
+        }.joinToString("\n")
+    }
+
+    private fun parseTs(line: String): Long? {
+        if (line.length < 12) return null
+        return runCatching {
+            val parts = line.substring(0, 12).split(":", ".")
+            if (parts.size < 4) return null
+            val h = parts[0].toLong(); val m = parts[1].toLong()
+            val s = parts[2].toLong(); val ms = parts[3].toLong()
+            h * 3600000 + m * 60000 + s * 1000 + ms
+        }.getOrNull()
     }
 
     fun add(msg: String) {
@@ -39,7 +66,12 @@ object LogBuffer {
         }
     }
 
-    fun dump(): String = synchronized(buf) { buf.joinToString("\n") }
+    fun dump(): String {
+        val current = synchronized(buf) { buf.joinToString("\n") }
+        return if (previousSession.isNotEmpty())
+            "---- PREVIOUS SESSION ----\n$previousSession\n---- CURRENT SESSION ----\n$current"
+        else current
+    }
 
     fun size(): Int = synchronized(buf) { buf.size }
 
@@ -47,10 +79,6 @@ object LogBuffer {
         val lines = if (fromIndex < buf.size) buf.subList(fromIndex, buf.size).toList() else emptyList()
         Pair(lines, buf.size)
     }
-
-    fun readFile(): String = logFile?.takeIf { it.exists() }?.readText() ?: ""
-
-    fun clearFile() { logFile?.delete() }
 
     class Tree : Timber.Tree() {
         private val levels = mapOf(2 to "V", 3 to "D", 4 to "I", 5 to "W", 6 to "E")

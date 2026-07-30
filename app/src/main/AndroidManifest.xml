@@ -25,9 +25,17 @@
     <!-- Network permissions — local LAN only, no internet required -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <!-- Grants the background-activity-launch exemption so PhairPlayService can open
+         MainActivity directly when a sender connects. Without this, Android 10+ blocks the
+         start and auto-open silently degrades to a heads-up notification. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Keeps the CPU awake for the length of a session. Fire TV suspends the SoC when nothing is
+         drawing, which stalls the mirror decoder and glitches audio mid-stream. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Foreground service — keeps receiver alive when app is in background -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -74,7 +82,8 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.PhairPlay"
-        android:supportsRtl="true">
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config">
 
         <!--
             MainActivity is the single entry point for the app.
@@ -92,7 +101,8 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:screenOrientation="landscape"
-            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize"
+            android:supportsPictureInPicture="true"
             android:theme="@style/Theme.PhairPlay.Fullscreen">
 
             <!-- Makes the app launchable from the TV home screen -->

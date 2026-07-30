@@ -63,6 +63,9 @@ class MirrorStreamServer(
     // frames until the next keyframe (IDR) so it never decodes a reference-broken, corrupt stream.
     @Volatile private var awaitingKeyframe = false
 
+    /** Caps the verbose unknown-payload dump so a long session doesn't flood the log buffer. */
+    private var unknownTypeLogged = 0
+
     /** The OS-assigned TCP port macOS should connect to (returned in the SETUP response). */
     val dataPort: Int get() = serverSocket.localPort
 
@@ -106,7 +109,20 @@ class MirrorStreamServer(
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
                     1 -> parseConfig(payload)?.let { enqueue(it) }
-                    else -> Logger.v("Mirror: ignoring payload type $payloadType ($payloadSize B)")
+                    else -> {
+                        // Deliberately NOT decrypted or enqueued: the AES-CTR keystream must advance
+                        // exactly once per real video payload, and feeding an unknown type through
+                        // cipher.update() would desync it and corrupt every later frame. Log enough
+                        // to identify what these are — iOS 26 senders deliver the bulk of the stream
+                        // as type 5, which is why mirroring freezes after the first frame.
+                        if (unknownTypeLogged < UNKNOWN_TYPE_LOG_LIMIT) {
+                            unknownTypeLogged++
+                            Logger.i("Mirror: UNHANDLED payload type=$payloadType size=$payloadSize " +
+                                "hdr=${hex(header, 0, 32)} body=${hex(payload, 0, 24)}")
+                        } else {
+                            Logger.v("Mirror: ignoring payload type $payloadType ($payloadSize B)")
+                        }
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -202,8 +218,17 @@ class MirrorStreamServer(
         // SurfaceView made a new Surface). Without this, video stays black after foregrounding.
         val liveSurface = surfaceProvider()
         if (liveSurface !== configuredSurface) {
-            Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — re-attaching decoder")
-            rebuildDecoder(liveSurface)
+            // Prefer retargeting the existing codec: a rebuild resets reference state and stalls on
+            // awaitingKeyframe until the sender's next IDR, which is the black-screen-for-seconds
+            // effect after coming back from Home. Only rebuild if the swap isn't possible.
+            val swapped = liveSurface != null && decoder?.setOutputSurface(liveSurface) == true
+            if (swapped) {
+                configuredSurface = liveSurface
+                Logger.i("Mirror: surface changed — retargeted decoder in place (no keyframe wait)")
+            } else {
+                Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — rebuilding decoder")
+                rebuildDecoder(liveSurface)
+            }
         }
         val d = decoder ?: return                              // need surface + SPS/PPS first
         if (!d.isHealthy) {                                    // error state — drop, await next config
@@ -247,6 +272,13 @@ class MirrorStreamServer(
         return surfaceProvider()
     }
 
+    /** Hex dump helper for the unknown-payload diagnostic. */
+    private fun hex(b: ByteArray, from: Int, len: Int): String {
+        val end = minOf(from + len, b.size)
+        if (from >= end) return ""
+        return (from until end).joinToString(" ") { "%02x".format(b[it]) }
+    }
+
     private fun readFully(input: InputStream, buf: ByteArray, len: Int): Boolean {
         var read = 0
         while (read < len) {
@@ -265,6 +297,9 @@ class MirrorStreamServer(
         (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8)
 
     companion object {
+        /** Dump at most this many unknown payloads per session, then fall back to verbose. */
+        private const val UNKNOWN_TYPE_LOG_LIMIT = 12
+
         private const val MAX_PAYLOAD = 8 * 1024 * 1024        // 8 MB sanity cap per frame
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping

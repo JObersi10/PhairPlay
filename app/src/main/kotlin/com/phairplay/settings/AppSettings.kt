@@ -1,5 +1,7 @@
 package com.phairplay.settings
 
+import com.phairplay.media.VolumeControlMode
+
 /**
  * AppSettings — Immutable data model for all user-configurable PhairPlay settings.
  *
@@ -42,12 +44,12 @@ data class AppSettings(
      */
     val miracastEnabled: Boolean = true,
 
+
     /**
-     * Whether the Google Cast receiver is enabled.
-     * On Fire TV (no Google Play Services), this is ignored.
-     * When false: Cast SDK is not initialized.
+     * Whether the DLNA/UPnP MediaRenderer is enabled.
+     * When false: SSDP advertisement and HTTP server are stopped.
      */
-    val castEnabled: Boolean = true,
+    val dlnaEnabled: Boolean = true,
 
     // ─── AirPlay specific ──────────────────────────────────────────────────
     /**
@@ -90,6 +92,48 @@ data class AppSettings(
      * mirroring rock-solid. Turn on to experiment with audio.
      */
     val mirrorAudioEnabled: Boolean = true,
+
+    // ─── Now Playing screen ────────────────────────────────────────────────
+    /**
+     * When true, the audio Now Playing screen dims to a drifting, breathing card on a black
+     * background after [screensaverTimeoutMin] minutes without remote input or a track change.
+     * Protects the panel from burn-in during long albums and looks intentional while it does it.
+     */
+    val screensaverEnabled: Boolean = true,
+
+    /**
+     * Minutes of inactivity before the Now Playing screensaver starts. Clamped to at least 1.
+     */
+    val screensaverTimeoutMin: Int = 15,
+
+    // ─── Volume ────────────────────────────────────────────────────────────
+    /**
+     * Whether the sender's volume slider drives the real output level. See [VolumeControlMode] for
+     * why the default only takes over on external routes.
+     */
+    val senderVolumeMode: VolumeControlMode = VolumeControlMode.EXTERNAL_ONLY,
+
+    // ─── First run ─────────────────────────────────────────────────────────
+    /** False until the user has been through (or skipped) the onboarding flow. */
+    val onboardingComplete: Boolean = false,
+
+    // ─── Last sender ───────────────────────────────────────────────────────
+    /** Name of the most recent sender, shown on the waiting card. Blank until one connects. */
+    val lastSenderName: String = "",
+
+    /** Wall-clock time of that connection, epoch millis. 0 when there has never been one. */
+    val lastSenderAtMs: Long = 0L,
+
+    /**
+     * When true, a sender that has already completed PIN pairing does not have to enter the code
+     * again on later connections.
+     *
+     * CAVEAT, deliberately: the AirPlay legacy PIN handshake is SRP across separate TCP connections
+     * and carries no stable sender identity at the point pair-verify is gated, so this is
+     * receiver-level trust, not per-device. Once any sender has paired, the PIN stops being asked of
+     * everyone. Turn it off to make PIN auth strict again.
+     */
+    val rememberPinPairing: Boolean = true,
 ) {
 
     /** Advertised mirroring display size: 2560×1440 when [forceHighResolution], else 1920×1080. */
@@ -109,7 +153,7 @@ data class AppSettings(
      * If all three are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || miracastEnabled || castEnabled
+        get() = airPlayEnabled || miracastEnabled || dlnaEnabled
 
     companion object {
         /** The default settings instance used on first launch. */

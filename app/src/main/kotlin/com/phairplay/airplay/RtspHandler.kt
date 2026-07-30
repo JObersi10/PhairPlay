@@ -73,10 +73,16 @@ open class RtspHandler(
     private val onRemoteControlInfo: (dacpId: String?, activeRemote: String?) -> Unit = { _, _ -> },
     /** When true, require HomeKit-style SRP PIN pairing before streaming (gated by AppSettings). */
     private val pinAuthEnabled: Boolean = false,
+    /** Skip the PIN when this receiver has already completed a PIN pairing (AppSettings). */
+    private val rememberPinPairing: Boolean = true,
     /** Persistent store of paired controllers' Ed25519 keys (for pair-verify). */
     private val pairingStore: com.phairplay.airplay.handshake.PairingStore? = null,
     /** Shows ([pin]) or hides (null) the on-screen pairing PIN during SRP pair-setup. */
-    private val onShowPin: (pin: String?) -> Unit = {}
+    private val onShowPin: (pin: String?) -> Unit = {},
+    /** PAUSE received (paused=true) or RECORD after PAUSE (paused=false). */
+    private val onPlaybackPaused: (paused: Boolean) -> Unit = {},
+    /** Sender name + device type resolved from mirror SETUP plist (called when mirror audio starts). */
+    private val onSenderInfoChanged: (name: String, type: SenderDeviceType) -> Unit = { _, _ -> }
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -123,6 +129,10 @@ open class RtspHandler(
     protected val activeStreamTypes = mutableSetOf<Int>()
 
     private var setupCount = 0
+    private var pendingDeviceName: String? = null
+    private var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
+    private var lastLoggedNpTitle: String? = null
+    private var lastLoggedNpArtist: String? = null
 
     private val requestReader = RtspRequestReader(
         maxMessageBytes = MAX_MESSAGE_BYTES,
@@ -273,7 +283,11 @@ open class RtspHandler(
     }
 
     private fun routeRequest(request: RtspRequest): RtspResponse {
-        Logger.d("RTSP ${request.method} ${request.uri}")
+        // Senders POST /feedback every ~2s as a keepalive. It carries nothing useful and drowns the
+        // diagnostic buffer, so it is the one request we don't trace.
+        if (!request.uri.endsWith("/feedback")) {
+            Logger.d("RTSP ${request.method} ${request.uri}")
+        }
         // Senders attach their DACP reverse-control identity to most requests — capture it so the TV
         // remote can drive playback (DacpClient dedups, so this is cheap to call repeatedly).
         request.headers["Active-Remote"]?.let { onRemoteControlInfo(request.headers["DACP-ID"], it) }
@@ -475,13 +489,35 @@ open class RtspHandler(
     }
 
     /** GET /info — advertises receiver identity + capabilities (binary plist). */
-    private fun handleInfo(request: RtspRequest): RtspResponse = RtspResponse(
-        statusCode = 200,
-        statusMessage = "OK",
-        bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
-        contentType = "application/x-apple-binary-plist",
-        protocol = request.responseProtocol()
-    )
+    private fun handleInfo(request: RtspRequest): RtspResponse {
+        // Client may send a body plist with its own info (name, model, etc.)
+        if (request.bodyBytes.isNotEmpty()) {
+            runCatching {
+                val info = PlistCodec.decode(request.bodyBytes)
+                val plistName = info["name"] as? String
+                val plistModel = info["model"] as? String
+                if (plistName != null || plistModel != null) {
+                    val dtype = when {
+                        plistModel?.startsWith("iPhone") == true -> SenderDeviceType.IPHONE
+                        plistModel?.startsWith("iPad") == true   -> SenderDeviceType.IPAD
+                        plistModel?.startsWith("Mac") == true || plistModel?.startsWith("iMac") == true
+                            || plistModel?.startsWith("MacBook") == true -> SenderDeviceType.MAC
+                        else -> SenderDeviceType.UNKNOWN
+                    }
+                    pendingDeviceName = plistName
+                    pendingDeviceType = dtype
+                    Logger.i("GET /info sender: name=$plistName model=$plistModel type=$dtype")
+                }
+            }
+        }
+        return RtspResponse(
+            statusCode = 200,
+            statusMessage = "OK",
+            bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
+            contentType = "application/x-apple-binary-plist",
+            protocol = request.responseProtocol()
+        )
+    }
 
     /**
      * POST /pair-setup. With PIN auth off (default) this is the anonymous Ed25519 exchange. With PIN
@@ -508,7 +544,8 @@ open class RtspHandler(
     private fun handlePairVerify(request: RtspRequest): RtspResponse {
         // PIN access control: refuse pair-verify until the controller has PIN-paired this connection.
         // macOS responds to the rejection by starting the PIN flow (/pair-pin-start → /pair-setup-pin).
-        if (pinAuthEnabled && !pinPaired) {
+        val alreadyTrusted = rememberPinPairing && pairingStore?.isPinTrusted() == true
+        if (pinAuthEnabled && !pinPaired && !alreadyTrusted) {
             Logger.i("pair-verify rejected — PIN pairing required first (triggers /pair-pin-start)")
             return RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
         }
@@ -569,6 +606,7 @@ open class RtspHandler(
             }
             if (result.complete) {
                 pairingStore?.resetFailedAttempts()   // legitimate pairing clears the lockout counter
+                pairingStore?.setPinTrusted()          // remembered so the code isn't asked again
                 pinPaired = true                       // now allow pair-verify → streaming proceeds
                 onShowPin(null); legacyPin = null
                 Logger.i("PIN pairing complete — pair-verify now permitted")
@@ -624,6 +662,34 @@ open class RtspHandler(
         val response = mutableMapOf<String, Any?>()
 
         isMirrorSession = true
+
+        // Extract device name + type from mirror SETUP plist (msg 1 carries name/model)
+        val plistName = req["name"] as? String
+        val plistModel = req["model"] as? String
+        if (plistName != null || plistModel != null) {
+            val dtype = when {
+                plistModel?.startsWith("iPhone") == true -> SenderDeviceType.IPHONE
+                plistModel?.startsWith("iPad") == true   -> SenderDeviceType.IPAD
+                plistModel?.startsWith("Mac") == true || plistModel?.startsWith("iMac") == true
+                    || plistModel?.startsWith("MacBook") == true -> SenderDeviceType.MAC
+                else -> SenderDeviceType.UNKNOWN
+            }
+            val existing = currentSession
+            if (existing != null) {
+                currentSession = existing.copy(
+                    senderName = plistName ?: existing.senderName,
+                    senderDeviceType = if (dtype != SenderDeviceType.UNKNOWN) dtype else existing.senderDeviceType
+                )
+            } else {
+                // Mirror-only session (no ANNOUNCE) — build minimal session
+                currentSession = SessionDescription(
+                    hasVideo = true, hasAudio = false,
+                    senderName = plistName ?: DEFAULT_SENDER_NAME,
+                    senderDeviceType = dtype
+                )
+            }
+        }
+
         val ekey = req["ekey"] as? ByteArray
         if (ekey != null) {
             val aesKey = fairPlay!!.decrypt(ekey)
@@ -664,6 +730,7 @@ open class RtspHandler(
                         val spf = (stream["spf"] as? Long)?.toInt() ?: 352   // ALAC frameLength (samples/frame)
                         val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf)
                         activeStreamTypes.add(96)
+                        currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
                         mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
                     }
@@ -726,7 +793,13 @@ open class RtspHandler(
             return RtspResponse(statusCode = 400, statusMessage = "Bad Request")
         }
 
-        currentSession = parsed.copy(senderName = extractSenderName(request.headers["User-Agent"]))
+        val ua = request.headers["User-Agent"]
+        val uaName = extractSenderName(ua)
+        val uaType = extractDeviceType(ua)
+        currentSession = parsed.copy(
+            senderName = pendingDeviceName ?: uaName,
+            senderDeviceType = if (pendingDeviceType != SenderDeviceType.UNKNOWN) pendingDeviceType else uaType
+        )
         val s = currentSession!!
         Logger.i("Session: hasVideo=${s.hasVideo} hasAudio=${s.hasAudio} " +
                  "codec=${s.audioCodec} encrypted=${s.isAudioEncrypted} sender='${s.senderName}'")
@@ -739,6 +812,20 @@ open class RtspHandler(
         if (userAgent.isNullOrBlank()) return DEFAULT_SENDER_NAME
         val name = userAgent.substringBefore("/").trim()
         return name.ifEmpty { DEFAULT_SENDER_NAME }
+    }
+
+    private fun extractDeviceType(userAgent: String?): SenderDeviceType {
+        if (userAgent.isNullOrBlank()) return SenderDeviceType.UNKNOWN
+        val ua = userAgent.lowercase()
+        Logger.i("RTSP User-Agent: $userAgent")
+        return when {
+            "iphone" in ua -> SenderDeviceType.IPHONE
+            "ipad" in ua   -> SenderDeviceType.IPAD
+            "mac" in ua || "macbook" in ua || "imac" in ua -> SenderDeviceType.MAC
+            // Apple Music on Mac sends "iTunes" or "Music" as User-Agent prefix
+            "itunes" in ua || "music" in ua -> SenderDeviceType.MAC
+            else -> SenderDeviceType.UNKNOWN
+        }
     }
 
     /** Handles SETUP — allocates a media channel. */
@@ -768,6 +855,7 @@ open class RtspHandler(
     /** Handles RECORD — macOS/iOS says start sending media now. */
     open fun handleRecordInternal(request: RtspRequest): RtspResponse {
         // AirPlay 2 mirroring has no ANNOUNCE/SDP — RECORD just acknowledges the session.
+        onPlaybackPaused(false)
         if (isMirrorSession) {
             Logger.i("RECORD (mirror session) — OK")
             return RtspResponse(
@@ -880,7 +968,14 @@ open class RtspHandler(
                     val pos = ((curr - start) and 0xFFFFFFFFL) / 44100.0
                     val dur = ((end  - start) and 0xFFFFFFFFL) / 44100.0
                     Logger.i("SET_PARAMETER progress: pos=${pos.toInt()}s dur=${dur.toInt()}s")
-                    onPlaybackPosition(pos, dur)
+                    // On a track change the sender can emit the outgoing track's position against
+                    // the incoming track's duration (observed: pos=165s dur=125s), which drives the
+                    // progress bar past 100%. Drop the impossible pair and wait for the next push.
+                    if (dur > 0 && pos > dur) {
+                        Logger.d("Ignoring stale progress (pos=${pos.toInt()}s > dur=${dur.toInt()}s)")
+                    } else {
+                        onPlaybackPosition(pos, dur)
+                    }
                 }
             }
             contentType.contains("text/parameters") || body.contains("position:") -> {
@@ -900,7 +995,10 @@ open class RtspHandler(
             contentType.contains("dmap") || looksLikeDmap(request.bodyBytes) -> {
                 val meta = DmapParser.parseNowPlaying(request.bodyBytes)
                 onNowPlayingMetadata(meta.title, meta.artist, meta.album, meta.genre, meta.composer, meta.year, meta.durationMs)
-                Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}' genre='${meta.genre}' dur=${meta.durationMs?.div(1000)}s")
+                if (meta.title != lastLoggedNpTitle || meta.artist != lastLoggedNpArtist) {
+                    lastLoggedNpTitle = meta.title; lastLoggedNpArtist = meta.artist
+                    Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}' genre='${meta.genre}' dur=${meta.durationMs?.div(1000)}s")
+                }
             }
             else -> Logger.d("SET_PARAMETER unhandled ct='$contentType' body=${body.take(120)}")
         }
@@ -925,6 +1023,7 @@ open class RtspHandler(
     /** Handles PAUSE — suspends media delivery. Responds 200 OK; resume arrives as RECORD. */
     open fun handlePauseInternal(request: RtspRequest): RtspResponse {
         Logger.d("PAUSE received")
+        onPlaybackPaused(true)
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 

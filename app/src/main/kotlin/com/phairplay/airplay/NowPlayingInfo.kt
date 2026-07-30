@@ -6,8 +6,11 @@ package com.phairplay.airplay
  * when the sender pushes them (Apple Music / Podcasts do; raw system audio from Chrome does not, so
  * the screen falls back to a generic "Audio from <sender>" card).
  */
+enum class SenderDeviceType { MAC, IPHONE, IPAD, UNKNOWN }
+
 data class NowPlayingInfo(
     val senderName: String,
+    val senderDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN,
     val title: String? = null,
     val artist: String? = null,
     val album: String? = null,
@@ -17,6 +20,7 @@ data class NowPlayingInfo(
     val artwork: ByteArray? = null,
     val positionSec: Double = 0.0,
     val durationSec: Double = 0.0,
+    val paused: Boolean = false,
 ) {
     /** True when the sender supplied at least a track title (vs. a bare "audio is playing" state). */
     val hasMetadata: Boolean get() = !title.isNullOrBlank()
@@ -26,6 +30,7 @@ data class NowPlayingInfo(
         if (this === other) return true
         if (other !is NowPlayingInfo) return false
         return senderName == other.senderName &&
+            senderDeviceType == other.senderDeviceType &&
             title == other.title &&
             artist == other.artist &&
             album == other.album &&

@@ -43,6 +43,7 @@ class SettingsFragment : Fragment() {
     private lateinit var headerDisplay: TextView
     private lateinit var headerProtocols: TextView
     private lateinit var headerAirPlay: TextView
+    private lateinit var headerNowPlaying: TextView
     private lateinit var headerService: TextView
     private lateinit var headerDeveloper: TextView
     private lateinit var headerAbout: TextView
@@ -52,14 +53,22 @@ class SettingsFragment : Fragment() {
     private lateinit var textDisplayNameValue: TextView
     private lateinit var rowAirPlay: View
     private lateinit var rowMiracast: View
-    private lateinit var rowCast: View
+    private lateinit var rowDlna: View
     private lateinit var rowMirrorAudio: View
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowForceHighRes: View
+    private lateinit var rowRememberPin: View
+    private lateinit var rowForgetPairings: LinearLayout
+    private lateinit var rowSenderVolume: LinearLayout
+    private lateinit var textSenderVolumeValue: TextView
+    private lateinit var rowScreensaver: View
+    private lateinit var rowScreensaverTimeout: LinearLayout
+    private lateinit var textScreensaverTimeoutValue: TextView
     private lateinit var textVersionValue: TextView
     private lateinit var rowReset: LinearLayout
+    private lateinit var rowQuit: LinearLayout
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
         inflater.inflate(R.layout.fragment_settings, container, false)
@@ -82,6 +91,7 @@ class SettingsFragment : Fragment() {
         headerDisplay   = view.findViewById(R.id.header_display)
         headerProtocols = view.findViewById(R.id.header_protocols)
         headerAirPlay   = view.findViewById(R.id.header_airplay)
+        headerNowPlaying = view.findViewById(R.id.header_now_playing)
         headerService   = view.findViewById(R.id.header_service)
         headerDeveloper = view.findViewById(R.id.header_developer)
         headerAbout     = view.findViewById(R.id.header_about)
@@ -90,14 +100,22 @@ class SettingsFragment : Fragment() {
         textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
         rowAirPlay          = view.findViewById(R.id.row_airplay)
         rowMiracast         = view.findViewById(R.id.row_miracast)
-        rowCast             = view.findViewById(R.id.row_cast)
+        rowDlna             = view.findViewById(R.id.row_dlna)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
+        rowRememberPin      = view.findViewById(R.id.row_remember_pin)
+        rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
+        rowSenderVolume     = view.findViewById(R.id.row_sender_volume)
+        textSenderVolumeValue = view.findViewById(R.id.text_sender_volume_value)
+        rowScreensaver      = view.findViewById(R.id.row_screensaver)
+        rowScreensaverTimeout = view.findViewById(R.id.row_screensaver_timeout)
+        textScreensaverTimeoutValue = view.findViewById(R.id.text_screensaver_timeout_value)
         textVersionValue    = view.findViewById(R.id.text_version_value)
         rowReset            = view.findViewById(R.id.row_reset)
+        rowQuit             = view.findViewById(R.id.row_quit)
     }
 
     /** Sets all section header titles from string resources. */
@@ -105,6 +123,7 @@ class SettingsFragment : Fragment() {
         headerDisplay.setText(R.string.settings_section_display)
         headerProtocols.setText(R.string.settings_section_protocols)
         headerAirPlay.setText(R.string.settings_section_airplay)
+        headerNowPlaying.setText(R.string.settings_section_now_playing)
         headerService.setText(R.string.settings_section_service)
         headerDeveloper.setText(R.string.settings_section_developer)
         headerAbout.setText(R.string.settings_section_about)
@@ -114,9 +133,11 @@ class SettingsFragment : Fragment() {
     private fun setRowLabels() {
         configureToggleRow(rowAirPlay,      R.string.setting_airplay_enabled,    R.string.setting_airplay_subtitle)
         configureToggleRow(rowMiracast,     R.string.setting_miracast_enabled,   R.string.setting_miracast_subtitle)
-        configureToggleRow(rowCast,         R.string.setting_cast_enabled,       R.string.setting_cast_subtitle)
+        configureToggleRow(rowDlna,         R.string.setting_dlna_enabled,       R.string.setting_dlna_subtitle)
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
+        configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
+        configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
@@ -180,12 +201,59 @@ class SettingsFragment : Fragment() {
         }
         setToggle(rowAirPlay,      settings.airPlayEnabled)
         setToggle(rowMiracast,     settings.miracastEnabled)
-        setToggle(rowCast,         settings.castEnabled)
+        setToggle(rowDlna,         settings.dlnaEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowForceHighRes, settings.forceHighResolution)
+        setToggle(rowRememberPin,  settings.rememberPinPairing)
+        showSenderVolumeMode(settings.senderVolumeMode)
+        setToggle(rowScreensaver,  settings.screensaverEnabled)
+        showScreensaverTimeout(settings.screensaverTimeoutMin)
+    }
+
+    /**
+     * Drops every stored pairing so the PIN is demanded again. Done through the store directly rather
+     * than the service so it works whether or not a receiver is currently running.
+     */
+    private fun forgetPairings() {
+        com.phairplay.airplay.handshake.PairingStore(requireContext()).clearAll()
+        Logger.i("Paired senders forgotten")
+        android.widget.Toast.makeText(
+            requireContext(), R.string.setting_forget_pairings_done, android.widget.Toast.LENGTH_LONG
+        ).show()
+        ServiceController.restart(requireContext())
+    }
+
+    private fun showSenderVolumeMode(mode: com.phairplay.media.VolumeControlMode) {
+        textSenderVolumeValue.setText(volumeModeLabel(mode))
+    }
+
+    private fun volumeModeLabel(mode: com.phairplay.media.VolumeControlMode) = when (mode) {
+        com.phairplay.media.VolumeControlMode.OFF           -> R.string.setting_sender_volume_off
+        com.phairplay.media.VolumeControlMode.EXTERNAL_ONLY -> R.string.setting_sender_volume_external
+        com.phairplay.media.VolumeControlMode.ALWAYS        -> R.string.setting_sender_volume_always
+    }
+
+    private fun showSenderVolumeDialog() {
+        val modes = com.phairplay.media.VolumeControlMode.entries.toList()
+        val labels = modes.map { getString(volumeModeLabel(it)) }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_sender_volume)
+            .setItems(labels) { _, which ->
+                val mode = modes[which]
+                save { it.copy(senderVolumeMode = mode) }
+                showSenderVolumeMode(mode)
+                Logger.i("Sender volume mode set to $mode")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showScreensaverTimeout(minutes: Int) {
+        textScreensaverTimeoutValue.text = resources.getQuantityString(
+            R.plurals.setting_screensaver_timeout_value, minutes, minutes)
     }
 
     private fun setToggle(row: View, value: Boolean) {
@@ -204,14 +272,20 @@ class SettingsFragment : Fragment() {
 
         setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
-        setToggleListener(rowCast)         { enabled -> save { it.copy(castEnabled = enabled) } }
+        setToggleListener(rowDlna)         { enabled -> save { it.copy(dlnaEnabled = enabled) } }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
+        setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
+        rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
+        rowSenderVolume.setOnClickListener { showSenderVolumeDialog() }
+        setToggleListener(rowRememberPin) { enabled -> saveAndRestart { it.copy(rememberPinPairing = enabled) } }
+        rowForgetPairings.setOnClickListener { forgetPairings() }
 
         rowReset.setOnClickListener { resetSettings() }
+        rowQuit.setOnClickListener { confirmQuit() }
     }
 
     private fun setToggleListener(row: View, onChanged: (Boolean) -> Unit) {
@@ -303,6 +377,47 @@ class SettingsFragment : Fragment() {
     }
 
     /**
+     * Lets the user pick how long the Now Playing screen sits idle before the screensaver starts.
+     * A fixed list rather than free entry: a TV remote makes number entry painful, and these cover
+     * the useful range from "album sleeve for one track" to "leave it up all evening".
+     */
+    private fun showScreensaverTimeoutDialog() {
+        val labels = SCREENSAVER_TIMEOUT_CHOICES.map {
+            resources.getQuantityString(R.plurals.setting_screensaver_timeout_value, it, it)
+        }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_screensaver_timeout)
+            .setItems(labels) { _, which ->
+                val minutes = SCREENSAVER_TIMEOUT_CHOICES[which]
+                save { it.copy(screensaverTimeoutMin = minutes) }
+                showScreensaverTimeout(minutes)
+                Logger.i("Screensaver timeout set to $minutes min")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Fully stops PhairPlay: receivers down, service stopped, task removed.
+     *
+     * Confirmed first because it is not obvious from outside that closing the app normally leaves the
+     * receiver advertising — that is the whole point of the foreground service — so a user who wants
+     * it actually off has no other way to get there.
+     */
+    private fun confirmQuit() {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_quit)
+            .setMessage(R.string.setting_quit_confirm)
+            .setPositiveButton(R.string.setting_quit) { _, _ ->
+                Logger.i("User quit — stopping service and finishing task")
+                ServiceController.stop(requireContext())
+                requireActivity().finishAndRemoveTask()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
      * Resets all settings to defaults and repopulates the UI.
      * TODO: Add a confirmation dialog before resetting.
      */
@@ -313,5 +428,9 @@ class SettingsFragment : Fragment() {
             populateUI(defaults)
             Logger.i("Settings reset to defaults")
         }
+    }
+
+    private companion object {
+        val SCREENSAVER_TIMEOUT_CHOICES = listOf(1, 2, 5, 10, 15, 30, 60)
     }
 }
