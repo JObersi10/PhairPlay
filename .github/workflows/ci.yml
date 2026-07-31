@@ -94,3 +94,26 @@ jobs:
           name: debug-apk-${{ matrix.flavor }}
           path: ${{ matrix.apk_path }}
           retention-days: 7
+
+  release-apks:
+    name: Publish raw debug APKs
+    needs: android-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: debug-apk-*
+          merge-multiple: true
+          path: apks
+
+      - name: Publish rolling debug release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-debug
+          name: Latest debug APKs
+          prerelease: true
+          files: apks/*.apk
