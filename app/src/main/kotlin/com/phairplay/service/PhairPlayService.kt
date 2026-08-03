@@ -42,6 +42,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withLock
 import timber.log.Timber
 
 /**
@@ -140,6 +141,17 @@ class PhairPlayService : Service() {
 
     // Network watcher — re-advertises after the Wi-Fi drops (deep sleep) so senders don't chase a
     // stale mDNS record. See registerNetworkWatcher().
+    /**
+     * Serialises receiver startup.
+     *
+     * Both the Activity and the service's own onCreate promotion fire ACTION_START, so two
+     * startReceivers() coroutines could run at once. The per-receiver "already running" guards
+     * check a field that neither coroutine had assigned yet, so both sailed past: two Miracast
+     * registrations, two mDNS records, and two RTSP handlers fighting over port 7000 — twelve
+     * 250ms retries, about three seconds added to every connect, with DLNA losing 8200 outright.
+     */
+    private val receiverLock = kotlinx.coroutines.sync.Mutex()
+
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
     @Volatile private var lastKnownIp: String? = null
 
@@ -378,7 +390,7 @@ class PhairPlayService : Service() {
      * Reads current settings, then starts AirPlay, Miracast, and/or Cast
      * receivers according to the enabled flags.
      */
-    private suspend fun startReceivers() {
+    private suspend fun startReceivers() = receiverLock.withLock {
         acquireWifiLock()
         val settings = settingsRepository.settingsFlow.first()
         Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, DLNA=${settings.dlnaEnabled}")

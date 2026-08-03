@@ -386,9 +386,12 @@ class MainActivity : AppCompatActivity() {
         nowPlayingScreen.clear()
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
-        // Wipe the last decoded frame — hiding the container alone leaves it in the surface buffer.
-        streamingScreen.clearToBlack()
-        streamingScreen.visibility = View.VISIBLE
+        // Hide the SurfaceView itself, not just its container. A SurfaceView holds the last frame
+        // the decoder wrote and lockCanvas can't be used to wipe it while MediaCodec owns it, so
+        // leaving it VISIBLE meant the final mirrored image stayed on screen. Going GONE releases
+        // the Surface; the next session rebuilds the decoder against the new one, which is the same
+        // path already taken when the app backgrounds.
+        streamingScreen.visibility = View.GONE
         streamingContainer.visibility = View.GONE
     }
 
