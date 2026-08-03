@@ -636,10 +636,12 @@ class MainActivity : AppCompatActivity() {
         if (nowPlaying != null) lastNowPlaying = nowPlaying
         val connected = currentAirPlayState == ProtocolState.CONNECTED
         if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
-        // Video wins. A mirror session also emits now-playing metadata, so latching on metadata
-        // first put the audio card over a live mirror.
-        else if (currentVideoPlaying) sessionMode = Mode.VIDEO
-        else if (sessionMode == Mode.NONE && nowPlaying != null) sessionMode = Mode.AUDIO
+        else if (sessionMode == Mode.NONE) {
+            sessionMode = if (nowPlaying != null) Mode.AUDIO
+                          else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
+        } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
+            sessionMode = Mode.AUDIO
+        }
 
         val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
                             photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED
