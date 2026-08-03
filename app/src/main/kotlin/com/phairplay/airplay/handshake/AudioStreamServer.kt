@@ -136,7 +136,7 @@ class AudioStreamServer(
                 controlSocket.receive(pkt)
                 senderCtrlAddr = pkt.socketAddress   // where to send resend requests
                 if (ctrlCount < 6) {
-                    Logger.i("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, minOf(20, pkt.length))}")
+                    Logger.d("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, minOf(20, pkt.length))}")
                     ctrlCount++
                 }
                 // RTP payload type is bits 0–6 of byte 1 (byte 1 = marker<<7 | type).
@@ -177,7 +177,7 @@ class AudioStreamServer(
                 socket.receive(packet)
                 recv++
                 if (rtpCount < 6) {
-                    Logger.i("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
+                    Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
                     rtpCount++
                 }
                 handleRtpPacket(packet.data, 0, packet.length)
