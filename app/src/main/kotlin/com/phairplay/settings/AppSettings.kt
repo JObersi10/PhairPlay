@@ -137,6 +137,13 @@ data class AppSettings(
      */
     val audioDelayMs: Int = 0,
 
+    /**
+     * When true, Back during a stream leaves PhairPlay for the Fire TV home screen instead of
+     * ending the session, so the sender keeps playing in the background. Off keeps the original
+     * behaviour, where Back stops the stream.
+     */
+    val backGoesHome: Boolean = false,
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

@@ -115,7 +115,11 @@ class MirrorStreamServer(
                 // keeps the connection busy with non-video payloads. Watch for the absence of
                 // actual VIDEO, and blank rather than disconnect — the session stays up so
                 // unlocking the phone resumes the mirror instantly.
-                if (!videoIdle && System.currentTimeMillis() - lastVideoMs > IDLE_TIMEOUT_MS) {
+                // Only blank a session that was genuinely showing video. An audio-only AirPlay
+                // session also runs this server, and blanking there put a black panel over the
+                // now-playing card for no reason.
+                if (firstVideoAtMs != 0L && !videoIdle &&
+                    System.currentTimeMillis() - lastVideoMs > IDLE_TIMEOUT_MS) {
                     videoIdle = true
                     Logger.i("Mirror: no video for ${IDLE_TIMEOUT_MS}ms — blanking (session kept)")
                     onVideoIdle(true)
@@ -173,7 +177,7 @@ class MirrorStreamServer(
             }
         } catch (e: java.net.SocketTimeoutException) {
             // Nothing at all on the socket. Still not a disconnect — keep the session, just blank.
-            if (running && !videoIdle) { videoIdle = true; onVideoIdle(true) }
+            if (running && firstVideoAtMs != 0L && !videoIdle) { videoIdle = true; onVideoIdle(true) }
         } catch (e: Exception) {
             if (running) Logger.e("Mirror reader error", e)
         } finally {

@@ -81,6 +81,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Cached copy of AppSettings.backQuitsApp — onBackPressed can't suspend to read DataStore. */
     private var backQuitsApp = false
+
+    /** Cached AppSettings.backGoesHome: Back during a stream backgrounds instead of ending it. */
+    private var backGoesHome = false
     private var isSeekActive = false
 
     // True while a stream is on screen — used to detect the active→idle edge in trackSessionEnd().
@@ -233,6 +236,14 @@ class MainActivity : AppCompatActivity() {
         if (currentVideoPlaying || currentNowPlaying != null ||
             currentAirPlayState == ProtocolState.CONNECTED
         ) {
+            if (backGoesHome) {
+                // Leave the stream running and drop to the Fire TV home screen. moveTaskToBack
+                // backgrounds the task without finishing it, so the sender keeps playing and the
+                // service can bring us forward again when something changes.
+                Timber.d("Back pressed during session — backgrounding, session continues")
+                moveTaskToBack(true)
+                return
+            }
             Timber.d("Back pressed during session — ending AirPlay session")
             service?.endCurrentSession()
             return
@@ -477,6 +488,7 @@ class MainActivity : AppCompatActivity() {
                 )
                 // Cached because onBackPressed is synchronous and can't await DataStore.
                 backQuitsApp = settings.backQuitsApp
+                backGoesHome = settings.backGoesHome
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
                 // reflects what is coming out of the speakers rather than what has been received.
                 nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)

@@ -93,6 +93,8 @@
     <string name="setting_audio_delay">Audio delay</string>
     <string name="setting_audio_delay_none">None</string>
     <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>
+    <string name="setting_back_home">Back returns to Home</string>
+    <string name="setting_back_home_subtitle">During a stream, Back leaves PhairPlay and keeps playing</string>
     <string name="setting_back_quits">Back exits PhairPlay</string>
     <string name="setting_back_quits_subtitle">Back on the home screen stops the receiver instead of leaving it running</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>

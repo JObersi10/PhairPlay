@@ -47,6 +47,8 @@ class NowPlayingScreen @JvmOverloads constructor(
     private var positionBaseMs = 0L    // position snapshot when epoch was anchored
     /** How far behind the sender we actually play — see [senderPositionMs]. */
     private var presentationLatencyMs = 0L
+    /** Last position the sender reported — an unchanged value across pushes means paused. */
+    private var lastReportedPositionSec = -1.0
     private var positionBaseEpoch = 0L // elapsedRealtime at last anchor
     private var durationMs = 0L
     private var currentTitle: String? = null
@@ -331,14 +333,66 @@ class NowPlayingScreen @JvmOverloads constructor(
         listOf(titleView, artistView, albumView, metaSecondaryView).forEach { it.enableMarquee() }
     }
 
-    /** Applies the endless side-scroll used for any text that can overflow its row. */
+    /**
+     * Single-pass side-scroll for text that overflows its row.
+     *
+     * Android's MARQUEE ellipsize loops: it runs the text off one edge and snaps it back in from
+     * the other, which reads as a conveyor belt. This instead scrolls to the end, holds, then eases
+     * back to the start and holds again — the text always comes to rest where you started reading.
+     */
     private fun TextView.enableMarquee() {
         isSingleLine = true
-        ellipsize = TextUtils.TruncateAt.MARQUEE
-        marqueeRepeatLimit = -1        // -1 = forever
+        ellipsize = null
         isHorizontalFadingEdgeEnabled = true
-        isSelected = true              // what actually starts the animation
+        setHorizontallyScrolling(true)
+        scrollTrackedViews += this
+        scheduleScroll(this)
     }
+
+    /** Views that scroll their own overflow, so a text change can restart the pass. */
+    private val scrollTrackedViews = mutableListOf<TextView>()
+    private val scrollAnimators = mutableMapOf<TextView, ValueAnimator>()
+
+    private fun scheduleScroll(view: TextView) {
+        view.post { runScrollPass(view) }
+    }
+
+    private fun runScrollPass(view: TextView) {
+        scrollAnimators.remove(view)?.cancel()
+        view.scrollTo(0, 0)
+        val overflow = (view.layout?.getLineWidth(0)?.toInt() ?: 0) -
+            (view.width - view.paddingLeft - view.paddingRight)
+        if (overflow <= 0 || view.visibility != View.VISIBLE) return
+
+        val out = ValueAnimator.ofInt(0, overflow).apply {
+            duration = (overflow * SCROLL_MS_PER_PX).toLong().coerceAtLeast(1200L)
+            startDelay = SCROLL_HOLD_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { view.scrollTo(it.animatedValue as Int, 0) }
+        }
+        val back = ValueAnimator.ofInt(overflow, 0).apply {
+            duration = (overflow * SCROLL_MS_PER_PX).toLong().coerceAtLeast(1200L)
+            startDelay = SCROLL_HOLD_MS
+            interpolator = DecelerateInterpolator()
+            addUpdateListener { view.scrollTo(it.animatedValue as Int, 0) }
+        }
+        out.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: android.animation.Animator) {
+                if (view.isAttachedToWindow) { scrollAnimators[view] = back; back.start() }
+            }
+        })
+        back.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationEnd(animation: android.animation.Animator) {
+                // Rest at the start for a beat, then read it through again.
+                if (view.isAttachedToWindow) view.postDelayed({ runScrollPass(view) }, SCROLL_REST_MS)
+            }
+        })
+        scrollAnimators[view] = out
+        out.start()
+    }
+
+    /** Restarts every scroll pass — called when the displayed text changes. */
+    private fun restartScrolls() = scrollTrackedViews.forEach { scheduleScroll(it) }
 
     // ── Info panel ("back of the sleeve") ─────────────────────────────────────
 
@@ -539,9 +593,30 @@ class NowPlayingScreen @JvmOverloads constructor(
             // currentTitle, so the same track looked like a new one and the elapsed time snapped
             // back to 0:00 until the next progress push — which can be 40s away.
             positionBaseMs = senderPositionMs(info.positionSec)
-            // A track change counts as activity: the screensaver shouldn't cover a song the user
-            // just started, and it should re-arm from here rather than from the last button press.
-            notifyActivity()
+            // Deliberately NOT notifyActivity(): a new track arriving is the sender talking, not
+            // the user doing anything, and waking the screensaver every few minutes defeats it.
+            // Only real remote input wakes it.
+            restartScrolls()
+        }
+
+        // Second, independent pause detector. The sender keeps pushing progress while paused, but
+        // the value stops advancing — so an unchanged position across consecutive pushes means
+        // paused even if the audio-silence detector hasn't fired yet.
+        if (info.positionSec > 0.0) {
+            if (info.positionSec == lastReportedPositionSec) {
+                if (!isPaused) {
+                    if (positionBaseEpoch > 0L) {
+                        positionBaseMs += ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
+                        positionBaseEpoch = 0L
+                    }
+                    isPaused = true
+                    Timber.d("Progress stopped advancing — treating as paused")
+                }
+            } else if (isPaused && !info.paused) {
+                isPaused = false
+                positionBaseEpoch = SystemClock.elapsedRealtime()
+            }
+            lastReportedPositionSec = info.positionSec
         }
 
         if (info.durationSec > 0) {
@@ -796,6 +871,11 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val FADE_TO_BLACK_MS = 2500L
         private const val WAKE_MS = 600L
         private const val BREATHE_MS = 7000L
+
+        /** Overflow scroll pacing: speed, the pause at each end, and the rest before repeating. */
+        private const val SCROLL_MS_PER_PX = 14f
+        private const val SCROLL_HOLD_MS = 1_500L
+        private const val SCROLL_REST_MS = 4_000L
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
         /** How often to nudge, how long the nudge takes, and how far — a handful of pixels. */
