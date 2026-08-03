@@ -52,12 +52,6 @@ class StreamingScreen @JvmOverloads constructor(
     private var surface: Surface? = null
 
     // Optional debug HUD (Settings → "Debug overlay"), drawn on top of the video.
-    /** Opaque cover shown while the sender has stopped sending frames. */
-    private val blackout = View(context).apply {
-        setBackgroundColor(Color.BLACK)
-        visibility = GONE
-    }
-
     private val debugView = TextView(context).apply {
         setTextColor(Color.parseColor("#FF00FF66"))
         setBackgroundColor(Color.parseColor("#A6000000"))
@@ -97,8 +91,6 @@ class StreamingScreen @JvmOverloads constructor(
         ).apply { gravity = Gravity.CENTER })
 
         // Debug HUD overlay, top-left, above the video surface.
-        // Above the SurfaceView, below the debug HUD.
-        addView(blackout, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
         addView(debugView, LayoutParams(
             LayoutParams.WRAP_CONTENT,
             LayoutParams.WRAP_CONTENT
@@ -137,17 +129,6 @@ class StreamingScreen @JvmOverloads constructor(
      */
     fun getSurface(): Surface? = surface
 
-    /**
-     * Covers the video with an opaque panel without touching the Surface.
-     *
-     * Used when the sender stops sending frames (phone screen off) — the SurfaceView would
-     * otherwise keep displaying the last decoded frame indefinitely. Hiding the SurfaceView would
-     * destroy its Surface and force a decoder rebuild that stalls until the next keyframe, so
-     * overlay instead: the decoder stays configured and video reappears the instant frames resume.
-     */
-    fun setBlackout(on: Boolean) {
-        blackout.visibility = if (on) VISIBLE else GONE
-    }
 
 
     /**

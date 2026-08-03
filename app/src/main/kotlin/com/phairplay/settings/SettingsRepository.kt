@@ -117,6 +117,7 @@ class SettingsRepository(private val context: Context) {
         backQuitsApp       = this[Keys.BACK_QUITS_APP]           ?: false,
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
         backGoesHome       = this[Keys.BACK_GOES_HOME]           ?: false,
+        pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
@@ -143,6 +144,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.BACK_QUITS_APP]       = settings.backQuitsApp
         this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
         this[Keys.BACK_GOES_HOME]       = settings.backGoesHome
+        this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
@@ -171,6 +173,7 @@ class SettingsRepository(private val context: Context) {
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
+        val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")

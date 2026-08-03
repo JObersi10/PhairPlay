@@ -60,6 +60,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowDebugOverlay: View
     private lateinit var rowBackQuits: View
     private lateinit var rowBackHome: View
+    private lateinit var rowPip: View
     private lateinit var rowAudioDelay: LinearLayout
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
@@ -111,6 +112,7 @@ class SettingsFragment : Fragment() {
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowBackQuits        = view.findViewById(R.id.row_back_quits)
         rowBackHome         = view.findViewById(R.id.row_back_home)
+        rowPip              = view.findViewById(R.id.row_pip)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
@@ -150,6 +152,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowBackQuits,    R.string.setting_back_quits,         R.string.setting_back_quits_subtitle)
         configureToggleRow(rowBackHome,     R.string.setting_back_home,          R.string.setting_back_home_subtitle)
+        configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
         textVersionValue.text = BuildConfig.VERSION_NAME
@@ -218,6 +221,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowBackQuits, settings.backQuitsApp)
         setToggle(rowBackHome, settings.backGoesHome)
+        setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
@@ -291,7 +295,11 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowBackQuits) { enabled -> save { it.copy(backQuitsApp = enabled) } }
-        setToggleListener(rowBackHome) { enabled -> save { it.copy(backGoesHome = enabled) } }
+        setToggleListener(rowBackHome) { enabled ->
+            Logger.i("Back-returns-to-Home toggled to $enabled")
+            save { it.copy(backGoesHome = enabled) }
+        }
+        setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }

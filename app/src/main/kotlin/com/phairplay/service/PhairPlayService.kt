@@ -87,10 +87,6 @@ class PhairPlayService : Service() {
     private val _dlnaState = MutableStateFlow(ProtocolState.DISABLED)
     val dlnaState: StateFlow<ProtocolState> = _dlnaState.asStateFlow()
 
-    /** True while a mirror is connected but the sender has stopped sending frames. */
-    private val _videoIdle = MutableStateFlow(false)
-    val videoIdle: StateFlow<Boolean> = _videoIdle.asStateFlow()
-
     private val _videoPlaying = MutableStateFlow(false)
     val videoPlaying: StateFlow<Boolean> = _videoPlaying.asStateFlow()
 
@@ -508,7 +504,6 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
-            onVideoIdleChanged = { idle -> _videoIdle.value = idle },
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state

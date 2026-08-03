@@ -102,12 +102,7 @@ class AirPlayReceiver(
     private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
     private val onEnergyChanged: (Float) -> Unit = {},
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
-    private val onPinChanged: (pin: String?) -> Unit = {},
-    /**
-     * True when a mirror session is connected but no video is arriving (the sender's screen is
-     * off). The session stays up — this only tells the UI to blank so the last frame isn't frozen.
-     */
-    private val onVideoIdleChanged: (Boolean) -> Unit = {}
+    private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
 
     // Persistent store of paired controllers (for PIN access control / pair-verify).
@@ -515,7 +510,6 @@ class AirPlayReceiver(
             aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight,
             // A sender that goes quiet without a TEARDOWN (phone screen off) used to leave the
             // session "live" with its last frame frozen on the TV. Tear it down ourselves.
-            onVideoIdle = { idle -> onVideoIdleChanged(idle) },
         )
             .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort

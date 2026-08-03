@@ -144,6 +144,12 @@ data class AppSettings(
      */
     val backGoesHome: Boolean = false,
 
+    /**
+     * Whether leaving the app during a video stream enters picture-in-picture instead of simply
+     * backgrounding. Only affects mirroring — audio-only sessions have no video to shrink.
+     */
+    val pipEnabled: Boolean = true,
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

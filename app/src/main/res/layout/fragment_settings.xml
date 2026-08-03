@@ -303,6 +303,11 @@
         </LinearLayout>
 
         <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_pip"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
+        <include layout="@layout/settings_toggle_row"
             android:id="@+id/row_back_home"
             android:layout_width="match_parent"
             android:layout_height="72dp" />

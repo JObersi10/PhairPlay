@@ -49,6 +49,7 @@ class NowPlayingScreen @JvmOverloads constructor(
     private var presentationLatencyMs = 0L
     /** Last position the sender reported — an unchanged value across pushes means paused. */
     private var lastReportedPositionSec = -1.0
+    private var lastPositionChangedAt = 0L
     private var positionBaseEpoch = 0L // elapsedRealtime at last anchor
     private var durationMs = 0L
     private var currentTitle: String? = null
@@ -602,24 +603,28 @@ class NowPlayingScreen @JvmOverloads constructor(
             restartScrolls()
         }
 
-        // Second, independent pause detector. The sender keeps pushing progress while paused, but
-        // the value stops advancing — so an unchanged position across consecutive pushes means
-        // paused even if the audio-silence detector hasn't fired yet.
-        if (info.positionSec > 0.0) {
-            if (info.positionSec == lastReportedPositionSec) {
-                if (!isPaused) {
-                    if (positionBaseEpoch > 0L) {
-                        positionBaseMs += ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
-                        positionBaseEpoch = 0L
-                    }
-                    isPaused = true
-                    Timber.d("Progress stopped advancing — treating as paused")
+        // Second pause detector, from the sender's own progress pushes. It must be time-based:
+        // senders legitimately repeat the same position several times in a row at the start of a
+        // track (three pos=0 pushes is normal), and treating the first repeat as a pause froze the
+        // progress bar before it ever moved.
+        if (info.positionSec > 0.0 || durationMs > 0L) {
+            val now = SystemClock.elapsedRealtime()
+            if (info.positionSec != lastReportedPositionSec) {
+                lastReportedPositionSec = info.positionSec
+                lastPositionChangedAt = now
+                if (isPaused && !info.paused) {
+                    isPaused = false
+                    positionBaseEpoch = now
                 }
-            } else if (isPaused && !info.paused) {
-                isPaused = false
-                positionBaseEpoch = SystemClock.elapsedRealtime()
+            } else if (!isPaused && lastPositionChangedAt > 0L &&
+                       now - lastPositionChangedAt > PAUSE_STALL_MS) {
+                if (positionBaseEpoch > 0L) {
+                    positionBaseMs += ((now - positionBaseEpoch) * seekMultiplier).toLong()
+                    positionBaseEpoch = 0L
+                }
+                isPaused = true
+                Timber.d("Progress unchanged for ${PAUSE_STALL_MS}ms — treating as paused")
             }
-            lastReportedPositionSec = info.positionSec
         }
 
         if (info.durationSec > 0) {
@@ -879,6 +884,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val SCROLL_MS_PER_PX = 14f
         private const val SCROLL_HOLD_MS = 1_500L
         private const val SCROLL_REST_MS = 4_000L
+
+        /** How long the sender-reported position may sit still before it means "paused". */
+        private const val PAUSE_STALL_MS = 4_000L
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
         /** How often to nudge, how long the nudge takes, and how far — a handful of pixels. */

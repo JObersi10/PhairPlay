@@ -43,7 +43,6 @@ class MirrorStreamServer(
      * deliberately kept alive (locking the phone must not end a mirror); the UI just blanks so the
      * last frame isn't left frozen on the panel, and unblanks when frames resume.
      */
-    private val onVideoIdle: (Boolean) -> Unit = {},
 ) {
     private sealed class Item
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
@@ -55,8 +54,6 @@ class MirrorStreamServer(
 
     @Volatile private var running = false
     @Volatile private var client: Socket? = null
-    /** True while video has gone idle and the UI is blanked. */
-    @Volatile private var videoIdle = false
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
     private var configAtMs = 0L
@@ -111,19 +108,6 @@ class MirrorStreamServer(
             val header = ByteArray(128)
             lastVideoMs = System.currentTimeMillis()
             while (running && !socket.isClosed) {
-                // Silence on the socket isn't a usable signal: with the phone's screen off iOS
-                // keeps the connection busy with non-video payloads. Watch for the absence of
-                // actual VIDEO, and blank rather than disconnect — the session stays up so
-                // unlocking the phone resumes the mirror instantly.
-                // Only blank a session that was genuinely showing video. An audio-only AirPlay
-                // session also runs this server, and blanking there put a black panel over the
-                // now-playing card for no reason.
-                if (firstVideoAtMs != 0L && !videoIdle &&
-                    System.currentTimeMillis() - lastVideoMs > IDLE_TIMEOUT_MS) {
-                    videoIdle = true
-                    Logger.i("Mirror: no video for ${IDLE_TIMEOUT_MS}ms — blanking (session kept)")
-                    onVideoIdle(true)
-                }
                 if (!readFully(input, header, 128)) break
                 val payloadSize = leInt(header, 0)
                 val payloadType = leShort(header, 4) and 0xFF
@@ -143,11 +127,6 @@ class MirrorStreamServer(
                             // The gap between SPS/PPS and this line is the sender's keyframe delay,
                             // which we cannot influence — worth separating from our own setup cost.
                             Logger.i("Mirror timing: first video payload +${firstVideoAtMs - listenMs}ms after listen")
-                        }
-                        if (videoIdle) {
-                            videoIdle = false
-                            Logger.i("Mirror: video resumed — unblanking")
-                            onVideoIdle(false)
                         }
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
@@ -176,8 +155,8 @@ class MirrorStreamServer(
                 }
             }
         } catch (e: java.net.SocketTimeoutException) {
-            // Nothing at all on the socket. Still not a disconnect — keep the session, just blank.
-            if (running && firstVideoAtMs != 0L && !videoIdle) { videoIdle = true; onVideoIdle(true) }
+            // A quiet sender is not a disconnect — a phone sitting on a static screen sends nothing
+            // for long stretches. Keep waiting; the session ends when the socket actually closes.
         } catch (e: Exception) {
             if (running) Logger.e("Mirror reader error", e)
         } finally {
@@ -355,7 +334,7 @@ class MirrorStreamServer(
 
         private const val MAX_PAYLOAD = 8 * 1024 * 1024        // 8 MB sanity cap per frame
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
-        /** No video for this long means blank the panel (the session itself stays connected). */
+        /** Read timeout on the mirror socket. Purely so the thread can re-check `running`. */
         private const val IDLE_TIMEOUT_MS = 3_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping

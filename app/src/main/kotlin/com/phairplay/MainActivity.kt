@@ -84,6 +84,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Cached AppSettings.backGoesHome: Back during a stream backgrounds instead of ending it. */
     private var backGoesHome = false
+
+    /** Cached AppSettings.pipEnabled — checked from onUserLeaveHint, which can't suspend. */
+    private var pipEnabled = true
     private var isSeekActive = false
 
     // True while a stream is on screen — used to detect the active→idle edge in trackSessionEnd().
@@ -214,7 +217,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (currentVideoPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (pipEnabled && currentVideoPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             runCatching {
                 enterPictureInPictureMode(
                     PictureInPictureParams.Builder()
@@ -489,6 +492,7 @@ class MainActivity : AppCompatActivity() {
                 // Cached because onBackPressed is synchronous and can't await DataStore.
                 backQuitsApp = settings.backQuitsApp
                 backGoesHome = settings.backGoesHome
+                pipEnabled = settings.pipEnabled
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
                 // reflects what is coming out of the speakers rather than what has been received.
                 nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)
@@ -586,9 +590,6 @@ class MainActivity : AppCompatActivity() {
                 currentNowPlaying = info
                 updateOverlay()
             }
-        }
-        lifecycleScope.launch {
-            svc.videoIdle.collectLatest { idle -> streamingScreen.setBlackout(idle) }
         }
         lifecycleScope.launch {
             svc.videoPlaying.collectLatest { playing ->
