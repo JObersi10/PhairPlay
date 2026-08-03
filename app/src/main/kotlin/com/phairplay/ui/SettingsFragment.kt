@@ -289,7 +289,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowRememberPin) { enabled -> saveAndRestart { it.copy(rememberPinPairing = enabled) } }
         rowForgetPairings.setOnClickListener { forgetPairings() }
 
-        rowReset.setOnClickListener { resetSettings() }
+        rowReset.setOnClickListener { confirmResetSettings() }
         rowQuit.setOnClickListener { confirmQuit() }
     }
 
@@ -423,9 +423,20 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Resets all settings to defaults and repopulates the UI.
-     * TODO: Add a confirmation dialog before resetting.
+     * Resets all settings to defaults, behind a confirmation.
+     *
+     * This wipes onboardingComplete too, so the next launch replays the whole first-run flow — an
+     * expensive thing to trigger by accidentally pressing OK on a focused row.
      */
+    private fun confirmResetSettings() {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_reset_defaults)
+            .setMessage(R.string.setting_reset_confirm)
+            .setPositiveButton(R.string.setting_reset_defaults) { _, _ -> resetSettings() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun resetSettings() {
         viewLifecycleOwner.lifecycleScope.launch {
             settingsRepository.resetToDefaults()

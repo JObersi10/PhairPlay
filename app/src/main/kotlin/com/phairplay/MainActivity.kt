@@ -161,7 +161,6 @@ class MainActivity : AppCompatActivity() {
                 // launch. Same for the screensaver and high-resolution settings.
                 Timber.i("Onboarding finished — restarting receivers to pick up chosen settings")
                 ServiceController.restart(this)
-                applyNowPlayingSettings()
             }
         }
         supportFragmentManager.beginTransaction()
@@ -190,7 +189,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart()
         // Re-read on every foregrounding: the user may have just changed these in Settings.
-        applyNowPlayingSettings()
+        // Settings are collected continuously from onCreate — no re-read needed here.
         // Start before binding. BIND_AUTO_CREATE on its own creates a bound-only service that never
         // receives onStartCommand and dies at unbind, so the receiver only lived while this Activity
         // was on screen. Both calls are idempotent.
@@ -387,6 +386,8 @@ class MainActivity : AppCompatActivity() {
         nowPlayingScreen.clear()
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
+        // Wipe the last decoded frame — hiding the container alone leaves it in the surface buffer.
+        streamingScreen.clearToBlack()
         streamingScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.GONE
     }
@@ -462,14 +463,18 @@ class MainActivity : AppCompatActivity() {
      * the screen itself so the view stays free of DataStore and coroutine plumbing.
      */
     private fun applyNowPlayingSettings() {
+        // Collect rather than read once. SettingsFragment is a fragment swap, not a new Activity, so
+        // onStart never fires after the user flips a toggle — a one-shot read left "Back exits
+        // PhairPlay" stuck on whatever it was when the app launched, which is why toggling it
+        // appeared to do nothing. The flow also keeps the screensaver config live for free.
         lifecycleScope.launch {
-            val settings = SettingsRepository(this@MainActivity).settingsFlow.first()
-            nowPlayingScreen.setScreensaverConfig(
-                settings.screensaverEnabled, settings.screensaverTimeoutMin
-            )
-            // Cached because onBackPressed is synchronous and can't await DataStore. Re-read on every
-            // resume, so toggling the setting takes effect without restarting the app.
-            backQuitsApp = settings.backQuitsApp
+            SettingsRepository(this@MainActivity).settingsFlow.collectLatest { settings ->
+                nowPlayingScreen.setScreensaverConfig(
+                    settings.screensaverEnabled, settings.screensaverTimeoutMin
+                )
+                // Cached because onBackPressed is synchronous and can't await DataStore.
+                backQuitsApp = settings.backQuitsApp
+            }
         }
     }
 

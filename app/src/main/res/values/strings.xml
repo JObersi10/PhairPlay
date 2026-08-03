@@ -96,6 +96,7 @@
     <string name="setting_force_high_res_subtitle">Sharper mirroring; uses more CPU. Off = 1080p</string>
     <string name="setting_version">Version</string>
     <string name="setting_reset_defaults">Reset to defaults</string>
+    <string name="setting_reset_confirm">This clears every setting and replays the first-run setup on the next launch.</string>
 
     <!-- ── Waiting screen (legacy, used by WaitingScreen view) ─── -->
     <string name="waiting_title">Ready for AirPlay</string>

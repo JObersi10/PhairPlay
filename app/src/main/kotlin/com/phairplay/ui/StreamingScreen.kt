@@ -129,6 +129,23 @@ class StreamingScreen @JvmOverloads constructor(
     fun getSurface(): Surface? = surface
 
     /**
+     * Paints the video surface black.
+     *
+     * A SurfaceView keeps whatever was last decoded into it, so ending a session only hid the
+     * container while the stale final frame stayed in the buffer. Most visible when a sender
+     * disappears without sending TEARDOWN — switching the phone's screen off left the last mirrored
+     * image on the TV until the socket eventually timed out.
+     */
+    fun clearToBlack() {
+        val s = surface ?: return
+        runCatching {
+            val canvas = s.lockCanvas(null)
+            canvas.drawColor(Color.BLACK)
+            s.unlockCanvasAndPost(canvas)
+        }
+    }
+
+    /**
      * Sizes the SurfaceView to the decoded video's aspect ratio (letterbox/pillarbox) instead of
      * stretching it to fill 16:9. Without this, a portrait phone stream is squashed horizontally.
      * Falls back to filling the container when the size isn't known yet.
