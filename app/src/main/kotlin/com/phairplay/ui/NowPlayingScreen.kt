@@ -45,6 +45,8 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── State ────────────────────────────────────────────────────────────────
     private val handler = Handler(Looper.getMainLooper())
     private var positionBaseMs = 0L    // position snapshot when epoch was anchored
+    /** How far behind the sender we actually play — see [senderPositionMs]. */
+    private var presentationLatencyMs = 0L
     private var positionBaseEpoch = 0L // elapsedRealtime at last anchor
     private var durationMs = 0L
     private var currentTitle: String? = null
@@ -480,8 +482,14 @@ class NowPlayingScreen @JvmOverloads constructor(
 
     // ── update() ─────────────────────────────────────────────────────────────
     fun update(info: NowPlayingInfo) {
-        // Sync pause from RTSP PAUSE only (info.paused=true). Never auto-resume from server
-        // because Apple Music never sends RTSP PAUSE so info.paused is always false — if we
+        // info.paused is now driven by whether audio packets are actually arriving, not by RTSP
+        // PAUSE (which Apple Music never sends), so it is trustworthy in both directions.
+        if (!info.paused && isPaused) {
+            isPaused = false
+            positionBaseEpoch = SystemClock.elapsedRealtime()
+        }
+        // Historical note: pause used to sync one way only. Never auto-resume from server
+        // because Apple Music never sends RTSP PAUSE so info.paused was always false — if we
         // synced resume here it would override local togglePause() on every metadata update.
         if (info.paused && !isPaused) {
             if (positionBaseEpoch > 0L) {
@@ -530,7 +538,7 @@ class NowPlayingScreen @JvmOverloads constructor(
             // Seed from the sender's reported position rather than 0. Returning from Home clears
             // currentTitle, so the same track looked like a new one and the elapsed time snapped
             // back to 0:00 until the next progress push — which can be 40s away.
-            positionBaseMs = (info.positionSec * 1000).toLong().coerceAtLeast(0L)
+            positionBaseMs = senderPositionMs(info.positionSec)
             // A track change counts as activity: the screensaver shouldn't cover a song the user
             // just started, and it should re-arm from here rather than from the last button press.
             notifyActivity()
@@ -538,7 +546,7 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         if (info.durationSec > 0) {
             durationMs = (info.durationSec * 1000).toLong()
-            val newPosMs = (info.positionSec * 1000).toLong()
+            val newPosMs = senderPositionMs(info.positionSec)
             val expectedMs = if (positionBaseEpoch > 0L)
                 positionBaseMs + ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
             else positionBaseMs
@@ -700,6 +708,20 @@ class NowPlayingScreen @JvmOverloads constructor(
             .translationX(dx * SHIFT_PX).translationY(dy * SHIFT_PX)
             .setDuration(duration).setInterpolator(DecelerateInterpolator()).start()
     }
+
+    /**
+     * Converts the sender's reported position into what we are actually playing right now.
+     *
+     * The sender streams ahead of its own playback point, so the position it reports describes
+     * audio we have buffered but not yet output. Displaying it raw made the elapsed time run ahead
+     * of the sound — and ahead of the phone's own progress bar — by exactly the presentation
+     * latency.
+     */
+    private fun senderPositionMs(positionSec: Double): Long =
+        ((positionSec * 1000).toLong() - presentationLatencyMs).coerceAtLeast(0L)
+
+    /** Total audio latency (sender-requested + user trim), from settings. */
+    fun setPresentationLatency(ms: Int) { presentationLatencyMs = ms.toLong() }
 
     override fun onVisibilityChanged(changedView: View, visibility: Int) {
         super.onVisibilityChanged(changedView, visibility)

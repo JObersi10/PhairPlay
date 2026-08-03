@@ -59,6 +59,8 @@ class MirrorStreamServer(
     @Volatile private var videoIdle = false
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
+    private var configAtMs = 0L
+    private var firstVideoAtMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
     private var lastSps: ByteArray? = null
     private var lastPps: ByteArray? = null
@@ -98,7 +100,9 @@ class MirrorStreamServer(
     private fun runReader() {
         try {
             Logger.i("MirrorStreamServer listening on data port $dataPort")
+            val listenMs = System.currentTimeMillis()
             val socket = serverSocket.accept().also { client = it }
+            Logger.i("Mirror timing: sender connected +${System.currentTimeMillis() - listenMs}ms after listen")
             // A sleeping sender never closes the socket, so a blocking read would wait indefinitely.
             // Time out instead and treat prolonged silence as the session ending.
             socket.soTimeout = IDLE_TIMEOUT_MS
@@ -130,6 +134,12 @@ class MirrorStreamServer(
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
                         // skipping any packet desyncs the keystream and corrupts all later frames.
                         lastVideoMs = System.currentTimeMillis()
+                        if (firstVideoAtMs == 0L) {
+                            firstVideoAtMs = lastVideoMs
+                            // The gap between SPS/PPS and this line is the sender's keyframe delay,
+                            // which we cannot influence — worth separating from our own setup cost.
+                            Logger.i("Mirror timing: first video payload +${firstVideoAtMs - listenMs}ms after listen")
+                        }
                         if (videoIdle) {
                             videoIdle = false
                             Logger.i("Mirror: video resumed — unblanking")
@@ -138,7 +148,13 @@ class MirrorStreamServer(
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
-                    1 -> parseConfig(payload)?.let { enqueue(it) }
+                    1 -> {
+                        if (configAtMs == 0L) {
+                            configAtMs = System.currentTimeMillis()
+                            Logger.i("Mirror timing: SPS/PPS +${configAtMs - listenMs}ms after listen")
+                        }
+                        parseConfig(payload)?.let { enqueue(it) }
+                    }
                     else -> {
                         // Deliberately NOT decrypted or enqueued: the AES-CTR keystream must advance
                         // exactly once per real video payload, and feeding an unknown type through

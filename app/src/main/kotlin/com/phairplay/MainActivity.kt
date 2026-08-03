@@ -477,6 +477,9 @@ class MainActivity : AppCompatActivity() {
                 )
                 // Cached because onBackPressed is synchronous and can't await DataStore.
                 backQuitsApp = settings.backQuitsApp
+                // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
+                // reflects what is coming out of the speakers rather than what has been received.
+                nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)
             }
         }
     }
@@ -535,6 +538,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** Latency every AirPlay sender asks for in SETUP latencyMin: 11025 samples @44.1kHz. */
+        private const val BASE_LATENCY_MS = 250
+
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
         /** Set by PhairPlayService when it opens this Activity for an incoming sender. */
         const val EXTRA_OPENED_BY_SENDER = "com.phairplay.extra.OPENED_BY_SENDER"

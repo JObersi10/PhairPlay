@@ -57,6 +57,14 @@ class AudioStreamServer(
     private val latencyMinSamples: Int = 11025,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
+    /**
+     * True when audio packets have stopped arriving, false when they resume.
+     *
+     * This is how a pause is actually detected. Apple Music never sends RTSP PAUSE, so the
+     * protocol-level paused flag stays false forever and the progress bar kept counting through a
+     * paused track. The stream itself is unambiguous: paused senders stop transmitting.
+     */
+    val onAudioIdle: (Boolean) -> Unit = {},
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
@@ -120,6 +128,8 @@ class AudioStreamServer(
     @Volatile private var qDropCount = 0
     @Volatile private var resendReqCount = 0
     @Volatile private var resendFillCount = 0
+    /** True while no audio packets are arriving — i.e. the sender is paused. */
+    @Volatile private var audioIdle = false
 
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
@@ -181,6 +191,8 @@ class AudioStreamServer(
 
     /** Receive thread: pull RTP packets off the data socket and feed them to the reorder buffer. */
     private fun runReceive() {
+        // Bounded wait so a paused sender surfaces as an idle stream instead of blocking forever.
+        runCatching { socket.soTimeout = AUDIO_IDLE_MS }
         try {
             Logger.i("AudioStreamServer listening on UDP $dataPort (ct=$codecType ${sampleRate}Hz x$channels)")
             val buf = ByteArray(2048)
@@ -189,7 +201,13 @@ class AudioStreamServer(
             var recv = 0
             while (running) {
                 packet.length = buf.size      // reset capacity — receive() shrinks length to the last datagram
-                socket.receive(packet)
+                try {
+                    socket.receive(packet)
+                } catch (e: java.net.SocketTimeoutException) {
+                    if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
+                    continue
+                }
+                if (audioIdle) { audioIdle = false; onAudioIdle(false) }
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
@@ -524,6 +542,9 @@ class AudioStreamServer(
         private const val TARGET_BUFFER_MS = 300
 
         private const val PRIME_TIMEOUT_MS = 700L
+
+        /** Silence on the audio stream that means "paused" rather than "a packet was late". */
+        private const val AUDIO_IDLE_MS = 1_200
 
         // Sliding window of recently-played RTP sequence numbers for duplicate suppression.
         // ~11 s at 92 packets/s — far longer than any retransmit gap, far shorter than the
