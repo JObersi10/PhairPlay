@@ -56,6 +56,8 @@ class MirrorStreamServer(
     @Volatile private var client: Socket? = null
     /** Set when the reader exits because the sender went silent, not because it disconnected. */
     @Volatile private var stalled = false
+    /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
+    @Volatile private var lastVideoMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
     private var lastSps: ByteArray? = null
     private var lastPps: ByteArray? = null
@@ -102,7 +104,17 @@ class MirrorStreamServer(
             Logger.i("Mirror data connection from ${socket.inetAddress.hostAddress}")
             val input = socket.getInputStream()
             val header = ByteArray(128)
+            lastVideoMs = System.currentTimeMillis()
             while (running && !socket.isClosed) {
+                // Silence on the socket isn't a reliable end-of-session signal: with the phone's
+                // screen off iOS keeps the connection busy with non-video payloads, so the read
+                // timeout never fires and the last frame stayed frozen on the TV. Watch for the
+                // absence of actual VIDEO instead.
+                if (System.currentTimeMillis() - lastVideoMs > STALL_TIMEOUT_MS) {
+                    Logger.i("Mirror: no video for ${STALL_TIMEOUT_MS}ms — treating session as ended")
+                    stalled = true
+                    break
+                }
                 if (!readFully(input, header, 128)) break
                 val payloadSize = leInt(header, 0)
                 val payloadType = leShort(header, 4) and 0xFF
@@ -116,6 +128,7 @@ class MirrorStreamServer(
                     0 -> {
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
                         // skipping any packet desyncs the keystream and corrupts all later frames.
+                        lastVideoMs = System.currentTimeMillis()
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }

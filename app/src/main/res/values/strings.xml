@@ -90,6 +90,9 @@
     <string name="setting_start_on_boot">Start on boot</string>
     <string name="setting_debug_overlay">Debug overlay</string>
     <string name="setting_debug_overlay_subtitle">Show live FPS, queue and drop stats while streaming</string>
+    <string name="setting_audio_delay">Audio delay</string>
+    <string name="setting_audio_delay_none">None</string>
+    <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>
     <string name="setting_back_quits">Back exits PhairPlay</string>
     <string name="setting_back_quits_subtitle">Back on the home screen stops the receiver instead of leaving it running</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>

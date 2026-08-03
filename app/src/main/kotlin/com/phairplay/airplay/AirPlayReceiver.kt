@@ -61,6 +61,8 @@ class AirPlayReceiver(
     private val pinAuthEnabled: Boolean = false,
     /** Whether a previously PIN-paired sender may skip the code (AppSettings.rememberPinPairing). */
     private val rememberPinPairing: Boolean = true,
+    /** User A/V-sync trim added on top of the sender's requested latency (AppSettings.audioDelayMs). */
+    private val audioDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -521,7 +523,8 @@ class AirPlayReceiver(
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
-            latencyMinSamples = latencyMinSamples, onEnergy = { e -> onEnergyChanged(e) })
+            latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
+            onEnergy = { e -> onEnergyChanged(e) })
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()

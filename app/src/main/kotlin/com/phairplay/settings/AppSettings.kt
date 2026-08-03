@@ -126,6 +126,17 @@ data class AppSettings(
      */
     val backQuitsApp: Boolean = false,
 
+    /**
+     * Extra delay applied to AirPlay audio, in milliseconds, on top of the latency the sender asks
+     * for in its SETUP `latencyMin`.
+     *
+     * Senders stream ahead of their own playback position and expect the receiver to hold each
+     * frame back. Honouring latencyMin alone still left audio running ahead of the phone's lyric
+     * timeline on this hardware, and the true offset depends on the sender, the codec and the
+     * output path (Bluetooth adds its own). Rather than bake in a guessed constant, expose it.
+     */
+    val audioDelayMs: Int = 0,
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

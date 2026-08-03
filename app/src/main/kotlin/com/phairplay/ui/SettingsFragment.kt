@@ -59,6 +59,8 @@ class SettingsFragment : Fragment() {
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowBackQuits: View
+    private lateinit var rowAudioDelay: LinearLayout
+    private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
     private lateinit var rowRememberPin: View
     private lateinit var rowForgetPairings: LinearLayout
@@ -107,6 +109,8 @@ class SettingsFragment : Fragment() {
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowBackQuits        = view.findViewById(R.id.row_back_quits)
+        rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
+        textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         rowRememberPin      = view.findViewById(R.id.row_remember_pin)
         rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
@@ -210,6 +214,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowBackQuits, settings.backQuitsApp)
+        showAudioDelay(settings.audioDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
         showSenderVolumeMode(settings.senderVolumeMode)
@@ -282,6 +287,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowBackQuits) { enabled -> save { it.copy(backQuitsApp = enabled) } }
+        rowAudioDelay.setOnClickListener { pickAudioDelay() }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
@@ -402,6 +408,34 @@ class SettingsFragment : Fragment() {
             .show()
     }
 
+    private fun showAudioDelay(ms: Int) {
+        textAudioDelayValue.text = if (ms == 0) getString(R.string.setting_audio_delay_none) else "+$ms ms"
+    }
+
+    /**
+     * Lets the user trim A/V sync by ear.
+     *
+     * The sender's requested latency is honoured automatically, but the residual offset depends on
+     * the sender, the codec and the output path — Bluetooth in particular adds its own delay that
+     * no amount of protocol correctness can predict. A dial beats a guessed constant.
+     */
+    private fun pickAudioDelay() {
+        val labels = AUDIO_DELAY_CHOICES.map {
+            if (it == 0) getString(R.string.setting_audio_delay_none) else "+$it ms"
+        }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_audio_delay)
+            .setItems(labels) { _, which ->
+                val ms = AUDIO_DELAY_CHOICES[which]
+                save { it.copy(audioDelayMs = ms) }
+                showAudioDelay(ms)
+                Logger.i("Audio delay set to $ms ms — restarting receivers to apply")
+                ServiceController.restart(requireContext())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     /**
      * Fully stops PhairPlay: receivers down, service stopped, task removed.
      *
@@ -448,5 +482,8 @@ class SettingsFragment : Fragment() {
 
     private companion object {
         val SCREENSAVER_TIMEOUT_CHOICES = listOf(1, 2, 5, 10, 15, 30, 60)
+
+        /** A/V sync trim options, in milliseconds added to the sender's requested latency. */
+        val AUDIO_DELAY_CHOICES = listOf(0, 100, 200, 300, 500, 750, 1000, 1500)
     }
 }

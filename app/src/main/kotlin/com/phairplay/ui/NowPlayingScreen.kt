@@ -78,12 +78,13 @@ class NowPlayingScreen @JvmOverloads constructor(
     private var screensaverEnabled = true
     private var screensaverDelayMs = DEFAULT_SCREENSAVER_MINUTES * 60_000L
     private var screensaverActive = false
-    private var breatheAnimator: ObjectAnimator? = null
+    /** Position in [SHIFT_STEPS] — the OLED-style burn-in nudge cycle. */
+    private var shiftIndex = 0
     private val enterScreensaver = Runnable { startScreensaver() }
     private val driftRunnable = object : Runnable {
         override fun run() {
-            drift(DRIFT_DURATION_MS)
-            handler.postDelayed(this, DRIFT_INTERVAL_MS)
+            drift(SHIFT_DURATION_MS)
+            handler.postDelayed(this, SHIFT_INTERVAL_MS)
         }
     }
 
@@ -668,23 +669,18 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         dynamicBg.animate().alpha(0f).setDuration(FADE_TO_BLACK_MS).start()
         pillWrapper.animate().alpha(0f).setDuration(FADE_TO_BLACK_MS).start()
-        drift(FADE_TO_BLACK_MS)
-
-        breatheAnimator = ObjectAnimator.ofFloat(contentGroup, View.ALPHA, 1f, SCREENSAVER_MIN_ALPHA).apply {
-            duration = BREATHE_MS
-            repeatCount = ValueAnimator.INFINITE
-            repeatMode = ValueAnimator.REVERSE
-            start()
-        }
-        handler.postDelayed(driftRunnable, DRIFT_INTERVAL_MS)
+        // Dim once and stay there. The old version pulsed alpha with an ObjectAnimator while drift()
+        // ran a ViewPropertyAnimator on the same view — the two fought over contentGroup, so every
+        // move was preceded by a visible brighten.
+        contentGroup.animate().alpha(SCREENSAVER_MIN_ALPHA).setDuration(FADE_TO_BLACK_MS).start()
+        shiftIndex = 0
+        handler.postDelayed(driftRunnable, SHIFT_INTERVAL_MS)
     }
 
     private fun wakeFromScreensaver() {
         if (!screensaverActive) return
         screensaverActive = false
         handler.removeCallbacks(driftRunnable)
-        breatheAnimator?.cancel()
-        breatheAnimator = null
         dynamicBg.animate().alpha(1f).setDuration(WAKE_MS).start()
         pillWrapper.animate().alpha(1f).setDuration(WAKE_MS).start()
         contentGroup.animate()
@@ -693,15 +689,15 @@ class NowPlayingScreen @JvmOverloads constructor(
     }
 
     /**
-     * Moves the card to a new random spot within a safe margin. Repeated every [DRIFT_INTERVAL_MS]
-     * so a paused track left on screen for hours never burns a fixed image into the panel.
+     * Pixel-shift for burn-in protection, the way an OLED TV does it: a few pixels, on a fixed
+     * cycle, slowly enough to be invisible. Deliberately touches only translation — no alpha, no
+     * scale — so nothing competes with the dim and the card never flashes brighter as it moves.
      */
     private fun drift(duration: Long) {
-        val dx = ((Math.random().toFloat() * 2f) - 1f) * width * DRIFT_X_FRACTION
-        val dy = ((Math.random().toFloat() * 2f) - 1f) * height * DRIFT_Y_FRACTION
+        val (dx, dy) = SHIFT_STEPS[shiftIndex % SHIFT_STEPS.size]
+        shiftIndex++
         contentGroup.animate()
-            .translationX(dx).translationY(dy)
-            .scaleX(SCREENSAVER_SCALE).scaleY(SCREENSAVER_SCALE)
+            .translationX(dx * SHIFT_PX).translationY(dy * SHIFT_PX)
             .setDuration(duration).setInterpolator(DecelerateInterpolator()).start()
     }
 
@@ -780,9 +776,15 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val BREATHE_MS = 7000L
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
-        private const val DRIFT_INTERVAL_MS = 45_000L
-        private const val DRIFT_DURATION_MS = 12_000L
-        private const val DRIFT_X_FRACTION = 0.07f
-        private const val DRIFT_Y_FRACTION = 0.10f
+        /** How often to nudge, how long the nudge takes, and how far — a handful of pixels. */
+        private const val SHIFT_INTERVAL_MS = 60_000L
+        private const val SHIFT_DURATION_MS = 2_000L
+        private const val SHIFT_PX = 8f
+
+        /** Fixed cycle of unit offsets, so the card creeps around a small box and returns. */
+        private val SHIFT_STEPS = listOf(
+            0f to 0f, 1f to 0f, 1f to 1f, 0f to 1f,
+            -1f to 1f, -1f to 0f, -1f to -1f, 0f to -1f, 1f to -1f,
+        )
     }
 }
