@@ -13,6 +13,7 @@ import android.util.Rational
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
@@ -592,8 +593,27 @@ class MainActivity : AppCompatActivity() {
             photoFrame != null -> showPhotoScreen(photoFrame)
             else -> hideStreamingScreen()
         }
-        trackSessionEnd(pin != null || currentVideoPlaying || nowPlaying != null ||
-                        photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED)
+        val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
+                            photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED
+        keepScreenAwake(sessionActive)
+        trackSessionEnd(sessionActive)
+    }
+
+    /**
+     * Holds off Fire TV's own screensaver while a session is on screen.
+     *
+     * The service's wake lock is PARTIAL_WAKE_LOCK, which keeps the CPU running but deliberately
+     * lets the display sleep — so during AirPlay audio or DLNA playback, where nothing is being
+     * drawn to a video surface, Fire OS would blank the screen and start its screensaver over a
+     * perfectly live session. FLAG_KEEP_SCREEN_ON is the only thing that suppresses it, and it is
+     * cleared the moment the session ends so idle PhairPlay doesn't pin the display on.
+     *
+     * This is unrelated to the app's own idle screensaver, which is a visual effect drawn by
+     * NowPlayingScreen and still runs on its own timeout.
+     */
+    private fun keepScreenAwake(active: Boolean) {
+        if (active) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     /**
