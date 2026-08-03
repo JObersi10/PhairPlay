@@ -155,6 +155,30 @@ class StreamingScreen @JvmOverloads constructor(
         surfaceView.layoutParams = (surfaceView.layoutParams as LayoutParams).apply {
             width = targetW; height = targetH; gravity = Gravity.CENTER
         }
+        applyCropScale()
+    }
+
+    /**
+     * Hides the decoder's alignment padding.
+     *
+     * H.264 buffers are allocated in multiples of the codec's alignment, so a 666-wide portrait
+     * mirror is really a 672-wide buffer with 6 junk columns on the right. This decoder renders the
+     * whole buffer rather than honouring the SPS crop rectangle, and those columns showed up as
+     * thin vertical bands of smeared pixels down the right edge. Scaling the surface by
+     * buffer/cropped and anchoring at the top-left pushes the padding outside the view, which the
+     * parent clips — the visible area then shows exactly the cropped picture.
+     */
+    private fun applyCropScale() {
+        val vw = StreamStats.videoWidth
+        val vh = StreamStats.videoHeight
+        val pw = StreamStats.videoPadWidth
+        val ph = StreamStats.videoPadHeight
+        val sx = if (vw > 0 && pw > vw) pw.toFloat() / vw else 1f
+        val sy = if (vh > 0 && ph > vh) ph.toFloat() / vh else 1f
+        surfaceView.pivotX = 0f
+        surfaceView.pivotY = 0f
+        surfaceView.scaleX = sx
+        surfaceView.scaleY = sy
     }
 
     override fun onAttachedToWindow() {

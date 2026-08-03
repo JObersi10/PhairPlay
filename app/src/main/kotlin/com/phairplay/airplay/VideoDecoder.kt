@@ -222,8 +222,10 @@ class VideoDecoder(private val outputSurface: Surface) {
 
     /** Reads the decoder's true display size (honouring the crop rectangle) for StreamingScreen. */
     private fun publishOutputSize(format: MediaFormat) {
-        var w = format.getInteger(MediaFormat.KEY_WIDTH)
-        var h = format.getInteger(MediaFormat.KEY_HEIGHT)
+        val padW = format.getInteger(MediaFormat.KEY_WIDTH)
+        val padH = format.getInteger(MediaFormat.KEY_HEIGHT)
+        var w = padW
+        var h = padH
         if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
             w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1
             h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1
@@ -235,7 +237,9 @@ class VideoDecoder(private val outputSurface: Surface) {
         if (isPlausibleSize(w, h)) {
             StreamStats.videoWidth = w
             StreamStats.videoHeight = h
-            Logger.i("Video output size ${w}x$h")
+            StreamStats.videoPadWidth = padW
+            StreamStats.videoPadHeight = padH
+            Logger.i("Video output size ${w}x$h (buffer ${padW}x$padH)")
         }
     }
 

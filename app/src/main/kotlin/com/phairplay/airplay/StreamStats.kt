@@ -26,6 +26,15 @@ object StreamStats {
     @Volatile var videoWidth = 0
     @Volatile var videoHeight = 0
 
+    /**
+     * The decoder's *allocated* buffer size, before the crop rectangle. Wider than [videoWidth]
+     * whenever the stream isn't a multiple of the codec's alignment (a portrait iPhone mirror
+     * reports 666, allocated as 672), and this decoder renders the whole buffer regardless of
+     * crop — so the surface has to be scaled to push the padding off-screen.
+     */
+    @Volatile var videoPadWidth = 0
+    @Volatile var videoPadHeight = 0
+
     // ─── Audio (AudioStreamServer) ───────────────────────────────────────────
     @Volatile var audioActive = false  // true while an audio stream is running
     @Volatile var audioQueue = 0       // current playback-queue depth
@@ -35,6 +44,7 @@ object StreamStats {
     fun resetStreams() {
         videoRes = ""; videoFps = 0; videoQueue = 0; videoDropPct = 0
         videoWidth = 0; videoHeight = 0
+        videoPadWidth = 0; videoPadHeight = 0
         audioActive = false; audioQueue = 0; audioDupPct = 0
     }
 
