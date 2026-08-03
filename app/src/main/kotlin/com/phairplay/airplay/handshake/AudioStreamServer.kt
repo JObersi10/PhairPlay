@@ -55,6 +55,8 @@ class AudioStreamServer(
      * ahead of the sender's timeline — audible as the music leading the lyrics on the phone.
      */
     private val latencyMinSamples: Int = 11025,
+    /** User A/V trim, also applied to the beat pulse so the visual matches what is heard. */
+    private val extraDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
     /**
@@ -137,6 +139,7 @@ class AudioStreamServer(
     private var historyIdx = 0
     private var lastOnsetMs = 0L
     private var envelope = 0f
+    private val energyHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
@@ -449,7 +452,10 @@ class AudioStreamServer(
         // Rate-limit emissions so a beat doesn't spam the UI thread.
         if (now - lastEnergyMs < 40 && !isOnset) return
         lastEnergyMs = now
-        onEnergy(envelope)
+        // Hold the pulse until the audio it describes is actually audible. Energy is measured as
+        // PCM enters the queue, but that sample is heard a whole presentation latency later, so
+        // emitting immediately made the backdrop flash ahead of the beat.
+        emitDelayed(envelope)
     }
 
 
@@ -518,6 +524,25 @@ class AudioStreamServer(
             qDropCount += dropped
             Logger.i("Audio: backlog resync — dropped $dropped frames, queue=${frameQueue.size}")
         }
+    }
+
+    /**
+     * Emits [value] once the AudioTrack has actually played the audio it was measured from.
+     *
+     * Uses the track's own reported latency where available — buffered frames plus whatever the
+     * output path adds — so the delay tracks reality instead of a constant. Bluetooth's link delay
+     * is not exposed by Android and is not included; the user's audio trim covers that.
+     */
+    private fun emitDelayed(value: Float) {
+        val track = audioTrack
+        val bufferedMs = if (track != null) {
+            val queuedFrames = frameQueue.size * framesPerPacket
+            val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
+            ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
+        } else 0L
+        val delay = bufferedMs + extraDelayMs
+        if (delay <= 0L) { onEnergy(value); return }
+        energyHandler.postDelayed({ onEnergy(value) }, delay)
     }
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */

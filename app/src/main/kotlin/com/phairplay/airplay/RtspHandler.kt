@@ -164,6 +164,13 @@ open class RtspHandler(
      * and pressing Back looked like it did nothing on the phone. Closing just the client socket
      * ends the session the way a sender expects, while the server keeps listening.
      */
+    /** Milestone timing for connect diagnosis: how long each handshake leg takes. */
+    private var connectStartMs = 0L
+    private fun stamp(what: String) {
+        if (connectStartMs == 0L) return
+        Logger.i("Connect timing: $what +${System.currentTimeMillis() - connectStartMs}ms")
+    }
+
     fun disconnectActiveClient() {
         val client = activeClient ?: return
         Logger.i("Dropping active RTSP client on user request")
@@ -216,6 +223,7 @@ open class RtspHandler(
 
             while (running && scope.isActive) {
                 val clientSocket = serverSocket!!.accept()
+                connectStartMs = System.currentTimeMillis()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
 
                 if (activeClient != null && !activeClient!!.isClosed) {
@@ -875,6 +883,7 @@ open class RtspHandler(
         // AirPlay 2 mirroring has no ANNOUNCE/SDP — RECORD just acknowledges the session.
         onPlaybackPaused(false)
         if (isMirrorSession) {
+            stamp("RECORD")
             Logger.i("RECORD (mirror session) — OK")
             return RtspResponse(
                 statusCode = 200, statusMessage = "OK",

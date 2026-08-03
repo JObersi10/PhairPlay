@@ -523,6 +523,7 @@ class AirPlayReceiver(
         val aesIv = mirrorAesIv ?: return 0 to 0
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
+            extraDelayMs = audioDelayMs.toLong(),
             onEnergy = { e -> onEnergyChanged(e) },
             // Apple Music never sends RTSP PAUSE, so a stopped stream is the only reliable
             // pause signal — without it the progress bar ran on through a paused track.

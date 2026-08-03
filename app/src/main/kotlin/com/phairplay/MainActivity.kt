@@ -85,6 +85,12 @@ class MainActivity : AppCompatActivity() {
     /** Cached AppSettings.backGoesHome: Back during a stream backgrounds instead of ending it. */
     private var backGoesHome = false
 
+    /** Which screen this session owns, latched until it ends. */
+    private enum class Mode { NONE, AUDIO, VIDEO }
+    private var sessionMode = Mode.NONE
+    /** Last metadata seen, so an audio session keeps its card when the sender stops sending any. */
+    private var lastNowPlaying: NowPlayingInfo? = null
+
     /** Cached AppSettings.pipEnabled — checked from onUserLeaveHint, which can't suspend. */
     private var pipEnabled = true
     private var isSeekActive = false
@@ -619,11 +625,24 @@ class MainActivity : AppCompatActivity() {
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
             pin != null -> showPinScreen(pin)
-            currentVideoPlaying || (currentAirPlayState == ProtocolState.CONNECTED && nowPlaying == null) -> showStreamingScreen()
-            nowPlaying != null -> showNowPlayingScreen(nowPlaying)
+            // Mode is latched for the whole session. Metadata comes and goes mid-track, and
+            // reacting to each change dropped an audio session onto an empty black video surface.
+            sessionMode == Mode.VIDEO -> showStreamingScreen()
+            sessionMode == Mode.AUDIO -> showNowPlayingScreen(nowPlaying ?: lastNowPlaying!!)
             photoFrame != null -> showPhotoScreen(photoFrame)
             else -> hideStreamingScreen()
         }
+        // Latch the mode on the first frame of evidence, clear it when the session ends.
+        if (nowPlaying != null) lastNowPlaying = nowPlaying
+        val connected = currentAirPlayState == ProtocolState.CONNECTED
+        if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
+        else if (sessionMode == Mode.NONE) {
+            sessionMode = if (nowPlaying != null) Mode.AUDIO
+                          else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
+        } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
+            sessionMode = Mode.AUDIO
+        }
+
         val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
                             photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED
         keepScreenAwake(sessionActive)

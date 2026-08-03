@@ -130,13 +130,6 @@ class DynamicBackground @JvmOverloads constructor(
 
         canvas.restoreToCount(sc)
 
-        // Center darken — suppress white hotspot where blobs converge
-        val darkR = maxOf(w, h) * 0.35f
-        val darkGrad = RadialGradient(w * 0.5f, h * 0.5f, darkR,
-            intArrayOf(0x55000000, 0x00000000), floatArrayOf(0f, 1f), Shader.TileMode.CLAMP)
-        clearPaint.shader = darkGrad
-        canvas.drawCircle(w * 0.5f, h * 0.5f, darkR, clearPaint)
-        clearPaint.shader = null
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
