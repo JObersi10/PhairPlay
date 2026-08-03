@@ -29,7 +29,7 @@ class DynamicBackground @JvmOverloads constructor(
     // Six palette colours; four blobs each lerp between two of them so the backdrop keeps
     // shifting even on a paused track. Cross-faded on song change.
     private val colors = IntArray(PALETTE_SIZE) { Color.parseColor(DEFAULTS[it % DEFAULTS.size]) }
-    private val targets = IntArray(4) { Color.parseColor(DEFAULTS[it % DEFAULTS.size]) }
+    private val targets = IntArray(PALETTE_SIZE) { Color.parseColor(DEFAULTS[it % DEFAULTS.size]) }
     private var colorFade = 1f
 
     private var energy = 0f
