@@ -11,6 +11,7 @@ import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.TransitionDrawable
@@ -179,6 +180,11 @@ class NowPlayingScreen @JvmOverloads constructor(
     init {
         // Pure black behind everything: the screensaver fades the coloured background out to this.
         setBackgroundColor(Color.BLACK)
+        // This sits over the whole app. Without being clickable and focusable it let presses fall
+        // through to the nav panel underneath, so the menu could still be operated during playback.
+        isClickable = true
+        isFocusable = true
+        isFocusableInTouchMode = true
         dynamicBg = DynamicBackground(context).apply {
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
         }
@@ -339,6 +345,10 @@ class NowPlayingScreen @JvmOverloads constructor(
         // Long titles scroll instead of clipping. Marquee only animates on a "selected" view, and
         // these are non-focusable, so selection is forced on once here rather than per update.
         listOf(titleView, artistView, albumView, metaSecondaryView).forEach { it.enableMarquee() }
+
+        // The text column sits right of the artwork, vertically centred. Point the backdrop's
+        // darkening there so contrast lands under the words instead of dimming a whole edge.
+        post { dynamicBg.setTextFocus(0.62f, 0.5f, 0.38f) }
     }
 
     /**
@@ -678,8 +688,14 @@ class NowPlayingScreen @JvmOverloads constructor(
             dynamicBg.resetColors()
             // Tint the placeholder itself rather than the ImageView: an ImageView colour filter
             // would also wash out the outgoing artwork for the length of the fade.
-            (context.getDrawable(R.drawable.ic_airplay) ?: ColorDrawable(Color.TRANSPARENT))
+            // Fill the same square the album art occupies, with the glyph inset. Handing the
+            // ImageView a bare icon let CENTER_CROP scale the glyph to the full frame, which read
+            // as a round blob rather than a cover-shaped placeholder.
+            val glyph = (context.getDrawable(R.drawable.ic_airplay) ?: ColorDrawable(Color.TRANSPARENT))
                 .mutate().apply { setTint(Color.parseColor("#66FFFFFF")) }
+            LayerDrawable(arrayOf(ColorDrawable(Color.parseColor("#1AFFFFFF")), glyph)).apply {
+                setLayerInset(1, dp(80), dp(80), dp(80), dp(80))
+            }
         }
 
         val previous = currentArtDrawable
@@ -722,6 +738,11 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Idle screensaver ──────────────────────────────────────────────────────
 
     /** Applies the user's screensaver preferences and re-arms the idle countdown. */
+    /** Beat Pulse from Settings: 1 Normal, 2 Strong, 3 Insane. */
+    fun setBeatPulse(level: Int) {
+        dynamicBg.setBeatMultiplier(when (level) { 2 -> 2f; 3 -> 3.5f; else -> 1f })
+    }
+
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {
         screensaverEnabled = enabled
         screensaverDelayMs = timeoutMinutes.coerceAtLeast(1) * 60_000L

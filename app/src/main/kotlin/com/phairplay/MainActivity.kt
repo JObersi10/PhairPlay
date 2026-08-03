@@ -493,6 +493,7 @@ class MainActivity : AppCompatActivity() {
                 backQuitsApp = settings.backQuitsApp
                 backGoesHome = settings.backGoesHome
                 pipEnabled = settings.pipEnabled
+                nowPlayingScreen.setBeatPulse(settings.beatPulse)
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
                 // reflects what is coming out of the speakers rather than what has been received.
                 nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)

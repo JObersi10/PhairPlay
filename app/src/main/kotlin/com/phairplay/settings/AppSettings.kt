@@ -150,6 +150,9 @@ data class AppSettings(
      */
     val pipEnabled: Boolean = true,
 
+    /** Beat Pulse strength for the Now Playing backdrop: 1 = Normal, 2 = Strong, 3 = Insane. */
+    val beatPulse: Int = 1,
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

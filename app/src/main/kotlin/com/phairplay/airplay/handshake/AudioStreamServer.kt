@@ -131,6 +131,13 @@ class AudioStreamServer(
     /** True while no audio packets are arriving — i.e. the sender is paused. */
     @Volatile private var audioIdle = false
 
+    // Beat detection state (playback thread only).
+    private var lowPass = 0.0
+    private val history = DoubleArray(100)
+    private var historyIdx = 0
+    private var lastOnsetMs = 0L
+    private var envelope = 0f
+
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
 
@@ -391,20 +398,60 @@ class AudioStreamServer(
     }
 
     private var lastEnergyMs = 0L
+    /**
+     * Bass-onset beat detection.
+     *
+     * Plain RMS loudness pulses on everything — vocals, cymbals, a loud pad — so the backdrop
+     * shimmered constantly instead of moving with the beat. This instead mono-downmixes, low-passes
+     * to keep only bass, measures energy in short windows, and fires when a window jumps well above
+     * the recent running mean. The result is a punch that decays, which is what reads as a beat.
+     */
     private fun emitEnergy(pcm: ByteArray) {
-        val now = System.currentTimeMillis()
-        if (now - lastEnergyMs < 100) return
-        lastEnergyMs = now
+        // Window energy, mono, low-passed to ~130Hz with a one-pole filter.
         var sum = 0.0
+        var count = 0
         var i = 0
         while (i + 1 < pcm.size) {
-            val s = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()
-            sum += s * s.toDouble()
+            var sample = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
             i += 2
+            if (channels >= 2 && i + 1 < pcm.size) {
+                sample = (sample + ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()) / 2.0
+                i += 2
+            }
+            lowPass += LP_ALPHA * (sample - lowPass)
+            sum += lowPass * lowPass
+            count++
         }
-        val rms = if (i > 0) Math.sqrt(sum / (i / 2)) / 32768.0 else 0.0
-        onEnergy(rms.toFloat().coerceIn(0f, 1f))
+        if (count == 0) return
+        val level = Math.sqrt(sum / count) / 32768.0
+
+        // Running mean/variance over roughly the last second of windows.
+        history[historyIdx % history.size] = level
+        historyIdx++
+        val n = minOf(historyIdx, history.size)
+        var mean = 0.0
+        for (k in 0 until n) mean += history[k]
+        mean /= n
+        var variance = 0.0
+        for (k in 0 until n) { val d = history[k] - mean; variance += d * d }
+        val stddev = Math.sqrt(variance / n)
+
+        val now = System.currentTimeMillis()
+        val isOnset = n >= 8 && level > mean + ONSET_SIGMA * stddev && now - lastOnsetMs > REFRACTORY_MS
+        if (isOnset) {
+            lastOnsetMs = now
+            envelope = 1f
+        } else {
+            // Punch, then fall away over ~250ms.
+            val dt = (now - lastEnergyMs).coerceAtLeast(0L)
+            envelope = (envelope - dt / DECAY_MS).coerceAtLeast(0f)
+        }
+        // Rate-limit emissions so a beat doesn't spam the UI thread.
+        if (now - lastEnergyMs < 40 && !isOnset) return
+        lastEnergyMs = now
+        onEnergy(envelope)
     }
+
 
     private fun initDecoder() {
         if (codecType == CT_ALAC) {
@@ -545,6 +592,13 @@ class AudioStreamServer(
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
         private const val AUDIO_IDLE_MS = 1_200
+
+        /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
+        private const val LP_ALPHA = 0.018
+        /** How far above the running mean a window must sit to count as a beat. */
+        private const val ONSET_SIGMA = 1.5
+        private const val REFRACTORY_MS = 120L
+        private const val DECAY_MS = 250f
 
         // Sliding window of recently-played RTP sequence numbers for duplicate suppression.
         // ~11 s at 92 packets/s — far longer than any retransmit gap, far shorter than the

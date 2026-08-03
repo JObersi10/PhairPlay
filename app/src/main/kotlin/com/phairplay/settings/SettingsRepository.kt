@@ -118,6 +118,7 @@ class SettingsRepository(private val context: Context) {
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
         backGoesHome       = this[Keys.BACK_GOES_HOME]           ?: false,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
+        beatPulse          = this[Keys.BEAT_PULSE]               ?: 1,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
@@ -145,6 +146,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
         this[Keys.BACK_GOES_HOME]       = settings.backGoesHome
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
+        this[Keys.BEAT_PULSE]           = settings.beatPulse
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
@@ -174,6 +176,7 @@ class SettingsRepository(private val context: Context) {
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
+        val BEAT_PULSE          = intPreferencesKey("beat_pulse")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")

@@ -61,6 +61,8 @@ class SettingsFragment : Fragment() {
     private lateinit var rowBackQuits: View
     private lateinit var rowBackHome: View
     private lateinit var rowPip: View
+    private lateinit var rowBeatPulse: LinearLayout
+    private lateinit var textBeatPulseValue: TextView
     private lateinit var rowAudioDelay: LinearLayout
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
@@ -113,6 +115,8 @@ class SettingsFragment : Fragment() {
         rowBackQuits        = view.findViewById(R.id.row_back_quits)
         rowBackHome         = view.findViewById(R.id.row_back_home)
         rowPip              = view.findViewById(R.id.row_pip)
+        rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
+        textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
@@ -223,6 +227,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowBackHome, settings.backGoesHome)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
+        showBeatPulse(settings.beatPulse)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
         showSenderVolumeMode(settings.senderVolumeMode)
@@ -301,6 +306,7 @@ class SettingsFragment : Fragment() {
         }
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
+        rowBeatPulse.setOnClickListener { pickBeatPulse() }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
@@ -416,6 +422,28 @@ class SettingsFragment : Fragment() {
                 save { it.copy(screensaverTimeoutMin = minutes) }
                 showScreensaverTimeout(minutes)
                 Logger.i("Screensaver timeout set to $minutes min")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun beatPulseLabel(level: Int): String = getString(when (level) {
+        2 -> R.string.setting_beat_pulse_strong
+        3 -> R.string.setting_beat_pulse_insane
+        else -> R.string.setting_beat_pulse_normal
+    })
+
+    private fun showBeatPulse(level: Int) { textBeatPulseValue.text = beatPulseLabel(level) }
+
+    private fun pickBeatPulse() {
+        val labels = arrayOf(beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_beat_pulse)
+            .setItems(labels) { _, which ->
+                val level = which + 1
+                save { it.copy(beatPulse = level) }
+                showBeatPulse(level)
+                Logger.i("Beat pulse set to ${beatPulseLabel(level)}")
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
