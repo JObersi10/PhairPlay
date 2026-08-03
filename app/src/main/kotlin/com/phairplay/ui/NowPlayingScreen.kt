@@ -78,6 +78,13 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
     }
 
+    // Declared above the init block: buildInfoPanel() runs inside init and calls enableMarquee(),
+    // which registers into these — a property declared further down is still null at that point and
+    // crashed the Activity on launch.
+    /** Views that scroll their own overflow, so a text change can restart the pass. */
+    private val scrollTrackedViews = mutableListOf<TextView>()
+    private val scrollAnimators = mutableMapOf<TextView, ValueAnimator>()
+
     // Declared above the init block so onVisibilityChanged can safely run before the views exist.
     private var screensaverEnabled = true
     private var screensaverDelayMs = DEFAULT_SCREENSAVER_MINUTES * 60_000L
@@ -348,10 +355,6 @@ class NowPlayingScreen @JvmOverloads constructor(
         scrollTrackedViews += this
         scheduleScroll(this)
     }
-
-    /** Views that scroll their own overflow, so a text change can restart the pass. */
-    private val scrollTrackedViews = mutableListOf<TextView>()
-    private val scrollAnimators = mutableMapOf<TextView, ValueAnimator>()
 
     private fun scheduleScroll(view: TextView) {
         view.post { runScrollPass(view) }
