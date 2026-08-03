@@ -42,7 +42,7 @@ open class RtspHandler(
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
     private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int) -> Pair<Int, Int> = { _, _, _, _ -> 0 to 0 },
+    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
@@ -156,6 +156,21 @@ open class RtspHandler(
     }
 
     /** Stops the RTSP server. */
+    /**
+     * Drops the current sender without stopping the RTSP server.
+     *
+     * Ending a session used to go through a full restartReceivers(), which tore down mDNS and
+     * brought it straight back — so the sender saw the receiver reappear and simply reconnected,
+     * and pressing Back looked like it did nothing on the phone. Closing just the client socket
+     * ends the session the way a sender expects, while the server keeps listening.
+     */
+    fun disconnectActiveClient() {
+        val client = activeClient ?: return
+        Logger.i("Dropping active RTSP client on user request")
+        runCatching { client.close() }
+        activeClient = null
+    }
+
     fun stop() {
         running = false
         try {
@@ -728,7 +743,10 @@ open class RtspHandler(
                         val ch = (stream["channels"] as? Long)?.toInt() ?: 2
                         val ct = (stream["ct"] as? Long)?.toInt() ?: 8   // 8 = AAC-ELD (mirror), 4 = AAC-LC, 2 = ALAC
                         val spf = (stream["spf"] as? Long)?.toInt() ?: 352   // ALAC frameLength (samples/frame)
-                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf)
+                        // How far behind the sender's own timeline it expects us to play. Ignoring it
+                        // made playback run ahead of the phone (audio led its on-screen lyrics).
+                        val latencyMin = (stream["latencyMin"] as? Long)?.toInt() ?: DEFAULT_LATENCY_SAMPLES
+                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf, latencyMin)
                         activeStreamTypes.add(96)
                         currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
@@ -1125,6 +1143,9 @@ open class RtspHandler(
         private const val SESSION_ID = "PhairPlaySession"
         private const val AUDIO_RTP_PORT = 6001
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
+
+        /** Fallback presentation latency (samples @44.1kHz = 250ms) when SETUP omits latencyMin. */
+        private const val DEFAULT_LATENCY_SAMPLES = 11025
     }
 }
 

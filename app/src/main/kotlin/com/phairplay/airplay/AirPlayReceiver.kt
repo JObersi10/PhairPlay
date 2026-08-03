@@ -186,6 +186,17 @@ class AirPlayReceiver(
      *
      * MUST be called when [PhairPlayService] stops or is destroyed.
      */
+    /**
+     * Ends the current sender's session, leaving the receiver advertising and ready for the next
+     * connection. Used by Back during a stream — a full receiver restart re-advertised over mDNS
+     * fast enough for the sender to reconnect on its own, so the stream never appeared to stop.
+     */
+    fun endSession() {
+        Logger.i("Ending AirPlay session on user request")
+        rtspHandler?.disconnectActiveClient()
+        onStreamingStopped()
+    }
+
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
         try {
@@ -242,7 +253,7 @@ class AirPlayReceiver(
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
-            onMirrorAudioStart = { sampleRate, channels, ct, spf -> startMirrorAudio(sampleRate, channels, ct, spf) },
+            onMirrorAudioStart = { sampleRate, channels, ct, spf, latency -> startMirrorAudio(sampleRate, channels, ct, spf, latency) },
             onMirrorAudioStop = { stopMirrorAudio() },
             onMirrorVideoStop = { stopMirrorVideo() },
             onBufferedAudioStart = { startBufferedAudio() },
@@ -505,11 +516,12 @@ class AirPlayReceiver(
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
+    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket, onEnergy = { e -> onEnergyChanged(e) })
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
+            latencyMinSamples = latencyMinSamples, onEnergy = { e -> onEnergyChanged(e) })
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()

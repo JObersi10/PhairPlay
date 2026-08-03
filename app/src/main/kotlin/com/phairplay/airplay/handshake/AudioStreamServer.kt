@@ -48,6 +48,13 @@ class AudioStreamServer(
     private val channels: Int,
     private val codecType: Int = CT_AAC_ELD,
     private val framesPerPacket: Int = DEFAULT_ALAC_FRAMES,
+    /**
+     * Presentation latency the sender asks for, in samples (its SETUP `latencyMin`; 11025 = 250ms
+     * at 44.1kHz). AirPlay senders stream ahead of their own playback position and expect the
+     * receiver to hold each frame back by this much. Playing on arrival instead made our audio run
+     * ahead of the sender's timeline — audible as the music leading the lyrics on the phone.
+     */
+    private val latencyMinSamples: Int = 11025,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
 ) {
@@ -77,6 +84,14 @@ class AudioStreamServer(
     // the playback thread. Bounded so a stalled player can't grow latency unboundedly — if it fills
     // we drop the oldest frame (a brief glitch is better than ever-growing audio lag).
     private val frameQueue = ArrayBlockingQueue<ByteArray>(AUDIO_QUEUE_CAPACITY)
+
+    /**
+     * How many frames deep to hold the queue, so playback sits [latencyMinSamples] behind arrival —
+     * the delay the sender expects. Capped at half the queue so there is still headroom to absorb
+     * jitter before the overflow eviction kicks in.
+     */
+    private val targetDepthFrames: Int =
+        (latencyMinSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
 
     // RTP duplicate suppression. macOS sends each realtime-audio packet 2–3× for redundancy
     // (same 16-bit sequence number). Decoding every copy feeds the AAC decoder duplicate frames
@@ -415,10 +430,11 @@ class AudioStreamServer(
      */
     private fun awaitPrimedQueue() {
         val deadline = System.currentTimeMillis() + PRIME_TIMEOUT_MS
-        while (running && frameQueue.size < PRIME_FRAMES && System.currentTimeMillis() < deadline) {
+        while (running && frameQueue.size < targetDepthFrames && System.currentTimeMillis() < deadline) {
             Thread.sleep(5)
         }
-        Logger.i("Audio: primed with ${frameQueue.size} frames before playback")
+        Logger.i("Audio: primed with ${frameQueue.size}/$targetDepthFrames frames " +
+            "(~${targetDepthFrames * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
     }
 
     /**
@@ -430,9 +446,9 @@ class AudioStreamServer(
      * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
      */
     private fun resyncIfBacklogged() {
-        if (frameQueue.size < RESYNC_HIGH_WATER) return
+        if (frameQueue.size < targetDepthFrames * 2) return
         var dropped = 0
-        while (frameQueue.size > RESYNC_TARGET && frameQueue.poll() != null) dropped++
+        while (frameQueue.size > targetDepthFrames && frameQueue.poll() != null) dropped++
         if (dropped > 0) {
             qDropCount += dropped
             Logger.i("Audio: backlog resync — dropped $dropped frames, queue=${frameQueue.size}")
@@ -507,13 +523,7 @@ class AudioStreamServer(
         /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
         private const val TARGET_BUFFER_MS = 300
 
-        /** Frames to accumulate before the first decode (~8ms each at spf=352). */
-        private const val PRIME_FRAMES = 12
-        private const val PRIME_TIMEOUT_MS = 400L
-
-        /** Backlog resync thresholds, in frames. High water is 2/3 of capacity. */
-        private const val RESYNC_HIGH_WATER = 64
-        private const val RESYNC_TARGET = 16
+        private const val PRIME_TIMEOUT_MS = 700L
 
         // Sliding window of recently-played RTP sequence numbers for duplicate suppression.
         // ~11 s at 92 packets/s — far longer than any retransmit gap, far shorter than the

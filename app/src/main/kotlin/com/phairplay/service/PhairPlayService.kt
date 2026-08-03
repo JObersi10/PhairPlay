@@ -225,7 +225,12 @@ class PhairPlayService : Service() {
      */
     fun endCurrentSession() {
         Logger.i("Ending current session on user request")
-        serviceScope.launch { restartReceivers() }
+        // Drop just this sender. Restarting every receiver took mDNS down and put it straight back,
+        // which the sender treated as an invitation to reconnect — Back appeared to do nothing on
+        // the phone. Fall back to a restart only if AirPlay isn't the thing that's streaming.
+        val receiver = airPlayReceiver
+        if (receiver != null) receiver.endSession()
+        else serviceScope.launch { restartReceivers() }
     }
 
     /**
@@ -234,6 +239,31 @@ class PhairPlayService : Service() {
      * look like network problems but are the SoC dozing. Scoped to an active session rather than the
      * whole service so an idle receiver isn't pinning the CPU all day.
      */
+    /**
+     * Turns the display on when a session starts.
+     *
+     * The session wake lock is PARTIAL, which by definition cannot wake the screen — so connecting
+     * to a sleeping Fire TV played audio into a dark room and never showed the now-playing card.
+     * A short SCREEN_BRIGHT lock with ACQUIRE_CAUSES_WAKEUP is the only mechanism a background
+     * service has to do this; it is deprecated but still honoured, and released quickly so Fire OS
+     * resumes its normal display timeout once FLAG_KEEP_SCREEN_ON has taken over in the Activity.
+     */
+    @Suppress("DEPRECATION")
+    private fun wakeDisplay() {
+        runCatching {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (pm.isInteractive) return
+            pm.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                WAKE_DISPLAY_TAG
+            ).apply {
+                setReferenceCounted(false)
+                acquire(WAKE_DISPLAY_MS)
+            }
+            Logger.i("Display woken for incoming session")
+        }.onFailure { Logger.w("Could not wake display: ${it.message}") }
+    }
+
     private fun acquireStreamLocks() {
         if (wakeLock?.isHeld == true) return
         val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -242,6 +272,7 @@ class PhairPlayService : Service() {
             acquire(MAX_SESSION_MS)   // safety timeout: never leak the lock if a release is missed
         }
         Logger.d("Wake lock acquired for session")
+        wakeDisplay()
     }
 
     private fun releaseStreamLocks() {
@@ -745,6 +776,9 @@ class PhairPlayService : Service() {
         private val GENERIC_SENDER_NAMES = setOf("AirPlay", "AirPlay Sender", "iTunes")
 
         private const val WAKE_LOCK_TAG = "PhairPlay:session"
+        private const val WAKE_DISPLAY_TAG = "PhairPlay:wake"
+        /** Just long enough to bring the panel up; FLAG_KEEP_SCREEN_ON keeps it there. */
+        private const val WAKE_DISPLAY_MS = 5_000L
         private const val WIFI_LOCK_TAG = "PhairPlay:advertising"
         /** Safety timeout on the session wake lock — 8h is longer than any real session. */
         private const val MAX_SESSION_MS = 8L * 60 * 60 * 1000
