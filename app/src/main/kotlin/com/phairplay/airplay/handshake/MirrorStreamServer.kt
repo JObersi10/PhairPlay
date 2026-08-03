@@ -38,11 +38,12 @@ class MirrorStreamServer(
     private val width: Int = 1920,
     private val height: Int = 1080,
     /**
-     * Called when the sender stops sending without tearing down — a phone whose screen switches off
-     * leaves the TCP connection open (no FIN), so the reader would block forever and the session
-     * looked alive with the last mirrored frame frozen on the TV.
+     * Reports whether video has gone idle, i.e. no frames for [IDLE_TIMEOUT_MS] while the session is
+     * still connected — what happens when the phone's screen switches off. The session is
+     * deliberately kept alive (locking the phone must not end a mirror); the UI just blanks so the
+     * last frame isn't left frozen on the panel, and unblanks when frames resume.
      */
-    private val onStreamStalled: () -> Unit = {},
+    private val onVideoIdle: (Boolean) -> Unit = {},
 ) {
     private sealed class Item
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
@@ -54,8 +55,8 @@ class MirrorStreamServer(
 
     @Volatile private var running = false
     @Volatile private var client: Socket? = null
-    /** Set when the reader exits because the sender went silent, not because it disconnected. */
-    @Volatile private var stalled = false
+    /** True while video has gone idle and the UI is blanked. */
+    @Volatile private var videoIdle = false
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
@@ -100,20 +101,20 @@ class MirrorStreamServer(
             val socket = serverSocket.accept().also { client = it }
             // A sleeping sender never closes the socket, so a blocking read would wait indefinitely.
             // Time out instead and treat prolonged silence as the session ending.
-            socket.soTimeout = STALL_TIMEOUT_MS
+            socket.soTimeout = IDLE_TIMEOUT_MS
             Logger.i("Mirror data connection from ${socket.inetAddress.hostAddress}")
             val input = socket.getInputStream()
             val header = ByteArray(128)
             lastVideoMs = System.currentTimeMillis()
             while (running && !socket.isClosed) {
-                // Silence on the socket isn't a reliable end-of-session signal: with the phone's
-                // screen off iOS keeps the connection busy with non-video payloads, so the read
-                // timeout never fires and the last frame stayed frozen on the TV. Watch for the
-                // absence of actual VIDEO instead.
-                if (System.currentTimeMillis() - lastVideoMs > STALL_TIMEOUT_MS) {
-                    Logger.i("Mirror: no video for ${STALL_TIMEOUT_MS}ms — treating session as ended")
-                    stalled = true
-                    break
+                // Silence on the socket isn't a usable signal: with the phone's screen off iOS
+                // keeps the connection busy with non-video payloads. Watch for the absence of
+                // actual VIDEO, and blank rather than disconnect — the session stays up so
+                // unlocking the phone resumes the mirror instantly.
+                if (!videoIdle && System.currentTimeMillis() - lastVideoMs > IDLE_TIMEOUT_MS) {
+                    videoIdle = true
+                    Logger.i("Mirror: no video for ${IDLE_TIMEOUT_MS}ms — blanking (session kept)")
+                    onVideoIdle(true)
                 }
                 if (!readFully(input, header, 128)) break
                 val payloadSize = leInt(header, 0)
@@ -129,6 +130,11 @@ class MirrorStreamServer(
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
                         // skipping any packet desyncs the keystream and corrupts all later frames.
                         lastVideoMs = System.currentTimeMillis()
+                        if (videoIdle) {
+                            videoIdle = false
+                            Logger.i("Mirror: video resumed — unblanking")
+                            onVideoIdle(false)
+                        }
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
@@ -150,17 +156,13 @@ class MirrorStreamServer(
                 }
             }
         } catch (e: java.net.SocketTimeoutException) {
-            // Not an error: the sender went quiet without disconnecting (screen off, app switched).
-            if (running) {
-                Logger.i("Mirror: no data for ${STALL_TIMEOUT_MS}ms — treating session as ended")
-                stalled = true
-            }
+            // Nothing at all on the socket. Still not a disconnect — keep the session, just blank.
+            if (running && !videoIdle) { videoIdle = true; onVideoIdle(true) }
         } catch (e: Exception) {
             if (running) Logger.e("Mirror reader error", e)
         } finally {
             running = false
             Logger.i("Mirror data connection ended")
-            if (stalled) onStreamStalled()
         }
     }
 
@@ -333,8 +335,8 @@ class MirrorStreamServer(
 
         private const val MAX_PAYLOAD = 8 * 1024 * 1024        // 8 MB sanity cap per frame
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
-        /** Silence on the mirror data channel that counts as the sender having gone away. */
-        private const val STALL_TIMEOUT_MS = 10_000
+        /** No video for this long means blank the panel (the session itself stays connected). */
+        private const val IDLE_TIMEOUT_MS = 3_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
         private const val SURFACE_WAIT_TRIES = 50

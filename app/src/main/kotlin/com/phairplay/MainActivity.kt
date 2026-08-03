@@ -570,6 +570,9 @@ class MainActivity : AppCompatActivity() {
             }
         }
         lifecycleScope.launch {
+            svc.videoIdle.collectLatest { idle -> streamingScreen.setBlackout(idle) }
+        }
+        lifecycleScope.launch {
             svc.videoPlaying.collectLatest { playing ->
                 currentVideoPlaying = playing
                 updateOverlay()
