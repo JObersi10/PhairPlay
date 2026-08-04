@@ -527,7 +527,7 @@ class AirPlayReceiver(
             onEnergy = { e -> onEnergyChanged(e) },
             // Apple Music never sends RTSP PAUSE, so a stopped stream is the only reliable
             // pause signal — without it the progress bar ran on through a paused track.
-            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
+            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })  // resume: audio flowing again
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()
