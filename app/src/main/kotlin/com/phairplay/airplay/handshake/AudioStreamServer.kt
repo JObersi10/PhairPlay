@@ -132,8 +132,11 @@ class AudioStreamServer(
     @Volatile private var qDropCount = 0
     @Volatile private var resendReqCount = 0
     @Volatile private var resendFillCount = 0
-    /** True while no audio packets are arriving — i.e. the sender is paused. */
+    /** True while the sender is paused — see the payload-size check in [handleRtpPacket]. */
     @Volatile private var audioIdle = false
+
+    /** Consecutive payload-free packets seen; resets on the first real audio frame. */
+    private var keepaliveRun = 0
 
     // Beat detection state (playback thread only).
     private var lowPass = 0.0
@@ -273,6 +276,23 @@ class AudioStreamServer(
 
     private fun handleRtpPacket(src: ByteArray, offset: Int, length: Int) {
         if (length <= RTP_HEADER) return
+        // THIS is the pause signal, established by measurement after four wrong guesses.
+        //
+        // A paused iOS sender does not stop transmitting and does not stop its clock. It keeps
+        // sending at the full ~128 packets/sec with the RTP timestamp advancing in real time — the
+        // packets are simply empty, 44 bytes of header and no audio. That is why packet arrival,
+        // RTP-clock advance, decoded-PCM silence and RTSP FLUSH all failed to detect a pause:
+        // every one of them looks identical to playback. Only the payload size gives it away
+        // (~5.6 KB/s paused against ~120 KB/s playing).
+        if (length <= KEEPALIVE_MAX_BYTES) {
+            if (++keepaliveRun >= KEEPALIVE_RUN_TO_PAUSE && !audioIdle) {
+                audioIdle = true
+                onAudioIdle(true)
+            }
+            return   // nothing to decode; feeding these to the decoder produced garbage
+        }
+        keepaliveRun = 0
+        if (audioIdle) { audioIdle = false; onAudioIdle(false) }
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
         // RTP timestamp (bytes 4..7) is the sender's own playback clock. When a sender re-syncs
         // mid-stream — an iPad "correcting itself" — it jumps, and everything already queued
@@ -684,9 +704,18 @@ class AudioStreamServer(
         private const val PRIME_TIMEOUT_MS = 700L
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
-        // Audio packets arrive every ~8ms while playing, and stop dead on pause. 400ms is far
-        // outside normal jitter but still fast enough that the UI pauses about when the user does.
+        // Backstop only: a sender that goes completely silent (disconnect, sleep) rather than
+        // sending keepalives. The real pause signal is payload size — see handleRtpPacket.
         private const val AUDIO_IDLE_MS = 400
+
+        /**
+         * Largest packet still considered "no audio". A paused sender's keepalives measured
+         * exactly 44 bytes; the smallest real ALAC frame observed was ~600. 64 sits clear of both.
+         */
+        private const val KEEPALIVE_MAX_BYTES = 64
+
+        /** Keepalives needed before declaring a pause — ~100ms at 128 packets/sec. */
+        private const val KEEPALIVE_RUN_TO_PAUSE = 12
         /** Timestamp discontinuity that means the sender restarted its clock (~0.5s at 44.1kHz). */
         private const val RESYNC_JUMP_SAMPLES = 22_050L
 

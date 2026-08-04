@@ -10,37 +10,32 @@ and the "Hard-won details" entry on pause detection.
 
 Installed on the Fire TV at `192.168.1.246`. Both flavors build.
 
-### The open bug: pause is still wrong
+### Pause — solved, needs confirming on device
 
-The Now Playing progress bar keeps counting while the sender is paused, then snaps back roughly
-six seconds later. Three attempts have failed, and the failures are informative:
-
-| Attempt | Why it failed |
-|---|---|
-| Progress `SET_PARAMETER` pushes | Sparse, and `pos` is quantised to whole seconds |
-| Decoded-PCM silence | A paused sender's stream is not necessarily silence |
-| RTSP `FLUSH` | iOS sends FLUSH right after RECORD at stream start, and on seek — not just on pause |
-
-The FLUSH one is worth dwelling on, because the spec genuinely says FLUSH means "flush the
-receiver's buffer and pause/stop what is playing", and the AirPlay documentation HTML in the
-project folder repeats it. The device disagrees with the spec. Trust the device.
-
-**Current mechanism:** `AudioStreamServer.AUDIO_IDLE_MS = 400`. A socket read timeout with no
-packet is treated as paused; the next packet resumes. This is *also unconfirmed* — the log
-evidence that packets stop during a pause was weak, because only the first six RTP packets are
-ever logged, so a gap in the log does not prove a gap in the stream.
-
-**Next step, and do this before writing any more code.** A `PAUSE-PROBE` line now logs once a
-second:
+A paused iOS sender keeps sending at full rate (~128 packets/sec) with its RTP clock advancing in
+real time. The packets are empty: 44 bytes of header, no audio.
 
 ```
-PAUSE-PROBE 1002ms: pkts=115 bytes=118450 rtpAdvance=1000ms
+12:22:13  pkts=128  bytes=5632     paused
+12:22:16  pkts=128  bytes=5632     paused
+12:22:18  pkts=125  bytes=117763   playing
 ```
 
-Play, pause for ~10s, resume, then `curl -s http://192.168.1.246:8001/ | grep PAUSE-PROBE`.
-Whatever a paused sender does — stop transmitting, send silence, or freeze its RTP clock — one of
-those three numbers must change, and that number is the pause signal. Remove the probe once it has
-answered the question.
+That is the whole reason four earlier detectors failed — packet arrival, RTP-clock advance,
+decoded-PCM silence and RTSP `FLUSH` all look identical whether or not the sender is paused. Only
+the payload size differs, by a factor of twenty.
+
+`handleRtpPacket` now treats 12 consecutive packets of ≤ `KEEPALIVE_MAX_BYTES` (64) as a pause,
+and the first real frame as a resume — roughly 100ms either way. Dropping those packets also stops
+them reaching the decoder, which had been decoding 32-byte fragments into garbage.
+
+Worth recording: FLUSH is documented as "flush the receiver's buffer and pause/stop what is
+playing", in the spec and in the AirPlay HTML in the project folder. iOS nonetheless sends it
+immediately after RECORD at the start of every stream and again on every seek. Acting on the
+documentation instead of the device cost several rounds.
+
+The `PAUSE-PROBE` log line is still in `AudioStreamServer` and is worth keeping until this is
+confirmed by ear; it is one line per second.
 
 ## Landed this session
 
@@ -58,7 +53,8 @@ answered the question.
 
 ## Unverified — needs one session each
 
-1. **Pause.** See above. Nothing about it is confirmed.
+1. **Pause.** The mechanism is now measured rather than guessed, but nobody has watched the
+   progress bar stop yet.
 2. **Back ending the stream.** The `releaseMediaComponents` fix is untested on device.
 3. **`BackAction` migration** from an install that had the old booleans set.
 4. **Beat delay** — the plumbing compiles; nobody has listened to it.

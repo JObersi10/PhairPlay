@@ -99,15 +99,15 @@ happens" — that advances the AES-CTR keystream and corrupts every later frame.
 
 ## Hard-won details
 
-- **Pause detection is unsolved — do not guess again.** Three approaches have been tried and all
-  failed on device: (a) progress `SET_PARAMETER` pushes, which are sparse and quantised to whole
-  seconds; (b) decoded-PCM silence; (c) RTSP `FLUSH`. FLUSH is the tempting one because the spec
-  calls it "flush the receiver's buffer and pause/stop what is playing" — but device logs show iOS
-  sends FLUSH immediately after RECORD at the *start* of every stream, again on seek, and again on
-  pause. Treating it as "paused" latches the UI at the first note. `AUDIO_IDLE_MS` (silent RTP
-  socket) is the current mechanism and is also unconfirmed. A `PAUSE-PROBE` line now logs, once a
-  second, packet count, byte count and how far the sender's RTP clock advanced against wall time —
-  pause on device, then read those three numbers before changing anything.
+- **Pause = empty packets, not absent ones.** A paused iOS sender keeps transmitting at the full
+  ~128 packets/sec with its RTP clock still advancing in real time; the packets are just 44 bytes
+  of header with no payload (~5.6 KB/s paused vs ~120 KB/s playing). Four detectors failed before
+  this was measured — packet arrival, RTP-clock advance, decoded-PCM silence, and RTSP `FLUSH` —
+  because a paused stream is byte-for-byte indistinguishable from playback on every axis *except*
+  payload size. `handleRtpPacket` now counts consecutive sub-`KEEPALIVE_MAX_BYTES` packets.
+  Note FLUSH in particular: the spec calls it "flush the receiver's buffer and pause/stop what is
+  playing", but iOS sends it right after RECORD at the start of every stream and again on seek.
+  The device disagrees with the spec; trust the device.
 - **`endSession` must release the media servers, not just the RTSP socket.** The RTSP control
   connection, the audio UDP socket and the mirror socket are independent. Closing the first leaves
   the other two receiving and playing, so Back appeared to do nothing.
