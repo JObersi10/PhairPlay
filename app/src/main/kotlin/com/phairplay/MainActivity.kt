@@ -245,6 +245,15 @@ class MainActivity : AppCompatActivity() {
         if (currentVideoPlaying || currentNowPlaying != null ||
             currentAirPlayState == ProtocolState.CONNECTED
         ) {
+            if (backQuitsApp) {
+                // Quit beats "return to Home": leaving the receiver advertising is the opposite of
+                // what quitting means, so end the stream before stopping.
+                Timber.d("Back during session with backQuitsApp — ending session and quitting")
+                service?.endCurrentSession()
+                ServiceController.stop(this)
+                finishAndRemoveTask()
+                return
+            }
             if (backGoesHome) {
                 // Leave the stream running and drop to the Fire TV home screen. moveTaskToBack
                 // backgrounds the task without finishing it, so the sender keeps playing and the

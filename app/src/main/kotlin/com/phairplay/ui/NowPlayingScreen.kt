@@ -131,6 +131,16 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Timer tick ───────────────────────────────────────────────────────────
     private val positionTick = object : Runnable {
         override fun run() {
+            // Buffered senders push progress only every few seconds, so checking for a stall only
+            // when a push arrives made pause land many seconds late. Check on every tick instead.
+            if (!isPaused && lastPositionChangedAt > 0L &&
+                SystemClock.elapsedRealtime() - lastPositionChangedAt > PAUSE_STALL_MS) {
+                if (positionBaseEpoch > 0L) {
+                    positionBaseMs += ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
+                    positionBaseEpoch = 0L
+                }
+                isPaused = true
+            }
             if (positionBaseEpoch > 0L) {
                 val elapsed = (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier
                 val now = positionBaseMs + elapsed.toLong()
@@ -626,8 +636,7 @@ class NowPlayingScreen @JvmOverloads constructor(
                     isPaused = false
                     positionBaseEpoch = now
                 }
-            } else if (!isPaused && lastPositionChangedAt > 0L &&
-                       now - lastPositionChangedAt > PAUSE_STALL_MS) {
+            } else if (!isPaused && lastPositionChangedAt > 0L && false) {
                 if (positionBaseEpoch > 0L) {
                     positionBaseMs += ((now - positionBaseEpoch) * seekMultiplier).toLong()
                     positionBaseEpoch = 0L

@@ -108,6 +108,13 @@ class MirrorStreamServer(
             val header = ByteArray(128)
             lastVideoMs = System.currentTimeMillis()
             while (running && !socket.isClosed) {
+                // A sender that wedges mid-mirror (iPad glitch) keeps the socket open but sends
+                // nothing, leaving the app on a frozen frame with no way to end it from the remote.
+                if (firstVideoAtMs != 0L &&
+                    System.currentTimeMillis() - lastVideoMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: no video for ${DEAD_SENDER_MS}ms — sender is gone, ending")
+                    break
+                }
                 if (!readFully(input, header, 128)) break
                 val payloadSize = leInt(header, 0)
                 val payloadType = leShort(header, 4) and 0xFF
@@ -336,6 +343,8 @@ class MirrorStreamServer(
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
         /** Read timeout on the mirror socket. Purely so the thread can re-check `running`. */
         private const val IDLE_TIMEOUT_MS = 3_000
+        /** No video for this long means the sender is wedged or gone; drop the session. */
+        private const val DEAD_SENDER_MS = 30_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
         private const val SURFACE_WAIT_TRIES = 50
