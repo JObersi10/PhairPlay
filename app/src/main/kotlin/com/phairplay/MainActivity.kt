@@ -424,6 +424,14 @@ class MainActivity : AppCompatActivity() {
      * false for other keys so normal navigation is unaffected.
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        // Handle Back here rather than relying on onBackPressed(). That path goes through
+        // OnBackPressedDispatcher, where a fragment or the overlay can swallow the event before the
+        // Activity sees it — which is why both Back settings appeared to do nothing.
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            @Suppress("DEPRECATION")
+            onBackPressed()
+            return true
+        }
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
         if (overlayActive) {
             // Any remote press counts as presence — restart the Now Playing idle countdown.

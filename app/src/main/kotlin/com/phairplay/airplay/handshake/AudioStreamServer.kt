@@ -627,7 +627,10 @@ class AudioStreamServer(
         private const val MAX_RESEND_RANGE = 128
 
         // Jitter buffer depth between the receive and playback threads (~1 s at 92 frames/s).
-        private const val AUDIO_QUEUE_CAPACITY = 96
+        // Deep enough to actually hold the requested delay. At spf=352/44.1kHz each frame is ~8ms,
+        // so 96 frames capped the achievable latency at ~380ms — a 2000ms trim silently did nothing
+        // because targetDepthFrames is clamped to half the capacity.
+        private const val AUDIO_QUEUE_CAPACITY = 1024
 
         /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
         private const val TARGET_BUFFER_MS = 300
@@ -635,7 +638,7 @@ class AudioStreamServer(
         private const val PRIME_TIMEOUT_MS = 700L
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
-        private const val AUDIO_IDLE_MS = 1_200
+        private const val AUDIO_IDLE_MS = 700
 
         /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
         private const val LP_ALPHA = 0.018

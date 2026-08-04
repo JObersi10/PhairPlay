@@ -907,7 +907,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val SCROLL_REST_MS = 4_000L
 
         /** How long the sender-reported position may sit still before it means "paused". */
-        private const val PAUSE_STALL_MS = 4_000L
+        private const val PAUSE_STALL_MS = 1_500L
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
         /** How often to nudge, how long the nudge takes, and how far — a handful of pixels. */
