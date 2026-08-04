@@ -1,7 +1,8 @@
 # PhairPlay — Handoff
 
 Last updated: 2026-08-04.
-Branch `feature/receiver-ux-and-cast-removal`, **not pushed**.
+Branch `feature/receiver-ux-and-cast-removal`, pushed to the `jobersi` remote
+(github.com/JObersi10/PhairPlay). `origin` points at mazer666's copy — do not push there.
 
 Read `CLAUDE.md` first — especially the native-library verification step, which is not optional,
 and the "Hard-won details" entry on pause detection.
@@ -93,4 +94,5 @@ Onboarding media, lyrics, sender-type display.
   `CLAUDE.md`. It can corrupt source files too — if a file behaves impossibly, check `git status`
   before debugging the logic.
 - A killed Gradle run can leave `~/.gradle/caches/journal-1` locked. The error names the owner PID.
-- **Nothing is pushed.** The user has not asked for it.
+- **Two remotes.** `jobersi` is the user's fork and the one to push to. `origin` is
+  mazer666's repository. The branch tracks `jobersi`.
