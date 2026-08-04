@@ -332,7 +332,8 @@ data class SessionDescription(
      * Populated by [com.phairplay.airplay.RtspHandler] after ANNOUNCE is received.
      * Empty string if the header was absent or could not be parsed.
      */
-    val senderName: String = ""
+    val senderName: String = "",
+    val senderDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
 ) {
     /** True if encryption keys are present and both key+IV have the correct AES-128 length. */
     val isAudioEncrypted: Boolean

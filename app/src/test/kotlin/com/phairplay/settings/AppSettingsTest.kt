@@ -32,7 +32,6 @@ class AppSettingsTest {
     fun `default settings have all protocols enabled`() {
         assertTrue(AppSettings.DEFAULT.airPlayEnabled)
         assertTrue(AppSettings.DEFAULT.miracastEnabled)
-        assertTrue(AppSettings.DEFAULT.castEnabled)
     }
 
     @Test
@@ -85,31 +84,31 @@ class AppSettingsTest {
 
     @Test
     fun `anyProtocolEnabled is true when all protocols are enabled`() {
-        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = true, castEnabled = true)
+        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = true, dlnaEnabled = true)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is true when only AirPlay is enabled`() {
-        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = false, castEnabled = false)
+        val settings = AppSettings(airPlayEnabled = true, miracastEnabled = false, dlnaEnabled = false)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is true when only Miracast is enabled`() {
-        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = true, castEnabled = false)
+        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = true, dlnaEnabled = false)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is true when only Cast is enabled`() {
-        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, castEnabled = true)
+        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, dlnaEnabled = true)
         assertTrue(settings.anyProtocolEnabled)
     }
 
     @Test
     fun `anyProtocolEnabled is false when all protocols are disabled`() {
-        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, castEnabled = false)
+        val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, dlnaEnabled = false)
         assertFalse(settings.anyProtocolEnabled)
     }
 

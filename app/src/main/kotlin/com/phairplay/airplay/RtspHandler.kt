@@ -42,7 +42,7 @@ open class RtspHandler(
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
     private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int) -> Pair<Int, Int> = { _, _, _, _ -> 0 to 0 },
+    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
@@ -73,10 +73,22 @@ open class RtspHandler(
     private val onRemoteControlInfo: (dacpId: String?, activeRemote: String?) -> Unit = { _, _ -> },
     /** When true, require HomeKit-style SRP PIN pairing before streaming (gated by AppSettings). */
     private val pinAuthEnabled: Boolean = false,
+    /** Skip the PIN when this receiver has already completed a PIN pairing (AppSettings). */
+    private val rememberPinPairing: Boolean = true,
     /** Persistent store of paired controllers' Ed25519 keys (for pair-verify). */
     private val pairingStore: com.phairplay.airplay.handshake.PairingStore? = null,
     /** Shows ([pin]) or hides (null) the on-screen pairing PIN during SRP pair-setup. */
-    private val onShowPin: (pin: String?) -> Unit = {}
+    private val onShowPin: (pin: String?) -> Unit = {},
+    /** PAUSE received (paused=true) or RECORD after PAUSE (paused=false). */
+    private val onPlaybackPaused: (paused: Boolean) -> Unit = {},
+    /**
+     * The progress push in its native units: the RTP timestamps of the track's first and last
+     * sample. Reported alongside the derived seconds because the receiver's own audio clock is in
+     * the same units, which lets position be measured rather than extrapolated.
+     */
+    private val onPlaybackAnchor: (startTs: Long, endTs: Long) -> Unit = { _, _ -> },
+    /** Sender name + device type resolved from mirror SETUP plist (called when mirror audio starts). */
+    private val onSenderInfoChanged: (name: String, type: SenderDeviceType) -> Unit = { _, _ -> }
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -123,6 +135,10 @@ open class RtspHandler(
     protected val activeStreamTypes = mutableSetOf<Int>()
 
     private var setupCount = 0
+    private var pendingDeviceName: String? = null
+    private var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
+    private var lastLoggedNpTitle: String? = null
+    private var lastLoggedNpArtist: String? = null
 
     private val requestReader = RtspRequestReader(
         maxMessageBytes = MAX_MESSAGE_BYTES,
@@ -146,6 +162,28 @@ open class RtspHandler(
     }
 
     /** Stops the RTSP server. */
+    /**
+     * Drops the current sender without stopping the RTSP server.
+     *
+     * Ending a session used to go through a full restartReceivers(), which tore down mDNS and
+     * brought it straight back — so the sender saw the receiver reappear and simply reconnected,
+     * and pressing Back looked like it did nothing on the phone. Closing just the client socket
+     * ends the session the way a sender expects, while the server keeps listening.
+     */
+    /** Milestone timing for connect diagnosis: how long each handshake leg takes. */
+    private var connectStartMs = 0L
+    private fun stamp(what: String) {
+        if (connectStartMs == 0L) return
+        Logger.i("Connect timing: $what +${System.currentTimeMillis() - connectStartMs}ms")
+    }
+
+    fun disconnectActiveClient() {
+        val client = activeClient ?: return
+        Logger.i("Dropping active RTSP client on user request")
+        runCatching { client.close() }
+        activeClient = null
+    }
+
     fun stop() {
         running = false
         try {
@@ -191,6 +229,7 @@ open class RtspHandler(
 
             while (running && scope.isActive) {
                 val clientSocket = serverSocket!!.accept()
+                connectStartMs = System.currentTimeMillis()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
 
                 if (activeClient != null && !activeClient!!.isClosed) {
@@ -273,7 +312,11 @@ open class RtspHandler(
     }
 
     private fun routeRequest(request: RtspRequest): RtspResponse {
-        Logger.d("RTSP ${request.method} ${request.uri}")
+        // Senders POST /feedback every ~2s as a keepalive. It carries nothing useful and drowns the
+        // diagnostic buffer, so it is the one request we don't trace.
+        if (!request.uri.endsWith("/feedback")) {
+            Logger.d("RTSP ${request.method} ${request.uri}")
+        }
         // Senders attach their DACP reverse-control identity to most requests — capture it so the TV
         // remote can drive playback (DacpClient dedups, so this is cheap to call repeatedly).
         request.headers["Active-Remote"]?.let { onRemoteControlInfo(request.headers["DACP-ID"], it) }
@@ -475,13 +518,35 @@ open class RtspHandler(
     }
 
     /** GET /info — advertises receiver identity + capabilities (binary plist). */
-    private fun handleInfo(request: RtspRequest): RtspResponse = RtspResponse(
-        statusCode = 200,
-        statusMessage = "OK",
-        bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
-        contentType = "application/x-apple-binary-plist",
-        protocol = request.responseProtocol()
-    )
+    private fun handleInfo(request: RtspRequest): RtspResponse {
+        // Client may send a body plist with its own info (name, model, etc.)
+        if (request.bodyBytes.isNotEmpty()) {
+            runCatching {
+                val info = PlistCodec.decode(request.bodyBytes)
+                val plistName = info["name"] as? String
+                val plistModel = info["model"] as? String
+                if (plistName != null || plistModel != null) {
+                    val dtype = when {
+                        plistModel?.startsWith("iPhone") == true -> SenderDeviceType.IPHONE
+                        plistModel?.startsWith("iPad") == true   -> SenderDeviceType.IPAD
+                        plistModel?.startsWith("Mac") == true || plistModel?.startsWith("iMac") == true
+                            || plistModel?.startsWith("MacBook") == true -> SenderDeviceType.MAC
+                        else -> SenderDeviceType.UNKNOWN
+                    }
+                    pendingDeviceName = plistName
+                    pendingDeviceType = dtype
+                    Logger.i("GET /info sender: name=$plistName model=$plistModel type=$dtype")
+                }
+            }
+        }
+        return RtspResponse(
+            statusCode = 200,
+            statusMessage = "OK",
+            bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
+            contentType = "application/x-apple-binary-plist",
+            protocol = request.responseProtocol()
+        )
+    }
 
     /**
      * POST /pair-setup. With PIN auth off (default) this is the anonymous Ed25519 exchange. With PIN
@@ -508,7 +573,8 @@ open class RtspHandler(
     private fun handlePairVerify(request: RtspRequest): RtspResponse {
         // PIN access control: refuse pair-verify until the controller has PIN-paired this connection.
         // macOS responds to the rejection by starting the PIN flow (/pair-pin-start → /pair-setup-pin).
-        if (pinAuthEnabled && !pinPaired) {
+        val alreadyTrusted = rememberPinPairing && pairingStore?.isPinTrusted() == true
+        if (pinAuthEnabled && !pinPaired && !alreadyTrusted) {
             Logger.i("pair-verify rejected — PIN pairing required first (triggers /pair-pin-start)")
             return RtspResponse(470, "Connection Authorization Required", protocol = request.responseProtocol())
         }
@@ -569,6 +635,7 @@ open class RtspHandler(
             }
             if (result.complete) {
                 pairingStore?.resetFailedAttempts()   // legitimate pairing clears the lockout counter
+                pairingStore?.setPinTrusted()          // remembered so the code isn't asked again
                 pinPaired = true                       // now allow pair-verify → streaming proceeds
                 onShowPin(null); legacyPin = null
                 Logger.i("PIN pairing complete — pair-verify now permitted")
@@ -624,6 +691,34 @@ open class RtspHandler(
         val response = mutableMapOf<String, Any?>()
 
         isMirrorSession = true
+
+        // Extract device name + type from mirror SETUP plist (msg 1 carries name/model)
+        val plistName = req["name"] as? String
+        val plistModel = req["model"] as? String
+        if (plistName != null || plistModel != null) {
+            val dtype = when {
+                plistModel?.startsWith("iPhone") == true -> SenderDeviceType.IPHONE
+                plistModel?.startsWith("iPad") == true   -> SenderDeviceType.IPAD
+                plistModel?.startsWith("Mac") == true || plistModel?.startsWith("iMac") == true
+                    || plistModel?.startsWith("MacBook") == true -> SenderDeviceType.MAC
+                else -> SenderDeviceType.UNKNOWN
+            }
+            val existing = currentSession
+            if (existing != null) {
+                currentSession = existing.copy(
+                    senderName = plistName ?: existing.senderName,
+                    senderDeviceType = if (dtype != SenderDeviceType.UNKNOWN) dtype else existing.senderDeviceType
+                )
+            } else {
+                // Mirror-only session (no ANNOUNCE) — build minimal session
+                currentSession = SessionDescription(
+                    hasVideo = true, hasAudio = false,
+                    senderName = plistName ?: DEFAULT_SENDER_NAME,
+                    senderDeviceType = dtype
+                )
+            }
+        }
+
         val ekey = req["ekey"] as? ByteArray
         if (ekey != null) {
             val aesKey = fairPlay!!.decrypt(ekey)
@@ -662,8 +757,12 @@ open class RtspHandler(
                         val ch = (stream["channels"] as? Long)?.toInt() ?: 2
                         val ct = (stream["ct"] as? Long)?.toInt() ?: 8   // 8 = AAC-ELD (mirror), 4 = AAC-LC, 2 = ALAC
                         val spf = (stream["spf"] as? Long)?.toInt() ?: 352   // ALAC frameLength (samples/frame)
-                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf)
+                        // How far behind the sender's own timeline it expects us to play. Ignoring it
+                        // made playback run ahead of the phone (audio led its on-screen lyrics).
+                        val latencyMin = (stream["latencyMin"] as? Long)?.toInt() ?: DEFAULT_LATENCY_SAMPLES
+                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf, latencyMin)
                         activeStreamTypes.add(96)
+                        currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
                         mapOf("type" to 96L, "dataPort" to dataPort.toLong(), "controlPort" to controlPort.toLong())
                     }
@@ -726,7 +825,13 @@ open class RtspHandler(
             return RtspResponse(statusCode = 400, statusMessage = "Bad Request")
         }
 
-        currentSession = parsed.copy(senderName = extractSenderName(request.headers["User-Agent"]))
+        val ua = request.headers["User-Agent"]
+        val uaName = extractSenderName(ua)
+        val uaType = extractDeviceType(ua)
+        currentSession = parsed.copy(
+            senderName = pendingDeviceName ?: uaName,
+            senderDeviceType = if (pendingDeviceType != SenderDeviceType.UNKNOWN) pendingDeviceType else uaType
+        )
         val s = currentSession!!
         Logger.i("Session: hasVideo=${s.hasVideo} hasAudio=${s.hasAudio} " +
                  "codec=${s.audioCodec} encrypted=${s.isAudioEncrypted} sender='${s.senderName}'")
@@ -739,6 +844,20 @@ open class RtspHandler(
         if (userAgent.isNullOrBlank()) return DEFAULT_SENDER_NAME
         val name = userAgent.substringBefore("/").trim()
         return name.ifEmpty { DEFAULT_SENDER_NAME }
+    }
+
+    private fun extractDeviceType(userAgent: String?): SenderDeviceType {
+        if (userAgent.isNullOrBlank()) return SenderDeviceType.UNKNOWN
+        val ua = userAgent.lowercase()
+        Logger.i("RTSP User-Agent: $userAgent")
+        return when {
+            "iphone" in ua -> SenderDeviceType.IPHONE
+            "ipad" in ua   -> SenderDeviceType.IPAD
+            "mac" in ua || "macbook" in ua || "imac" in ua -> SenderDeviceType.MAC
+            // Apple Music on Mac sends "iTunes" or "Music" as User-Agent prefix
+            "itunes" in ua || "music" in ua -> SenderDeviceType.MAC
+            else -> SenderDeviceType.UNKNOWN
+        }
     }
 
     /** Handles SETUP — allocates a media channel. */
@@ -768,7 +887,12 @@ open class RtspHandler(
     /** Handles RECORD — macOS/iOS says start sending media now. */
     open fun handleRecordInternal(request: RtspRequest): RtspResponse {
         // AirPlay 2 mirroring has no ANNOUNCE/SDP — RECORD just acknowledges the session.
+        onPlaybackPaused(false)
         if (isMirrorSession) {
+            // RTP-Info: seq=<n>;rtptime=<t> is the sender's start anchor for this stream. Logged so
+            // A/V alignment can be tied to the sender's clock rather than to arrival time.
+            request.headers["RTP-Info"]?.let { Logger.i("RECORD RTP-Info: $it") }
+            stamp("RECORD")
             Logger.i("RECORD (mirror session) — OK")
             return RtspResponse(
                 statusCode = 200, statusMessage = "OK",
@@ -810,20 +934,19 @@ open class RtspHandler(
     open fun handleTeardownInternal(request: RtspRequest): RtspResponse {
         val streamTypes = parseTeardownStreamTypes(request.bodyBytes)
         if (streamTypes != null && streamTypes.isNotEmpty()) {
-            // Stream-level teardown: stop ONLY the listed streams. Keep the session (keys, NTP,
-            // event channel) alive so the remaining stream keeps running and a stopped one can be
-            // re-added later — e.g. audio keeps playing with video gone, or video keeps mirroring
-            // with audio stopped. But if this removes the LAST active stream (e.g. macOS names both
-            // 96 and 110 to end the session), fall through to a full teardown so cleanup isn't left
-            // to the eventual socket close.
+            // Stream-level teardown: stop ONLY the listed streams and keep the session (keys, NTP,
+            // event channel) alive, even when no streams remain. iOS renegotiates by removing a
+            // stream and immediately adding a replacement on the same session — it announces
+            // supportsDynamicStreamID and sends POST /audioMode just before. Treating an emptied
+            // stream list as "session over" tore the session down mid-renegotiation and the sender
+            // gave up, which looked like the receiver killing itself the instant audio started.
+            // When the sender really is finished it closes the socket, and that path already does
+            // the full cleanup.
             if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
             if (streamTypes.contains(110)) { onMirrorVideoStop(); activeStreamTypes.remove(110) }
             if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
-            if (activeStreamTypes.isNotEmpty()) {
-                Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
-                return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
-            }
-            Logger.i("TEARDOWN streams=$streamTypes — last stream removed, ending session")
+            Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
+            return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
         } else {
             Logger.i("TEARDOWN (session, body=${request.bodyBytes.size}B) — streaming stopping")
         }
@@ -865,7 +988,7 @@ open class RtspHandler(
                 body.substringAfter(":").trim().toFloatOrNull()?.let { v ->
                     currentVolume = v
                     onVolume(v)
-                    Logger.d("SET_PARAMETER volume=$v")
+                    Logger.i("SET_PARAMETER volume=$v")
                 }
             }
             body.startsWith("progress:") || body.contains("\nprogress:") -> {
@@ -880,7 +1003,15 @@ open class RtspHandler(
                     val pos = ((curr - start) and 0xFFFFFFFFL) / 44100.0
                     val dur = ((end  - start) and 0xFFFFFFFFL) / 44100.0
                     Logger.i("SET_PARAMETER progress: pos=${pos.toInt()}s dur=${dur.toInt()}s")
-                    onPlaybackPosition(pos, dur)
+                    // On a track change the sender can emit the outgoing track's position against
+                    // the incoming track's duration (observed: pos=165s dur=125s), which drives the
+                    // progress bar past 100%. Drop the impossible pair and wait for the next push.
+                    if (dur > 0 && pos > dur) {
+                        Logger.d("Ignoring stale progress (pos=${pos.toInt()}s > dur=${dur.toInt()}s)")
+                    } else {
+                        onPlaybackPosition(pos, dur)
+                        onPlaybackAnchor(start, end)
+                    }
                 }
             }
             contentType.contains("text/parameters") || body.contains("position:") -> {
@@ -900,7 +1031,10 @@ open class RtspHandler(
             contentType.contains("dmap") || looksLikeDmap(request.bodyBytes) -> {
                 val meta = DmapParser.parseNowPlaying(request.bodyBytes)
                 onNowPlayingMetadata(meta.title, meta.artist, meta.album, meta.genre, meta.composer, meta.year, meta.durationMs)
-                Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}' genre='${meta.genre}' dur=${meta.durationMs?.div(1000)}s")
+                if (meta.title != lastLoggedNpTitle || meta.artist != lastLoggedNpArtist) {
+                    lastLoggedNpTitle = meta.title; lastLoggedNpArtist = meta.artist
+                    Logger.i("SET_PARAMETER now-playing: title='${meta.title}' artist='${meta.artist}' album='${meta.album}' genre='${meta.genre}' dur=${meta.durationMs?.div(1000)}s")
+                }
             }
             else -> Logger.d("SET_PARAMETER unhandled ct='$contentType' body=${body.take(120)}")
         }
@@ -917,14 +1051,23 @@ open class RtspHandler(
         return RtspResponse(statusCode = 501, statusMessage = "Not Implemented", protocol = request.responseProtocol())
     }
 
-    /** Handles FLUSH — macOS requests we discard buffered media data (seek/pause). */
+    /**
+     * Handles FLUSH — discard buffered media. **Not** a pause signal, despite the spec wording.
+     *
+     * Device logs settle this: iOS sends FLUSH immediately after RECORD at the start of every
+     * stream, again on seek, and again on pause. Treating it as "paused" latched the UI at the
+     * first note of playback. Pause is detected from the audio stream going silent instead —
+     * this sender genuinely stops sending RTP while paused (see AudioStreamServer.AUDIO_IDLE_MS).
+     */
     private fun handleFlush(@Suppress("UNUSED_PARAMETER") request: RtspRequest): RtspResponse {
+        Logger.d("FLUSH — buffer flush")
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 
     /** Handles PAUSE — suspends media delivery. Responds 200 OK; resume arrives as RECORD. */
     open fun handlePauseInternal(request: RtspRequest): RtspResponse {
         Logger.d("PAUSE received")
+        onPlaybackPaused(true)
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 
@@ -1027,6 +1170,9 @@ open class RtspHandler(
         private const val SESSION_ID = "PhairPlaySession"
         private const val AUDIO_RTP_PORT = 6001
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
+
+        /** Fallback presentation latency (samples @44.1kHz = 250ms) when SETUP omits latencyMin. */
+        private const val DEFAULT_LATENCY_SAMPLES = 11025
     }
 }
 

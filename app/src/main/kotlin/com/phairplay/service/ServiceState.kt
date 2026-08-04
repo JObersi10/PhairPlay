@@ -35,12 +35,12 @@ sealed class ServiceState {
 }
 
 /**
- * ProtocolState — Represents the state of a single receiver protocol (AirPlay / Miracast / Cast).
+ * ProtocolState — Represents the state of a single receiver protocol (AirPlay / Miracast / DLNA).
  *
  * WHY: Each protocol has its own independent lifecycle. This enum lets the UI
  * show a fine-grained status per protocol card without conflating them.
  *
- * HOW: Each receiver component (AirPlayReceiver, MiracastReceiver, CastReceiver)
+ * HOW: Each receiver component (AirPlayReceiver, MiracastReceiver, DlnaServer)
  * emits [ProtocolState] changes that are aggregated by [PhairPlayService].
  */
 enum class ProtocolState {
@@ -76,5 +76,5 @@ data class ActiveConnection(
 
 /** Identifies one of the three supported protocols. */
 enum class Protocol {
-    AIRPLAY, MIRACAST, CAST
+    AIRPLAY, MIRACAST, DLNA
 }

@@ -222,16 +222,24 @@ class VideoDecoder(private val outputSurface: Surface) {
 
     /** Reads the decoder's true display size (honouring the crop rectangle) for StreamingScreen. */
     private fun publishOutputSize(format: MediaFormat) {
-        var w = format.getInteger(MediaFormat.KEY_WIDTH)
-        var h = format.getInteger(MediaFormat.KEY_HEIGHT)
+        val padW = format.getInteger(MediaFormat.KEY_WIDTH)
+        val padH = format.getInteger(MediaFormat.KEY_HEIGHT)
+        var w = padW
+        var h = padH
         if (format.containsKey("crop-left") && format.containsKey("crop-right")) {
             w = format.getInteger("crop-right") - format.getInteger("crop-left") + 1
             h = format.getInteger("crop-bottom") - format.getInteger("crop-top") + 1
         }
+        // Trust the decoder's reported size, including portrait aspects. An iPhone mirroring in
+        // portrait legitimately reports something like 500x1080 (~0.46) even though the stream was
+        // configured from a 1920x1080 hint, so comparing against the configured aspect and rejecting
+        // the mismatch stretched portrait mirroring to 16:9.
         if (isPlausibleSize(w, h)) {
             StreamStats.videoWidth = w
             StreamStats.videoHeight = h
-            Logger.i("Video output size ${w}x$h")
+            StreamStats.videoPadWidth = padW
+            StreamStats.videoPadHeight = padH
+            Logger.i("Video output size ${w}x$h (buffer ${padW}x$padH)")
         }
     }
 
@@ -245,6 +253,23 @@ class VideoDecoder(private val outputSurface: Surface) {
      *
      * After release(), call initialize() again before using the decoder.
      */
+    /**
+     * Retargets the running codec at [surface] without tearing it down.
+     *
+     * This is what makes returning from Home instant. A rebuilt decoder has no reference frames, so
+     * it must discard everything until the sender's next IDR — which on a mirror stream can be
+     * seconds away, and shows as a black screen. MediaCodec.setOutputSurface keeps the codec and its
+     * reference state intact, so the very next frame decodes.
+     *
+     * @return true if the swap succeeded; false means the caller must fall back to a rebuild.
+     */
+    fun setOutputSurface(surface: Surface): Boolean {
+        val codec = mediaCodec ?: return false
+        return runCatching { codec.setOutputSurface(surface); true }
+            .onFailure { Logger.w("setOutputSurface rejected — falling back to rebuild: ${it.message}") }
+            .getOrDefault(false)
+    }
+
     fun release() {
         Logger.d("Releasing VideoDecoder")
         try {

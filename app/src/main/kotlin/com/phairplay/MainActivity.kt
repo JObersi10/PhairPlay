@@ -1,6 +1,6 @@
 package com.phairplay
 
-import android.app.AlertDialog
+import android.app.PictureInPictureParams
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -9,14 +9,14 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.widget.ScrollView
+import android.util.Rational
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import android.view.View
+import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import com.phairplay.diagnostic.LogBuffer
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.phairplay.service.PhairPlayService
@@ -24,7 +24,10 @@ import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
 import com.phairplay.airplay.NowPlayingInfo
+import com.phairplay.settings.BackAction
+import com.phairplay.settings.SettingsRepository
 import com.phairplay.ui.HomeFragment
+import com.phairplay.ui.OnboardingFragment
 import com.phairplay.ui.NowPlayingScreen
 import com.phairplay.ui.PhotoScreen
 import com.phairplay.ui.PinScreen
@@ -32,6 +35,7 @@ import com.phairplay.ui.SettingsFragment
 import com.phairplay.ui.StreamingScreen
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import timber.log.Timber
 
@@ -76,6 +80,25 @@ class MainActivity : AppCompatActivity() {
     private var currentPin: String? = null
     private var currentVideoPlaying = false
 
+    /** Cached copy of AppSettings.backAction — onBackPressed can't suspend to read DataStore. */
+    private var backAction = BackAction.STOP_STREAM
+
+    /** Which screen this session owns, latched until it ends. */
+    private enum class Mode { NONE, AUDIO, VIDEO }
+    private var sessionMode = Mode.NONE
+    /** Last metadata seen, so an audio session keeps its card when the sender stops sending any. */
+    private var lastNowPlaying: NowPlayingInfo? = null
+
+    /** Cached AppSettings.pipEnabled — checked from onUserLeaveHint, which can't suspend. */
+    private var pipEnabled = true
+    private var isSeekActive = false
+
+    // True while a stream is on screen — used to detect the active→idle edge in trackSessionEnd().
+    private var hadActiveSession = false
+    // True when PhairPlayService auto-opened us for an incoming sender, so we know to hand the
+    // screen back when that session ends. A manual launch leaves this false.
+    private var openedBySender = false
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as? PhairPlayService.LocalBinder)?.getService()
@@ -104,25 +127,83 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         Timber.d("MainActivity created")
+        openedBySender = intent?.getBooleanExtra(EXTRA_OPENED_BY_SENDER, false) == true
         bindViews()
         setupOverlayScreens()
         setupNavigation()
 
-        // Show HomeFragment on first launch
-        if (savedInstanceState == null) {
-            navigateTo(HomeFragment(), navItemHome)
-        }
+        applyNowPlayingSettings()
 
         // Start the service immediately so it's running before any sender discovers us
         ServiceController.start(this)
-        showLogViewerIfNeeded()
 
-        // Android 13+ requires an explicit runtime grant for POST_NOTIFICATIONS
-        requestNotificationPermission()
+        if (savedInstanceState == null) {
+            // On a first run the onboarding flow owns the permission prompts, so the bare runtime
+            // request must not fire underneath it — the user would get an unexplained system dialog
+            // on top of the page that was about to explain it.
+            lifecycleScope.launch {
+                val settings = SettingsRepository(this@MainActivity).settingsFlow.first()
+                if (settings.onboardingComplete) {
+                    navigateTo(HomeFragment(), navItemHome)
+                    requestNotificationPermission()
+                } else {
+                    showOnboarding()
+                }
+            }
+        }
+    }
+
+    /**
+     * Shows the first-run flow over the whole content area, hiding the nav panel so there is no way
+     * to wander off mid-setup.
+     */
+    private fun showOnboarding() {
+        navPanelVisible(false)
+        val fragment = OnboardingFragment().also { f ->
+            f.onFinished = {
+                navPanelVisible(true)
+                navigateTo(HomeFragment(), navItemHome)
+                requestNotificationPermission()
+                // The receivers started in onCreate, seconds before onboarding wrote the user's
+                // answers, so they are still running on pre-onboarding defaults — a chosen PIN
+                // showed up in DataStore while the RTSP handler kept logging pinAuth=false. Restart
+                // so every choice on the preferences page actually takes effect now, not on the next
+                // launch. Same for the screensaver and high-resolution settings.
+                Timber.i("Onboarding finished — restarting receivers to pick up chosen settings")
+                ServiceController.restart(this)
+            }
+        }
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.content_container, fragment)
+            .commit()
+    }
+
+    private fun navPanelVisible(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.GONE
+        navItemHome.visibility = v
+        navItemSettings.visibility = v
+    }
+
+    /**
+     * launchMode="singleTop" means an auto-open while we're already running is delivered here
+     * rather than through onCreate, so the flag has to be picked up in both places.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getBooleanExtra(EXTRA_OPENED_BY_SENDER, false)) {
+            openedBySender = true
+        }
     }
 
     override fun onStart() {
         super.onStart()
+        // Re-read on every foregrounding: the user may have just changed these in Settings.
+        // Settings are collected continuously from onCreate — no re-read needed here.
+        // Start before binding. BIND_AUTO_CREATE on its own creates a bound-only service that never
+        // receives onStartCommand and dies at unbind, so the receiver only lived while this Activity
+        // was on screen. Both calls are idempotent.
+        ServiceController.start(this)
         // Bind so we can observe StateFlows and supply the video Surface
         val intent = Intent(this, PhairPlayService::class.java)
         bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
@@ -138,10 +219,57 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        if (pipEnabled && currentVideoPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            runCatching {
+                enterPictureInPictureMode(
+                    PictureInPictureParams.Builder()
+                        .setAspectRatio(Rational(16, 9))
+                        .build()
+                )
+            }
+        }
+    }
+
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (currentNowPlaying != null || currentAirPlayState == com.phairplay.service.ProtocolState.CONNECTED) {
+        // Back closes the track-info panel before it touches the session — otherwise opening the
+        // credits and pressing Back would kill the stream instead of just closing the card.
+        if (nowPlayingScreen.visibility == View.VISIBLE && nowPlayingScreen.dismissInfoPanel()) return
+
+        // While a stream is on screen, Back ends the AirPlay session rather than navigating away
+        // and leaving the sender still mirroring to an app the user just left.
+        if (currentVideoPlaying || currentNowPlaying != null ||
+            currentAirPlayState == ProtocolState.CONNECTED
+        ) {
+            when (backAction) {
+                BackAction.EXIT_APP -> {
+                    Timber.d("Back during session, action=EXIT_APP — ending session and quitting")
+                    service?.endCurrentSession()
+                    ServiceController.stop(this)
+                    finishAndRemoveTask()
+                }
+                BackAction.GO_HOME -> {
+                    // moveTaskToBack backgrounds the task without finishing it, so the sender keeps
+                    // playing and the service can bring us forward again when something changes.
+                    Timber.d("Back during session, action=GO_HOME — backgrounding, session continues")
+                    moveTaskToBack(true)
+                }
+                BackAction.STOP_STREAM -> {
+                    Timber.d("Back during session, action=STOP_STREAM — ending AirPlay session")
+                    service?.endCurrentSession()
+                }
+            }
+            return
+        }
+        // No stream on screen. Only EXIT_APP has anything left to do — the other two have already
+        // happened by the time you are back on the waiting screen.
+        if (backAction == BackAction.EXIT_APP) {
+            Timber.d("Back with action=EXIT_APP — stopping service and finishing task")
             ServiceController.stop(this)
+            finishAndRemoveTask()
+            return
         }
         @Suppress("DEPRECATION")
         super.onBackPressed()
@@ -149,12 +277,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (isFinishing) {
-            Timber.d("MainActivity finishing — stopping service so mirroring doesn't linger")
-            ServiceController.stop(this)
-        } else {
-            Timber.d("MainActivity destroyed (recreation) — leaving service running")
-        }
+        Timber.d("MainActivity destroyed — service keeps running in background")
     }
 
     // ─── View Setup ──────────────────────────────────────────────────────────
@@ -174,7 +297,9 @@ class MainActivity : AppCompatActivity() {
         streamingScreen = StreamingScreen(this)
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this).also {
-            it.onPlayPauseClick = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE) }
+            it.onPlayPauseClick = { nowPlayingScreen.togglePause() }
+            it.onPrevClick     = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_PREV) }
+            it.onNextClick     = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_NEXT) }
         }
         pinScreen = PinScreen(this)
         streamingContainer.addView(streamingScreen)
@@ -287,7 +412,12 @@ class MainActivity : AppCompatActivity() {
         nowPlayingScreen.clear()
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
-        streamingScreen.visibility = View.VISIBLE
+        // Hide the SurfaceView itself, not just its container. A SurfaceView holds the last frame
+        // the decoder wrote and lockCanvas can't be used to wipe it while MediaCodec owns it, so
+        // leaving it VISIBLE meant the final mirrored image stayed on screen. Going GONE releases
+        // the Surface; the next session rebuilds the decoder against the new one, which is the same
+        // path already taken when the app backgrounds.
+        streamingScreen.visibility = View.GONE
         streamingContainer.visibility = View.GONE
     }
 
@@ -300,23 +430,49 @@ class MainActivity : AppCompatActivity() {
      * false for other keys so normal navigation is unaffected.
      */
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
-        if (overlayActive && keyCode == android.view.KeyEvent.KEYCODE_MENU) {
-            ServiceController.stop(this)
+        // Handle Back here rather than relying on onBackPressed(). That path goes through
+        // OnBackPressedDispatcher, where a fragment or the overlay can swallow the event before the
+        // Activity sees it — which is why both Back settings appeared to do nothing.
+        if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            @Suppress("DEPRECATION")
+            onBackPressed()
             return true
         }
+        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
         if (overlayActive) {
+            // Any remote press counts as presence — restart the Now Playing idle countdown.
+            nowPlayingScreen.notifyActivity()
+
+            // Menu (and Info on some remotes) flips the now-playing card over to its credits side.
+            if (keyCode == android.view.KeyEvent.KEYCODE_MENU ||
+                keyCode == android.view.KeyEvent.KEYCODE_INFO
+            ) {
+                if (nowPlayingScreen.visibility == View.VISIBLE) return nowPlayingScreen.toggleInfoPanel()
+            }
+
             val command = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
                 android.view.KeyEvent.KEYCODE_MEDIA_PAUSE,
-                android.view.KeyEvent.KEYCODE_DPAD_CENTER -> com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER -> {
+                    if (isSeekActive) {
+                        isSeekActive = false
+                        com.phairplay.airplay.DacpClient.CMD_PLAY_RESUME
+                    } else {
+                        nowPlayingScreen.togglePause()
+                        com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE
+                    }
+                }
                 android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> com.phairplay.airplay.DacpClient.CMD_NEXT
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> com.phairplay.airplay.DacpClient.CMD_NEXT
                 android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> com.phairplay.airplay.DacpClient.CMD_PREV
-                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> com.phairplay.airplay.DacpClient.CMD_FF
-                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> com.phairplay.airplay.DacpClient.CMD_REW
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD,
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> com.phairplay.airplay.DacpClient.CMD_PREV
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (event?.repeatCount == 0) { isSeekActive = true; com.phairplay.airplay.DacpClient.CMD_FF } else null
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND      -> if (event?.repeatCount == 0) { isSeekActive = true; com.phairplay.airplay.DacpClient.CMD_REW } else null
+                android.view.KeyEvent.KEYCODE_VOLUME_UP   -> com.phairplay.airplay.DacpClient.CMD_VOLUME_UP
+                android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> com.phairplay.airplay.DacpClient.CMD_VOLUME_DOWN
                 else -> null
             }
             if (command != null) {
@@ -327,48 +483,103 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
+        if (overlayActive) {
+            val command: String? = null
+            if (command != null) {
+                service?.sendAirPlayRemoteCommand(command)
+                return true
+            }
+        }
+        return super.onKeyUp(keyCode, event)
+    }
+
+    /**
+     * Pushes the user's screensaver preferences into [NowPlayingScreen]. Read here rather than in
+     * the screen itself so the view stays free of DataStore and coroutine plumbing.
+     */
+    private fun applyNowPlayingSettings() {
+        // Collect rather than read once. SettingsFragment is a fragment swap, not a new Activity, so
+        // onStart never fires after the user flips a toggle — a one-shot read left "Back exits
+        // PhairPlay" stuck on whatever it was when the app launched, which is why toggling it
+        // appeared to do nothing. The flow also keeps the screensaver config live for free.
+        lifecycleScope.launch {
+            SettingsRepository(this@MainActivity).settingsFlow.collectLatest { settings ->
+                nowPlayingScreen.setScreensaverConfig(
+                    settings.screensaverEnabled, settings.screensaverTimeoutMin
+                )
+                // Cached because onBackPressed is synchronous and can't await DataStore.
+                backAction = settings.backAction
+                pipEnabled = settings.pipEnabled
+                nowPlayingScreen.setBeatPulse(settings.beatPulse)
+                // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
+                // reflects what is coming out of the speakers rather than what has been received.
+                nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)
+            }
+        }
+    }
+
     /**
      * Requests POST_NOTIFICATIONS permission on Android 13+ (API 33+).
      * On older versions the permission is granted automatically with the manifest declaration.
      */
     private fun requestNotificationPermission() {
+        val wanted = mutableListOf<String>()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            if (ContextCompat.checkSelfPermission(
-                    this, android.Manifest.permission.POST_NOTIFICATIONS
-                ) != PackageManager.PERMISSION_GRANTED
-            ) {
-                ActivityCompat.requestPermissions(
-                    this,
-                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
-                    PERMISSION_REQUEST_NOTIFICATIONS
-                )
-            }
+            wanted += android.Manifest.permission.POST_NOTIFICATIONS
+            // The modern, location-free way to ask for Wi-Fi Direct. Only exists from API 33.
+            wanted += android.Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            // Below API 33 the Wi-Fi P2P APIs are gated on location instead. Miracast silently
+            // refuses to register its P2P service without one of the two, which is why the receiver
+            // logged "missing Wi-Fi Direct permission" on every start — the manifest declared them
+            // but nothing ever asked the user.
+            wanted += android.Manifest.permission.ACCESS_FINE_LOCATION
         }
+
+        val missing = wanted.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing.isEmpty()) return
+
+        Timber.d("Requesting runtime permissions: $missing")
+        ActivityCompat.requestPermissions(
+            this, missing.toTypedArray(), PERMISSION_REQUEST_NOTIFICATIONS
+        )
     }
 
-    private fun showLogViewerIfNeeded() {
-        val log = LogBuffer.readFile().trim()
-        if (log.isEmpty()) return
-        val tv = TextView(this).apply {
-            text = log
-            textSize = 10f
-            setPadding(16, 16, 16, 16)
-            setTextIsSelectable(true)
-        }
-        val scroll = ScrollView(this).apply { addView(tv) }
-        AlertDialog.Builder(this)
-            .setTitle("Previous session log")
-            .setView(scroll)
-            .setPositiveButton("Clear") { _, _ -> LogBuffer.clearFile() }
-            .setNegativeButton("Dismiss", null)
-            .show()
-            .also {
-                scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
+    /**
+     * Miracast reads its permission state only when it starts, so a grant that arrives after the
+     * service is already up has no effect until the receivers are restarted.
+     */
+    override fun onRequestPermissionsResult(
+        requestCode: Int, permissions: Array<out String>, grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != PERMISSION_REQUEST_NOTIFICATIONS) return
+        val granted = permissions.indices.filter {
+            grantResults.getOrNull(it) == PackageManager.PERMISSION_GRANTED
+        }.map { permissions[it] }
+        Timber.d("Permission result — granted: $granted")
+        if (granted.any {
+                it == android.Manifest.permission.ACCESS_FINE_LOCATION ||
+                    it == android.Manifest.permission.NEARBY_WIFI_DEVICES
             }
+        ) {
+            Timber.i("Wi-Fi Direct permission granted — restarting receivers so Miracast registers")
+            ServiceController.restart(this)
+        }
     }
 
     companion object {
+        /** Latency every AirPlay sender asks for in SETUP latencyMin: 11025 samples @44.1kHz. */
+        private const val BASE_LATENCY_MS = 250
+
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
+        /** Set by PhairPlayService when it opens this Activity for an incoming sender. */
+        const val EXTRA_OPENED_BY_SENDER = "com.phairplay.extra.OPENED_BY_SENDER"
     }
 
     // ─── Streaming overlay ────────────────────────────────────────────────────
@@ -412,6 +623,12 @@ class MainActivity : AppCompatActivity() {
                 updateOverlay()
             }
         }
+        lifecycleScope.launch {
+            svc.audioEnergy.collect { e -> nowPlayingScreen.setEnergy(e) }
+        }
+        lifecycleScope.launch {
+            svc.volumeReport.collect { r -> nowPlayingScreen.setVolumeReport(r?.display) }
+        }
     }
 
     private fun updateOverlay() {
@@ -421,10 +638,70 @@ class MainActivity : AppCompatActivity() {
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
             pin != null -> showPinScreen(pin)
-            currentVideoPlaying || (currentAirPlayState == ProtocolState.CONNECTED && nowPlaying == null) -> showStreamingScreen()
-            nowPlaying != null -> showNowPlayingScreen(nowPlaying)
+            // Mode is latched for the whole session. Metadata comes and goes mid-track, and
+            // reacting to each change dropped an audio session onto an empty black video surface.
+            sessionMode == Mode.VIDEO -> showStreamingScreen()
+            sessionMode == Mode.AUDIO -> showNowPlayingScreen(nowPlaying ?: lastNowPlaying!!)
             photoFrame != null -> showPhotoScreen(photoFrame)
             else -> hideStreamingScreen()
+        }
+        // Latch the mode on the first frame of evidence, clear it when the session ends.
+        if (nowPlaying != null) lastNowPlaying = nowPlaying
+        val connected = currentAirPlayState == ProtocolState.CONNECTED
+        if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
+        else if (sessionMode == Mode.NONE) {
+            sessionMode = if (nowPlaying != null) Mode.AUDIO
+                          else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
+        } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
+            sessionMode = Mode.AUDIO
+        }
+
+        val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
+                            photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED
+        keepScreenAwake(sessionActive)
+        trackSessionEnd(sessionActive)
+    }
+
+    /**
+     * Holds off Fire TV's own screensaver while a session is on screen.
+     *
+     * The service's wake lock is PARTIAL_WAKE_LOCK, which keeps the CPU running but deliberately
+     * lets the display sleep — so during AirPlay audio or DLNA playback, where nothing is being
+     * drawn to a video surface, Fire OS would blank the screen and start its screensaver over a
+     * perfectly live session. FLAG_KEEP_SCREEN_ON is the only thing that suppresses it, and it is
+     * cleared the moment the session ends so idle PhairPlay doesn't pin the display on.
+     *
+     * This is unrelated to the app's own idle screensaver, which is a visual effect drawn by
+     * NowPlayingScreen and still runs on its own timeout.
+     */
+    private fun keepScreenAwake(active: Boolean) {
+        if (active) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    /**
+     * Sends the app back to whatever the user was doing before, once a session that auto-opened
+     * PhairPlay ends. [moveTaskToBack] backgrounds the task without finishing it, so the service
+     * keeps advertising and the next sender can auto-open us again — we don't want a full quit.
+     * Only fires for sessions we opened ourselves; if the user launched PhairPlay by hand they
+     * stay on the home screen.
+     */
+    private fun trackSessionEnd(sessionActive: Boolean) {
+        if (sessionActive) {
+            hadActiveSession = true
+            return
+        }
+        if (!hadActiveSession) return
+        hadActiveSession = false
+        if (!openedBySender) return
+        openedBySender = false
+        Timber.d("Session ended — returning to the previous app")
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode) {
+            // Can't moveTaskToBack straight out of PiP; finishing the PiP window drops the user
+            // back to the app that was behind it.
+            finishAndRemoveTask()
+        } else {
+            moveTaskToBack(true)
         }
     }
 

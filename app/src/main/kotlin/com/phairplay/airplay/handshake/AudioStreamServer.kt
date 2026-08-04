@@ -46,8 +46,29 @@ class AudioStreamServer(
     aesIv: ByteArray,
     private val sampleRate: Int,
     private val channels: Int,
-    private val codecType: Int = CT_AAC_ELD,   // SETUP ct: 8 = AAC-ELD (mirror), 4 = AAC-LC (audio-only)
-    private val framesPerPacket: Int = DEFAULT_ALAC_FRAMES,   // SETUP spf — ALAC frameLength (352)
+    private val codecType: Int = CT_AAC_ELD,
+    private val framesPerPacket: Int = DEFAULT_ALAC_FRAMES,
+    /**
+     * Presentation latency the sender asks for, in samples (its SETUP `latencyMin`; 11025 = 250ms
+     * at 44.1kHz). AirPlay senders stream ahead of their own playback position and expect the
+     * receiver to hold each frame back by this much. Playing on arrival instead made our audio run
+     * ahead of the sender's timeline — audible as the music leading the lyrics on the phone.
+     */
+    private val latencyMinSamples: Int = 11025,
+    /** User A/V trim, also applied to the beat pulse so the visual matches what is heard. */
+    private val extraDelayMs: Long = 0,
+    /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
+    private val beatDelayMs: Long = 0,
+    /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
+    val onEnergy: (Float) -> Unit = {},
+    /**
+     * True when audio packets have stopped arriving, false when they resume.
+     *
+     * This is how a pause is actually detected. Apple Music never sends RTSP PAUSE, so the
+     * protocol-level paused flag stays false forever and the progress bar kept counting through a
+     * paused track. The stream itself is unambiguous: paused senders stop transmitting.
+     */
+    val onAudioIdle: (Boolean) -> Unit = {},
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
@@ -76,6 +97,14 @@ class AudioStreamServer(
     // we drop the oldest frame (a brief glitch is better than ever-growing audio lag).
     private val frameQueue = ArrayBlockingQueue<ByteArray>(AUDIO_QUEUE_CAPACITY)
 
+    /**
+     * How many frames deep to hold the queue, so playback sits [latencyMinSamples] behind arrival —
+     * the delay the sender expects. Capped at half the queue so there is still headroom to absorb
+     * jitter before the overflow eviction kicks in.
+     */
+    private val targetDepthFrames: Int =
+        (latencyMinSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
+
     // RTP duplicate suppression. macOS sends each realtime-audio packet 2–3× for redundancy
     // (same 16-bit sequence number). Decoding every copy feeds the AAC decoder duplicate frames
     // and pushes 2–3× real-time data into AudioTrack — the buffer overflows, chunks get dropped,
@@ -103,6 +132,21 @@ class AudioStreamServer(
     @Volatile private var qDropCount = 0
     @Volatile private var resendReqCount = 0
     @Volatile private var resendFillCount = 0
+    /** True while the sender is paused — see the payload-size check in [handleRtpPacket]. */
+    @Volatile private var audioIdle = false
+
+    /** Consecutive payload-free packets seen; resets on the first real audio frame. */
+    private var keepaliveRun = 0
+
+    // Beat detection state (playback thread only).
+    private var lowPass = 0.0
+    private val history = DoubleArray(100)
+    private var historyIdx = 0
+    private var lastOnsetMs = 0L
+    private var envelope = 0f
+    /** Previous RTP timestamp, for detecting a sender clock re-sync. */
+    @Volatile private var lastRtpTs = -1L
+    private val energyHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
     val dataPort: Int get() = socket.localPort
@@ -134,7 +178,7 @@ class AudioStreamServer(
                 controlSocket.receive(pkt)
                 senderCtrlAddr = pkt.socketAddress   // where to send resend requests
                 if (ctrlCount < 6) {
-                    Logger.i("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, minOf(20, pkt.length))}")
+                    Logger.d("Audio CTRL[$ctrlCount] ${pkt.length}B: ${hex(pkt.data, minOf(20, pkt.length))}")
                     ctrlCount++
                 }
                 // RTP payload type is bits 0–6 of byte 1 (byte 1 = marker<<7 | type).
@@ -164,6 +208,8 @@ class AudioStreamServer(
 
     /** Receive thread: pull RTP packets off the data socket and feed them to the reorder buffer. */
     private fun runReceive() {
+        // Bounded wait so a paused sender surfaces as an idle stream instead of blocking forever.
+        runCatching { socket.soTimeout = AUDIO_IDLE_MS }
         try {
             Logger.i("AudioStreamServer listening on UDP $dataPort (ct=$codecType ${sampleRate}Hz x$channels)")
             val buf = ByteArray(2048)
@@ -172,17 +218,25 @@ class AudioStreamServer(
             var recv = 0
             while (running) {
                 packet.length = buf.size      // reset capacity — receive() shrinks length to the last datagram
-                socket.receive(packet)
+                try {
+                    socket.receive(packet)
+                } catch (e: java.net.SocketTimeoutException) {
+                    if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
+                    continue
+                }
+                if (audioIdle) { audioIdle = false; onAudioIdle(false) }
                 recv++
                 if (rtpCount < 6) {
-                    Logger.i("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
+                    Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
                     rtpCount++
                 }
                 handleRtpPacket(packet.data, 0, packet.length)
                 StreamStats.audioQueue = frameQueue.size
-                if (recv % 500 == 0) {
+                // Every 500 packets is roughly every 4s — enough to flush a whole day of real
+                // events out of the diagnostic ring buffer. Sample 10x less often, at debug level.
+                if (recv % 5000 == 0) {
                     StreamStats.audioDupPct = dupCount * 100 / (recv + dupCount)
-                    Logger.i("Audio stats: recv=$recv dup=$dupCount (${StreamStats.audioDupPct}% dup) " +
+                    Logger.d("Audio stats: recv=$recv dup=$dupCount (${StreamStats.audioDupPct}% dup) " +
                         "qDrop=$qDropCount resendReq=$resendReqCount resendFill=$resendFillCount queue=${frameQueue.size}")
                 }
             }
@@ -198,7 +252,42 @@ class AudioStreamServer(
      */
     private fun handleRtpPacket(src: ByteArray, offset: Int, length: Int) {
         if (length <= RTP_HEADER) return
+        // THIS is the pause signal, established by measurement after four wrong guesses.
+        //
+        // A paused iOS sender does not stop transmitting and does not stop its clock. It keeps
+        // sending at the full ~128 packets/sec with the RTP timestamp advancing in real time — the
+        // packets are simply empty, 44 bytes of header and no audio. That is why packet arrival,
+        // RTP-clock advance, decoded-PCM silence and RTSP FLUSH all failed to detect a pause:
+        // every one of them looks identical to playback. Only the payload size gives it away
+        // (~5.6 KB/s paused against ~120 KB/s playing).
+        if (length <= KEEPALIVE_MAX_BYTES) {
+            if (++keepaliveRun >= KEEPALIVE_RUN_TO_PAUSE && !audioIdle) {
+                audioIdle = true
+                onAudioIdle(true)
+            }
+            return   // nothing to decode; feeding these to the decoder produced garbage
+        }
+        keepaliveRun = 0
+        if (audioIdle) { audioIdle = false; onAudioIdle(false) }
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
+        // RTP timestamp (bytes 4..7) is the sender's own playback clock. When a sender re-syncs
+        // mid-stream — an iPad "correcting itself" — it jumps, and everything already queued
+        // belongs to the old timeline. Playing it out drifts us permanently off. Drop the stale
+        // audio and re-prime so we line up with the new clock instead.
+        val rtpTs = ((src[offset + 4].toInt() and 0xFF).toLong() shl 24) or
+                    ((src[offset + 5].toInt() and 0xFF).toLong() shl 16) or
+                    ((src[offset + 6].toInt() and 0xFF).toLong() shl 8) or
+                    (src[offset + 7].toInt() and 0xFF).toLong()
+        if (lastRtpTs >= 0) {
+            val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
+            val drift = Math.abs(rtpTs - expected)
+            if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
+                Logger.i("Audio: sender clock jumped ${drift} samples — reprimimg")
+                frameQueue.clear()
+                synchronized(reorderLock) { reorder.clear(); nextSeq = -1; maxSeq = -1 }
+            }
+        }
+        lastRtpTs = rtpTs
         // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted audio payload (copied out of src).
         val payload = src.copyOfRange(offset + RTP_HEADER, offset + length)
         var resend: IntArray? = null
@@ -277,6 +366,7 @@ class AudioStreamServer(
         try {
             initDecoder()
             initAudioTrack()
+            awaitPrimedQueue()
             while (running) {
                 val payload = frameQueue.poll(200, TimeUnit.MILLISECONDS) ?: continue
                 try {
@@ -285,6 +375,7 @@ class AudioStreamServer(
                 } catch (e: Exception) {
                     if (running) Logger.e("Audio: frame decode error", e)
                 }
+                resyncIfBacklogged()
             }
         } catch (e: Exception) {
             if (running) Logger.e("Audio playback error", e)
@@ -307,6 +398,7 @@ class AudioStreamServer(
         val pcm = alac?.decode(frame) ?: return
         if (firstPcm) { Logger.i("Audio: first decoded ALAC PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
         audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+        emitEnergy(pcm)
     }
 
     /** True if this RTP sequence was already processed (a redundant retransmission). */
@@ -344,18 +436,86 @@ class AudioStreamServer(
             // Blocking write paces playback to the audio clock and drops no PCM. Safe here because
             // this runs on the dedicated playback thread, not the socket-receive thread.
             audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+            emitEnergy(pcm)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
         }
     }
+
+    private var lastEnergyMs = 0L
+    /**
+     * Bass-onset beat detection.
+     *
+     * Plain RMS loudness pulses on everything — vocals, cymbals, a loud pad — so the backdrop
+     * shimmered constantly instead of moving with the beat. This instead mono-downmixes, low-passes
+     * to keep only bass, measures energy in short windows, and fires when a window jumps well above
+     * the recent running mean. The result is a punch that decays, which is what reads as a beat.
+     */
+    private fun emitEnergy(pcm: ByteArray) {
+        // Window energy, mono, low-passed to ~130Hz with a one-pole filter.
+        var sum = 0.0
+        var count = 0
+        var i = 0
+        while (i + 1 < pcm.size) {
+            var sample = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
+            i += 2
+            if (channels >= 2 && i + 1 < pcm.size) {
+                sample = (sample + ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()) / 2.0
+                i += 2
+            }
+            lowPass += LP_ALPHA * (sample - lowPass)
+            sum += lowPass * lowPass
+            count++
+        }
+        if (count == 0) return
+        val level = Math.sqrt(sum / count) / 32768.0
+
+        // Running mean/variance over roughly the last second of windows.
+        history[historyIdx % history.size] = level
+        historyIdx++
+        val n = minOf(historyIdx, history.size)
+        var mean = 0.0
+        for (k in 0 until n) mean += history[k]
+        mean /= n
+        var variance = 0.0
+        for (k in 0 until n) { val d = history[k] - mean; variance += d * d }
+        val stddev = Math.sqrt(variance / n)
+
+        val now = System.currentTimeMillis()
+        val isOnset = n >= 8 && level > mean + ONSET_SIGMA * stddev && now - lastOnsetMs > REFRACTORY_MS
+        if (isOnset) {
+            lastOnsetMs = now
+            envelope = 1f
+        } else {
+            // Punch, then fall away over ~250ms.
+            val dt = (now - lastEnergyMs).coerceAtLeast(0L)
+            envelope = (envelope - dt / DECAY_MS).coerceAtLeast(0f)
+        }
+        // Rate-limit emissions so a beat doesn't spam the UI thread.
+        if (now - lastEnergyMs < 40 && !isOnset) return
+        lastEnergyMs = now
+        // Hold the pulse until the audio it describes is actually audible. Energy is measured as
+        // PCM enters the queue, but that sample is heard a whole presentation latency later, so
+        // emitting immediately made the backdrop flash ahead of the beat.
+        emitDelayed(envelope)
+    }
+
 
     private fun initDecoder() {
         if (codecType == CT_ALAC) {
             // macOS sends ALAC (lossless) for system-audio AirPlay regardless of our advertised
             // formats, and this TV has no hardware ALAC codec — so we decode in software via the
             // bundled Apple ALAC decoder (libalac.so). frameLength comes from the SETUP spf.
-            alac = AlacDecoder(sampleRate, channels, framesPerPacket)
-            Logger.i("Audio decoder: ALAC ${sampleRate}Hz x$channels spf=$framesPerPacket (ct=2)")
+            // System.loadLibrary throws UnsatisfiedLinkError — an Error, not an Exception, so the
+            // playback loop's `catch (e: Exception)` let it kill the whole app when the packaged
+            // libalac.so was unreadable. Silence beats a crash: the session stays up, and the log
+            // says why there is no audio.
+            alac = runCatching { AlacDecoder(sampleRate, channels, framesPerPacket) }
+                .onFailure { Logger.e("ALAC decoder unavailable — audio will be silent", it) }
+                .getOrNull()
+            if (alac != null) {
+                Logger.i("Audio decoder: ALAC ${sampleRate}Hz x$channels spf=$framesPerPacket (ct=2)")
+            }
             return
         }
         // ct=8 AAC-ELD (mirroring, spf 480) vs ct=4 AAC-LC (audio-only / Apple Music, spf 1024).
@@ -374,6 +534,95 @@ class AudioStreamServer(
         Logger.i("Audio decoder: ${if (isAacLc) "AAC-LC" else "AAC-ELD"} ${sampleRate}Hz x$channels (ct=$codecType)")
     }
 
+    /**
+     * Waits for a few frames to accumulate before decoding the first one.
+     *
+     * Starting on packet zero meant playback began with an empty pipeline, so the very first
+     * scheduling delay was already an underrun — the "choppy for the first second" symptom. Bounded
+     * by [PRIME_TIMEOUT_MS] so a sender that opens the stream and sends nothing can't stall here.
+     */
+    private fun awaitPrimedQueue() {
+        val deadline = System.currentTimeMillis() + PRIME_TIMEOUT_MS
+        while (running && frameQueue.size < targetDepthFrames && System.currentTimeMillis() < deadline) {
+            Thread.sleep(5)
+        }
+        Logger.i("Audio: primed with ${frameQueue.size}/$targetDepthFrames frames " +
+            "(~${targetDepthFrames * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
+    }
+
+    /**
+     * Drops the oldest frames when the queue is running persistently deep.
+     *
+     * AudioTrack.write with WRITE_BLOCKING paces at exactly realtime, so nothing ever drains an
+     * accumulated backlog: once playback falls ~700ms behind it stays there, and the queue's own
+     * overflow eviction becomes the only relief — one audible glitch per dropped frame, forever.
+     * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
+     */
+    private fun resyncIfBacklogged() {
+        if (frameQueue.size < targetDepthFrames * 2) return
+        var dropped = 0
+        while (frameQueue.size > targetDepthFrames && frameQueue.poll() != null) dropped++
+        if (dropped > 0) {
+            qDropCount += dropped
+            Logger.i("Audio: backlog resync — dropped $dropped frames, queue=${frameQueue.size}")
+        }
+    }
+
+    /**
+     * Emits [value] once the AudioTrack has actually played the audio it was measured from.
+     *
+     * Uses the track's own reported latency where available — buffered frames plus whatever the
+     * output path adds — so the delay tracks reality instead of a constant. Bluetooth's link delay
+     * is not exposed by Android and is not included; the user's audio trim covers that.
+     */
+    private fun emitDelayed(value: Float) {
+        val track = audioTrack
+        val bufferedMs = if (track != null) {
+            val queuedFrames = frameQueue.size * framesPerPacket
+            val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
+            ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
+        } else 0L
+        val delay = bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
+        if (delay <= 0L) { onEnergy(value); return }
+        energyHandler.postDelayed({ onEnergy(value) }, delay)
+    }
+
+    /**
+     * How far behind real time this device's audio output actually is, measured rather than assumed.
+     *
+     * AudioTrack.getTimestamp() reports the frame the hardware is playing and when it played it, so
+     * the gap between frames written and frames heard is the true output latency. Covers the mixer
+     * and HAL. It does NOT cover a Bluetooth link's own delay, which Android exposes no API for —
+     * that is what the user's audio trim is for.
+     */
+    /**
+     * The RTP timestamp currently reaching the speakers, or -1 before the first packet.
+     *
+     * This is the receiver's true playback clock. The newest arrival is ahead of what is audible by
+     * everything still queued plus whatever AudioTrack is holding, so both are subtracted. Deriving
+     * the progress bar from this instead of extrapolating wall-clock time from a sender push means
+     * position cannot drift: it is measured against the same samples the user is hearing, and it
+     * stops on its own during a pause because the queue stops advancing.
+     */
+    fun playingRtpTimestamp(): Long {
+        val newest = lastRtpTs
+        if (newest < 0) return -1L
+        val queuedFrames = frameQueue.size.toLong() * framesPerPacket
+        val trackFrames = outputLatencyMs() * sampleRate / 1000L
+        return (newest - queuedFrames - trackFrames) and 0xFFFFFFFFL
+    }
+
+    private fun outputLatencyMs(): Long {
+        val track = audioTrack ?: return 0L
+        return runCatching {
+            val ts = android.media.AudioTimestamp()
+            if (!track.getTimestamp(ts)) return 0L
+            val written = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            val pending = written - ts.framePosition
+            if (pending <= 0) 0L else pending * 1000L / sampleRate.coerceAtLeast(1)
+        }.getOrDefault(0L)
+    }
+
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
     fun setVolume(airplayVolume: Float) {
         volumeGain = if (airplayVolume <= -144f) 0f else ((airplayVolume + 30f) / 30f).coerceIn(0f, 1f)
@@ -384,8 +633,15 @@ class AudioStreamServer(
         val channelMask = if (channels >= 2) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val minBuf = AudioTrack.getMinBufferSize(sampleRate, channelMask, AudioFormat.ENCODING_PCM_16BIT)
         val bytesPerSec = sampleRate * channels * 2
+        // A floor-sized buffer left no slack for scheduling hiccups: pressing Home destroys the
+        // Surface and busies the main thread, the writer misses its window, and the upstream queue
+        // hits its 96-frame ceiling and evicts (observed queue=89, qDrop=10 — audible glitches).
+        // The sender advertises latencyMin=11025 (250ms), so it expects far more buffering than the
+        // ~40ms floor. Take the larger of the floor and TARGET_BUFFER_MS.
+        val targetBytes = bytesPerSec * TARGET_BUFFER_MS / 1000
+        val bufferBytes = maxOf(minBuf, targetBytes)
         Logger.i("AudioTrack: minBuf=${minBuf}B (~${minBuf * 1000 / bytesPerSec}ms), " +
-            "buffer=${minBuf * 2}B (~${minBuf * 2 * 1000 / bytesPerSec}ms latency)")
+            "buffer=${bufferBytes}B (~${bufferBytes * 1000 / bytesPerSec}ms latency)")
         audioTrack = AudioTrack.Builder()
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -400,10 +656,7 @@ class AudioStreamServer(
                     .setChannelMask(channelMask)
                     .build()
             )
-            // Minimum buffer for LOW LATENCY so audio lines up with the (immediately-rendered)
-            // video. The upstream dedup jitter queue absorbs network jitter, so AudioTrack itself
-            // only needs the floor. (If this underruns/crackles on load, raise toward minBuf*2.)
-            .setBufferSizeInBytes(minBuf)
+            .setBufferSizeInBytes(bufferBytes)
             .setTransferMode(AudioTrack.MODE_STREAM)
             .build()
             .also { it.setVolume(volumeGain); it.play() }
@@ -433,7 +686,38 @@ class AudioStreamServer(
         private const val MAX_RESEND_RANGE = 128
 
         // Jitter buffer depth between the receive and playback threads (~1 s at 92 frames/s).
-        private const val AUDIO_QUEUE_CAPACITY = 96
+        // Deep enough to actually hold the requested delay. At spf=352/44.1kHz each frame is ~8ms,
+        // so 96 frames capped the achievable latency at ~380ms — a 2000ms trim silently did nothing
+        // because targetDepthFrames is clamped to half the capacity.
+        private const val AUDIO_QUEUE_CAPACITY = 1024
+
+        /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
+        private const val TARGET_BUFFER_MS = 300
+
+        private const val PRIME_TIMEOUT_MS = 700L
+
+        /** Silence on the audio stream that means "paused" rather than "a packet was late". */
+        // Backstop only: a sender that goes completely silent (disconnect, sleep) rather than
+        // sending keepalives. The real pause signal is payload size — see handleRtpPacket.
+        private const val AUDIO_IDLE_MS = 400
+
+        /**
+         * Largest packet still considered "no audio". A paused sender's keepalives measured
+         * exactly 44 bytes; the smallest real ALAC frame observed was ~600. 64 sits clear of both.
+         */
+        private const val KEEPALIVE_MAX_BYTES = 64
+
+        /** Keepalives needed before declaring a pause — ~100ms at 128 packets/sec. */
+        private const val KEEPALIVE_RUN_TO_PAUSE = 12
+        /** Timestamp discontinuity that means the sender restarted its clock (~0.5s at 44.1kHz). */
+        private const val RESYNC_JUMP_SAMPLES = 22_050L
+
+        /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
+        private const val LP_ALPHA = 0.018
+        /** How far above the running mean a window must sit to count as a beat. */
+        private const val ONSET_SIGMA = 1.5
+        private const val REFRACTORY_MS = 120L
+        private const val DECAY_MS = 250f
 
         // Sliding window of recently-played RTP sequence numbers for duplicate suppression.
         // ~11 s at 92 packets/s — far longer than any retransmit gap, far shorter than the

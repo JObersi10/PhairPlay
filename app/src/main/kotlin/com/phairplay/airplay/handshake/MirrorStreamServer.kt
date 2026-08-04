@@ -37,6 +37,12 @@ class MirrorStreamServer(
     private val surfaceProvider: () -> Surface?,
     private val width: Int = 1920,
     private val height: Int = 1080,
+    /**
+     * Reports whether video has gone idle, i.e. no frames for [IDLE_TIMEOUT_MS] while the session is
+     * still connected — what happens when the phone's screen switches off. The session is
+     * deliberately kept alive (locking the phone must not end a mirror); the UI just blanks so the
+     * last frame isn't left frozen on the panel, and unblanks when frames resume.
+     */
 ) {
     private sealed class Item
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
@@ -48,6 +54,10 @@ class MirrorStreamServer(
 
     @Volatile private var running = false
     @Volatile private var client: Socket? = null
+    /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
+    @Volatile private var lastVideoMs = 0L
+    private var configAtMs = 0L
+    private var firstVideoAtMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
     private var lastSps: ByteArray? = null
     private var lastPps: ByteArray? = null
@@ -62,6 +72,9 @@ class MirrorStreamServer(
     // Set by the reader thread when a frame is dropped under load; the decoder thread then skips
     // frames until the next keyframe (IDR) so it never decodes a reference-broken, corrupt stream.
     @Volatile private var awaitingKeyframe = false
+
+    /** Caps the verbose unknown-payload dump so a long session doesn't flood the log buffer. */
+    private var unknownTypeLogged = 0
 
     /** The OS-assigned TCP port macOS should connect to (returned in the SETUP response). */
     val dataPort: Int get() = serverSocket.localPort
@@ -84,11 +97,24 @@ class MirrorStreamServer(
     private fun runReader() {
         try {
             Logger.i("MirrorStreamServer listening on data port $dataPort")
+            val listenMs = System.currentTimeMillis()
             val socket = serverSocket.accept().also { client = it }
+            Logger.i("Mirror timing: sender connected +${System.currentTimeMillis() - listenMs}ms after listen")
+            // A sleeping sender never closes the socket, so a blocking read would wait indefinitely.
+            // Time out instead and treat prolonged silence as the session ending.
+            socket.soTimeout = IDLE_TIMEOUT_MS
             Logger.i("Mirror data connection from ${socket.inetAddress.hostAddress}")
             val input = socket.getInputStream()
             val header = ByteArray(128)
+            lastVideoMs = System.currentTimeMillis()
             while (running && !socket.isClosed) {
+                // A sender that wedges mid-mirror (iPad glitch) keeps the socket open but sends
+                // nothing, leaving the app on a frozen frame with no way to end it from the remote.
+                if (firstVideoAtMs != 0L &&
+                    System.currentTimeMillis() - lastVideoMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: no video for ${DEAD_SENDER_MS}ms — sender is gone, ending")
+                    break
+                }
                 if (!readFully(input, header, 128)) break
                 val payloadSize = leInt(header, 0)
                 val payloadType = leShort(header, 4) and 0xFF
@@ -102,13 +128,42 @@ class MirrorStreamServer(
                     0 -> {
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
                         // skipping any packet desyncs the keystream and corrupts all later frames.
+                        lastVideoMs = System.currentTimeMillis()
+                        if (firstVideoAtMs == 0L) {
+                            firstVideoAtMs = lastVideoMs
+                            // The gap between SPS/PPS and this line is the sender's keyframe delay,
+                            // which we cannot influence — worth separating from our own setup cost.
+                            Logger.i("Mirror timing: first video payload +${firstVideoAtMs - listenMs}ms after listen")
+                        }
                         val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
-                    1 -> parseConfig(payload)?.let { enqueue(it) }
-                    else -> Logger.v("Mirror: ignoring payload type $payloadType ($payloadSize B)")
+                    1 -> {
+                        if (configAtMs == 0L) {
+                            configAtMs = System.currentTimeMillis()
+                            Logger.i("Mirror timing: SPS/PPS +${configAtMs - listenMs}ms after listen")
+                        }
+                        parseConfig(payload)?.let { enqueue(it) }
+                    }
+                    else -> {
+                        // Deliberately NOT decrypted or enqueued: the AES-CTR keystream must advance
+                        // exactly once per real video payload, and feeding an unknown type through
+                        // cipher.update() would desync it and corrupt every later frame. Log enough
+                        // to identify what these are — iOS 26 senders deliver the bulk of the stream
+                        // as type 5, which is why mirroring freezes after the first frame.
+                        if (unknownTypeLogged < UNKNOWN_TYPE_LOG_LIMIT) {
+                            unknownTypeLogged++
+                            Logger.i("Mirror: UNHANDLED payload type=$payloadType size=$payloadSize " +
+                                "hdr=${hex(header, 0, 32)} body=${hex(payload, 0, 24)}")
+                        } else {
+                            Logger.v("Mirror: ignoring payload type $payloadType ($payloadSize B)")
+                        }
+                    }
                 }
             }
+        } catch (e: java.net.SocketTimeoutException) {
+            // A quiet sender is not a disconnect — a phone sitting on a static screen sends nothing
+            // for long stretches. Keep waiting; the session ends when the socket actually closes.
         } catch (e: Exception) {
             if (running) Logger.e("Mirror reader error", e)
         } finally {
@@ -202,8 +257,17 @@ class MirrorStreamServer(
         // SurfaceView made a new Surface). Without this, video stays black after foregrounding.
         val liveSurface = surfaceProvider()
         if (liveSurface !== configuredSurface) {
-            Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — re-attaching decoder")
-            rebuildDecoder(liveSurface)
+            // Prefer retargeting the existing codec: a rebuild resets reference state and stalls on
+            // awaitingKeyframe until the sender's next IDR, which is the black-screen-for-seconds
+            // effect after coming back from Home. Only rebuild if the swap isn't possible.
+            val swapped = liveSurface != null && decoder?.setOutputSurface(liveSurface) == true
+            if (swapped) {
+                configuredSurface = liveSurface
+                Logger.i("Mirror: surface changed — retargeted decoder in place (no keyframe wait)")
+            } else {
+                Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — rebuilding decoder")
+                rebuildDecoder(liveSurface)
+            }
         }
         val d = decoder ?: return                              // need surface + SPS/PPS first
         if (!d.isHealthy) {                                    // error state — drop, await next config
@@ -247,6 +311,13 @@ class MirrorStreamServer(
         return surfaceProvider()
     }
 
+    /** Hex dump helper for the unknown-payload diagnostic. */
+    private fun hex(b: ByteArray, from: Int, len: Int): String {
+        val end = minOf(from + len, b.size)
+        if (from >= end) return ""
+        return (from until end).joinToString(" ") { "%02x".format(b[it]) }
+    }
+
     private fun readFully(input: InputStream, buf: ByteArray, len: Int): Boolean {
         var read = 0
         while (read < len) {
@@ -265,8 +336,16 @@ class MirrorStreamServer(
         (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8)
 
     companion object {
+        /** Dump at most this many unknown payloads per session, then fall back to verbose. */
+        private const val UNKNOWN_TYPE_LOG_LIMIT = 12
+
         private const val MAX_PAYLOAD = 8 * 1024 * 1024        // 8 MB sanity cap per frame
         private const val FRAME_INTERVAL_US = 1_000_000L / 60  // monotonic PTS hint (~60fps)
+        /** Read timeout on the mirror socket. Purely so the thread can re-check `running`. */
+        private const val IDLE_TIMEOUT_MS = 3_000
+        /** No video for this long means the sender is wedged or gone; drop the session. */
+        private const val DEAD_SENDER_MS = 30_000
+
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
         private const val SURFACE_WAIT_TRIES = 50
         private const val SURFACE_WAIT_MS = 100L

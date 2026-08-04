@@ -7,9 +7,10 @@ import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.view.Gravity
+import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.Surface
+import android.view.View
 import android.widget.FrameLayout
 import android.widget.TextView
 import com.phairplay.airplay.StreamStats
@@ -127,6 +128,8 @@ class StreamingScreen @JvmOverloads constructor(
      * @return The rendering Surface, or null if not yet available.
      */
     fun getSurface(): Surface? = surface
+
+
 
     /**
      * Sizes the SurfaceView to the decoded video's aspect ratio (letterbox/pillarbox) instead of

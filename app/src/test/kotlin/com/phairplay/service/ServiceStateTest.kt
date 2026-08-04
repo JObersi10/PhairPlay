@@ -99,8 +99,8 @@ class ServiceStateTest {
     }
 
     @Test
-    fun `Protocol has CAST value`() {
-        assertEquals(Protocol.CAST, Protocol.valueOf("CAST"))
+    fun `Protocol has DLNA value`() {
+        assertEquals(Protocol.DLNA, Protocol.valueOf("DLNA"))
     }
 
     // ─── ActiveConnection data class ──────────────────────────────────────────

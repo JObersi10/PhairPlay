@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,9 +60,21 @@ class AirPlayReceiver(
     private val audioEnabled: Boolean = false,
     /** Require HomeKit-style SRP PIN pairing before streaming (AppSettings.airPlayPinAuthEnabled). */
     private val pinAuthEnabled: Boolean = false,
+    /** Whether a previously PIN-paired sender may skip the code (AppSettings.rememberPinPairing). */
+    private val rememberPinPairing: Boolean = true,
+    /** User A/V-sync trim added on top of the sender's requested latency (AppSettings.audioDelayMs). */
+    private val audioDelayMs: Int = 0,
+    /** Extra delay for the beat animation only (AppSettings.beatDelayMs). */
+    private val beatDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
+    /**
+     * Offered every sender volume change (dB, −30…0). Return true if the level was applied to the
+     * output device, in which case the software gain stays at unity so the two don't compound —
+     * a 50% slider must not become 25% by being attenuated twice.
+     */
+    private val onVolumeRequest: (Float) -> Boolean = { false },
     /**
      * Called with the sender name when a streaming session starts (RECORD received).
      *
@@ -90,6 +103,7 @@ class AirPlayReceiver(
      * surface; emits null when video is mirroring (the video screen takes over) or audio stops.
      */
     private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
+    private val onEnergyChanged: (Float) -> Unit = {},
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
     private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
@@ -100,6 +114,7 @@ class AirPlayReceiver(
     // SupervisorJob: child coroutine failures don't propagate to siblings.
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
+    private var positionTicker: kotlinx.coroutines.Job? = null
 
     // Child components
     private var mdnsService: MdnsService? = null
@@ -133,6 +148,8 @@ class AirPlayReceiver(
     @Volatile private var videoPlaying = false
     @Volatile private var streamingStopped = false
     @Volatile private var npSenderName = "AirPlay"
+    @Volatile private var npSenderDeviceType = SenderDeviceType.UNKNOWN
+    @Volatile private var npPaused = false
     @Volatile private var npTitle: String? = null
     @Volatile private var npArtist: String? = null
     @Volatile private var npAlbum: String? = null
@@ -140,6 +157,13 @@ class AirPlayReceiver(
     @Volatile private var npComposer: String? = null
     @Volatile private var npYear: Int? = null
     @Volatile private var npArtwork: ByteArray? = null
+    /**
+     * RTP timestamp of the current track's first sample, from the sender's progress push. The
+     * receiver's own playback clock is in the same units, so position is the difference between
+     * them — see [startPositionTicker].
+     */
+    @Volatile private var anchorStartTs = -1L
+
     @Volatile private var npPositionSec: Double = 0.0
     @Volatile private var npDurationSec: Double = 0.0
     @Volatile private var npDurationFromDmap: Double = 0.0
@@ -175,6 +199,21 @@ class AirPlayReceiver(
      *
      * MUST be called when [PhairPlayService] stops or is destroyed.
      */
+    /**
+     * Ends the current sender's session, leaving the receiver advertising and ready for the next
+     * connection. Used by Back during a stream — a full receiver restart re-advertised over mDNS
+     * fast enough for the sender to reconnect on its own, so the stream never appeared to stop.
+     */
+    fun endSession() {
+        Logger.i("Ending AirPlay session on user request")
+        rtspHandler?.disconnectActiveClient()
+        // Closing the RTSP control socket does not touch the UDP media servers — they are separate
+        // sockets and keep receiving and playing whatever the sender is still transmitting, which is
+        // why Back looked like it did nothing. Tear the media down explicitly.
+        releaseMediaComponents()
+        onStreamingStopped()
+    }
+
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
         try {
@@ -231,26 +270,33 @@ class AirPlayReceiver(
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
-            onMirrorAudioStart = { sampleRate, channels, ct, spf -> startMirrorAudio(sampleRate, channels, ct, spf) },
+            onMirrorAudioStart = { sampleRate, channels, ct, spf, latency -> startMirrorAudio(sampleRate, channels, ct, spf, latency) },
             onMirrorAudioStop = { stopMirrorAudio() },
             onMirrorVideoStop = { stopMirrorVideo() },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
-            onVolume = { v -> audioServer?.setVolume(v) },
+            onVolume = { v ->
+                // 0f is 0 dB, i.e. unity gain — the right software setting when the hardware is
+                // doing the attenuation for us.
+                audioServer?.setVolume(if (onVolumeRequest(v)) 0f else v)
+            },
             onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
+                val changed = title != npTitle || artist != npArtist || album != npAlbum
                 npTitle = title; npArtist = artist; npAlbum = album
                 npGenre = genre; npComposer = composer; npYear = year
                 if (durationMs != null && durationMs > 0) npDurationFromDmap = durationMs / 1000.0
-                emitNowPlaying()
+                if (changed) emitNowPlaying()
             },
             onArtwork = { bytes ->
                 npArtwork = bytes.takeIf { it.isNotEmpty() }
                 emitNowPlaying()
             },
             onPlaybackPosition = { pos, dur ->
+                val changed = kotlin.math.abs(pos - npPositionSec) > 2.0 || dur != npDurationSec
                 npPositionSec = pos; npDurationSec = dur
-                emitNowPlaying()
+                if (changed) emitNowPlaying()
             },
+            onPlaybackAnchor = { startTs, _ -> anchorStartTs = startTs },
             onVideoPlay = { url, start -> startUrlVideo(url, start) },
             onVideoRate = { rate -> urlVideoPlayer?.setRate(rate) },
             onVideoScrub = { pos -> urlVideoPlayer?.scrub(pos) },
@@ -258,8 +304,17 @@ class AirPlayReceiver(
             onPlaybackInfo = { urlVideoPlayer?.info() },
             onRemoteControlInfo = { dacpId, activeRemote -> dacpClient.configure(dacpId, activeRemote) },
             pinAuthEnabled = pinAuthEnabled,
+            rememberPinPairing = rememberPinPairing,
             pairingStore = pairingStore,
-            onShowPin = { pin -> onPinChanged(pin) }
+            onShowPin = { pin -> onPinChanged(pin) },
+            // FLUSH pauses, RECORD resumes — the two RTSP verbs the spec defines for exactly this.
+            // The session-start FLUSH is harmless because RECORD follows it immediately.
+            onPlaybackPaused = { paused -> npPaused = paused; emitNowPlaying() },
+            onSenderInfoChanged = { name, type ->
+                if (name.isNotBlank()) npSenderName = name
+                npSenderDeviceType = type
+                emitNowPlaying()
+            }
         ).also { it.start(scope) }
         Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
     }
@@ -286,6 +341,7 @@ class AirPlayReceiver(
                 // Legacy (SDP) session: reflect its stream kinds into now-playing state so an
                 // audio-only RAOP session shows the now-playing card.
                 npSenderName = session.senderName.ifBlank { npSenderName }
+                npSenderDeviceType = session.senderDeviceType
                 videoPlaying = session.hasVideo
                 audioPlaying = session.hasAudio
                 emitNowPlaying()
@@ -468,19 +524,31 @@ class AirPlayReceiver(
     private fun startMirrorStream(streamConnectionId: Long): Int {
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
-        return MirrorStreamServer(aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight)
+        return MirrorStreamServer(
+            aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight,
+            // A sender that goes quiet without a TEARDOWN (phone screen off) used to leave the
+            // session "live" with its last frame frozen on the TV. Tear it down ourselves.
+        )
             .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort
             .also { Logger.i("Mirror data server started on port $it") }
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int): Pair<Int, Int> {
+    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int): Pair<Int, Int> {
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
-        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket)
-            .also { audioServer = it; it.start(scope) }
+        val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
+            latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
+            extraDelayMs = audioDelayMs.toLong(),
+            beatDelayMs = beatDelayMs.toLong(),
+            onEnergy = { e -> onEnergyChanged(e) },
+            // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
+            // can't mean "paused". The stream itself is the signal: this sender stops sending
+            // RTP entirely while paused and resumes the instant playback does.
+            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
+            .also { audioServer = it; it.start(scope); startPositionTicker() }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
@@ -557,6 +625,8 @@ class AirPlayReceiver(
         audioSocket = null
         mirrorServer?.stop()
         mirrorServer = null
+        positionTicker?.cancel(); positionTicker = null
+        anchorStartTs = -1L
         audioServer?.stop()
         audioServer = null
         bufferedAudioServer?.stop()
@@ -594,25 +664,65 @@ class AirPlayReceiver(
         val show = audioPlaying && !videoPlaying
         onNowPlayingChanged(
             if (show) NowPlayingInfo(
-                npSenderName, npTitle, npArtist, npAlbum,
-                npGenre, npComposer, npYear, npArtwork,
-                npPositionSec,
-                if (npDurationSec > 0) npDurationSec else npDurationFromDmap
+                senderName = npSenderName,
+                senderDeviceType = npSenderDeviceType,
+                title = npTitle, artist = npArtist, album = npAlbum,
+                genre = npGenre, composer = npComposer, year = npYear,
+                artwork = npArtwork,
+                positionSec = npPositionSec,
+                durationSec = if (npDurationSec > 0) npDurationSec else npDurationFromDmap,
+                paused = npPaused
             ) else null
         )
+    }
+
+    /**
+     * Keeps [npPositionSec] locked to the audio actually being played.
+     *
+     * Senders push progress every few seconds at best, and only in whole RTP frames against a
+     * track-relative anchor, so the UI used to dead-reckon from wall-clock time between pushes and
+     * accumulate a couple of seconds of error. Reading the receiver's own audio clock instead makes
+     * position exact and self-correcting: it advances at precisely the rate samples leave the
+     * speaker, and holds still during a pause without needing to be told.
+     */
+    private fun startPositionTicker() {
+        positionTicker?.cancel()
+        positionTicker = scope.launch {
+            while (isActive) {
+                delay(POSITION_TICK_MS)
+                val start = anchorStartTs
+                val playing = audioServer?.playingRtpTimestamp() ?: -1L
+                if (start < 0 || playing < 0) continue
+                val elapsed = ((playing - start) and 0xFFFFFFFFL) / 44100.0
+                // A track change lands the anchor and the clock on different timelines for a moment;
+                // an impossible position is that, not a seek, so wait for the next progress push.
+                if (elapsed < 0 || (npDurationSec > 0 && elapsed > npDurationSec + 1)) continue
+                if (kotlin.math.abs(elapsed - npPositionSec) > 0.25) {
+                    npPositionSec = elapsed
+                    emitNowPlaying()
+                }
+            }
+        }
     }
 
     /** Drops stale track metadata/artwork when an audio stream ends (so it can't bleed into the next). */
     private fun clearNowPlayingMetadata() {
         npTitle = null; npArtist = null; npAlbum = null
         npGenre = null; npComposer = null; npYear = null
-        npArtwork = null; npDurationFromDmap = 0.0
+        npArtwork = null; npDurationFromDmap = 0.0; npPaused = false
     }
 
     // ─── Private: state emission ─────────────────────────────────────────────
 
     /** Dispatches [state] on the Main thread (Android UI rule). */
     private fun emitState(state: ProtocolState) {
+        // Re-arm the one-shot teardown guard whenever a new session begins. onStreamingStarted()
+        // also clears it, but that only runs for legacy SDP/RECORD sessions — AirPlay 2 mirroring
+        // reaches CONNECTED via startMirrorKeys() and never touched the flag. The result was that
+        // the second and every later mirror session hit `if (streamingStopped) return` in
+        // onStreamingStopped(), never emitted ADVERTISING, and left the UI stuck on a black
+        // StreamingScreen. Resetting here covers every path that can start a session.
+        if (state == ProtocolState.CONNECTED) streamingStopped = false
         scope.launch {
             withContext(Dispatchers.Main) {
                 onStateChanged(state)
@@ -621,6 +731,9 @@ class AirPlayReceiver(
     }
 
     companion object {
+        /** How often position is re-read from the audio clock. Fast enough to look continuous. */
+        private const val POSITION_TICK_MS = 250L
+
         // Hint dimensions for MediaCodec configuration.
         // Real resolution is encoded in the H.264 SPS NAL unit.
         private const val DEFAULT_VIDEO_WIDTH  = 1920

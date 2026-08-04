@@ -6,6 +6,8 @@ import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.phairplay.util.Logger
@@ -108,12 +110,31 @@ class SettingsRepository(private val context: Context) {
         displayName        = this[Keys.DISPLAY_NAME]            ?: "",
         airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
         miracastEnabled    = this[Keys.MIRACAST_ENABLED]        ?: true,
-        castEnabled        = this[Keys.CAST_ENABLED]            ?: true,
+        dlnaEnabled        = this[Keys.DLNA_ENABLED]            ?: true,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
         showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
+        // Migration: BACK_ACTION replaced two overlapping booleans. Honour the old keys when the
+        // new one has never been written, so an upgrade keeps whatever the user had chosen.
+        backAction         = this[Keys.BACK_ACTION]?.let { BackAction.fromName(it) }
+            ?: when {
+                this[Keys.BACK_QUITS_APP] == true -> BackAction.EXIT_APP
+                this[Keys.BACK_GOES_HOME] == true -> BackAction.GO_HOME
+                else -> BackAction.STOP_STREAM
+            },
+        audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
+        pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
+        beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
+        beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
-        mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true
+        mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
+        screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
+        screensaverTimeoutMin = this[Keys.SCREENSAVER_TIMEOUT]  ?: 15,
+        senderVolumeMode = com.phairplay.media.VolumeControlMode.fromKey(this[Keys.SENDER_VOLUME_MODE]),
+        onboardingComplete = this[Keys.ONBOARDING_COMPLETE] ?: false,
+        lastSenderName = this[Keys.LAST_SENDER_NAME] ?: "",
+        lastSenderAtMs = this[Keys.LAST_SENDER_AT] ?: 0L,
+        rememberPinPairing = this[Keys.REMEMBER_PIN_PAIRING] ?: true
     )
 
     /**
@@ -124,12 +145,24 @@ class SettingsRepository(private val context: Context) {
         this[Keys.DISPLAY_NAME]         = settings.displayName
         this[Keys.AIRPLAY_ENABLED]      = settings.airPlayEnabled
         this[Keys.MIRACAST_ENABLED]     = settings.miracastEnabled
-        this[Keys.CAST_ENABLED]         = settings.castEnabled
+        this[Keys.DLNA_ENABLED]         = settings.dlnaEnabled
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
         this[Keys.START_ON_BOOT]        = settings.startOnBoot
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
+        this[Keys.BACK_ACTION]          = settings.backAction.name
+        this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
+        this[Keys.PIP_ENABLED]          = settings.pipEnabled
+        this[Keys.BEAT_PULSE]           = settings.beatPulse
+        this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
+        this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
+        this[Keys.SCREENSAVER_TIMEOUT]  = settings.screensaverTimeoutMin
+        this[Keys.SENDER_VOLUME_MODE]   = settings.senderVolumeMode.name
+        this[Keys.ONBOARDING_COMPLETE]  = settings.onboardingComplete
+        this[Keys.LAST_SENDER_NAME]     = settings.lastSenderName
+        this[Keys.LAST_SENDER_AT]       = settings.lastSenderAtMs
+        this[Keys.REMEMBER_PIN_PAIRING] = settings.rememberPinPairing
     }
 
     /**
@@ -142,11 +175,26 @@ class SettingsRepository(private val context: Context) {
         val DISPLAY_NAME        = stringPreferencesKey("display_name")
         val AIRPLAY_ENABLED     = booleanPreferencesKey("airplay_enabled")
         val MIRACAST_ENABLED    = booleanPreferencesKey("miracast_enabled")
-        val CAST_ENABLED        = booleanPreferencesKey("cast_enabled")
+        val DLNA_ENABLED        = booleanPreferencesKey("dlna_enabled")
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")
         val START_ON_BOOT       = booleanPreferencesKey("start_on_boot")
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
+        // Legacy, read-only: superseded by BACK_ACTION but still consulted when migrating.
+        val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
+        val BACK_ACTION         = stringPreferencesKey("back_action")
+        val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
+        val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
+        val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
+        val BEAT_PULSE          = intPreferencesKey("beat_pulse")
+        val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
+        val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")
+        val SCREENSAVER_TIMEOUT = intPreferencesKey("screensaver_timeout_min")
+        val SENDER_VOLUME_MODE = stringPreferencesKey("sender_volume_mode")
+        val ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
+        val LAST_SENDER_NAME = stringPreferencesKey("last_sender_name")
+        val LAST_SENDER_AT = longPreferencesKey("last_sender_at")
+        val REMEMBER_PIN_PAIRING = booleanPreferencesKey("remember_pin_pairing")
     }
 }

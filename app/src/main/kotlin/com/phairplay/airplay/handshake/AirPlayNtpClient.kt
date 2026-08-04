@@ -63,7 +63,7 @@ class AirPlayNtpClient(
                     val rx = DatagramPacket(response, response.size)
                     socket.receive(rx)
                     if (rxCount < 4) {
-                        Logger.i("NTP RX[$rxCount] ${rx.length}B type=0x${(response[1].toInt() and 0xFF).toString(16)}: " +
+                        Logger.d("NTP RX[$rxCount] ${rx.length}B type=0x${(response[1].toInt() and 0xFF).toString(16)}: " +
                             (0 until minOf(rx.length, 32)).joinToString(" ") { "%02x".format(response[it]) })
                         rxCount++
                     }

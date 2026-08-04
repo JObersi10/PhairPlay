@@ -44,9 +44,16 @@ class AlacDecoder(
      */
     fun decode(frame: ByteArray, length: Int = frame.size): ByteArray? {
         if (handle == 0L) return null
+        // A runt packet cannot hold even an ALAC element header. The native decoder would start
+        // reading bits it doesn't have, and Apple's bit reader is unbounded — cheaper to reject
+        // here than to rely on the JNI's read-ahead padding to absorb it.
+        if (length < MIN_FRAME_BYTES) {
+            Logger.d("Ignoring runt ALAC frame ($length B)")
+            return null
+        }
         val n = nativeDecode(handle, frame, length, pcmOut)
         if (n <= 0) return null
-        return pcmOut.copyOf(n)
+        return pcmOut.copyOf(n.coerceAtMost(pcmOut.size))
     }
 
     override fun close() {
@@ -78,6 +85,9 @@ class AlacDecoder(
         private const val MB = 10
         private const val KB = 14
         private const val MAX_RUN = 255
+
+        /** Smallest packet that can hold an ALAC element header plus any payload at all. */
+        private const val MIN_FRAME_BYTES = 8
 
         /**
          * Builds the 24-byte big-endian ALACSpecificConfig "magic cookie" the native decoder's

@@ -37,6 +37,7 @@ class DacpClient(context: Context) {
     @Volatile private var resolvedHost: String? = null
     @Volatile private var resolvedPort: Int = 0
     private var discoveryListener: NsdManager.DiscoveryListener? = null
+    private val pendingCommands = java.util.concurrent.CopyOnWriteArrayList<String>()
 
     /**
      * Supplies the sender's DACP identity (from RTSP `DACP-ID` / `Active-Remote` headers). Kicks off
@@ -56,12 +57,20 @@ class DacpClient(context: Context) {
     /** True once we have a sender identity (so the UI can know remote control is available). */
     val isAvailable: Boolean get() = activeRemote != null
 
-    /** Sends a DACP command (e.g. "playpause", "nextitem"). No-op until the service is resolved. */
+    /** Sends a DACP command (e.g. "playpause", "nextitem"). Queues if not yet resolved. */
     fun sendCommand(command: String) {
         val token = activeRemote ?: run { Logger.d("DACP '$command' ignored — no sender"); return }
         val host = resolvedHost
         val port = resolvedPort
-        if (host == null || port == 0) { Logger.w("DACP '$command' dropped — service not resolved yet"); return }
+        if (host == null || port == 0) {
+            Logger.w("DACP '$command' queued — not resolved yet")
+            pendingCommands.add(command)
+            return
+        }
+        dispatchCommand(command, host, port, token)
+    }
+
+    private fun dispatchCommand(command: String, host: String, port: Int, token: String) {
         scope.launch {
             runCatching {
                 val conn = URL("http://$host:$port/ctrl-int/1/$command").openConnection() as HttpURLConnection
@@ -107,7 +116,12 @@ class DacpClient(context: Context) {
             resolvedHost = info.host?.hostAddress
             resolvedPort = info.port
             Logger.i("DACP resolved: $resolvedHost:$resolvedPort")
-            stopDiscovery()   // got it; stop scanning
+            stopDiscovery()
+            val host = resolvedHost ?: return
+            val port = resolvedPort
+            val token = activeRemote ?: return
+            val pending = pendingCommands.toList(); pendingCommands.clear()
+            pending.forEach { dispatchCommand(it, host, port, token) }
         }
         override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
             Logger.w("DACP resolve failed: $errorCode")
@@ -128,6 +142,9 @@ class DacpClient(context: Context) {
         const val CMD_PREV = "previtem"
         const val CMD_FF = "beginff"
         const val CMD_REW = "beginrew"
+        const val CMD_PLAY_RESUME = "playresume"
+        const val CMD_FF_STOP = "stopff"
+        const val CMD_REW_STOP = "stoprew"
         const val CMD_VOLUME_UP = "volumeup"
         const val CMD_VOLUME_DOWN = "volumedown"
     }

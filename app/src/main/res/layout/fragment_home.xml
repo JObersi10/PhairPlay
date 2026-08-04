@@ -7,7 +7,7 @@
     │  "Ready for connections"           [●] Service Running   │
     │                                                          │
     │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
-    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 Cast    │       │
+    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 DLNA    │       │
     │  │  ●Running   │ │  ●Running   │ │  ●Running   │       │
     │  │  Waiting... │ │  Waiting... │ │  Waiting... │       │
     │  └─────────────┘ └─────────────┘ └─────────────┘       │
@@ -128,9 +128,9 @@
                 android:layout_weight="1"
                 android:layout_marginEnd="12dp" />
 
-            <!-- Cast card -->
+            <!-- DLNA card -->
             <include
-                android:id="@+id/card_cast"
+                android:id="@+id/card_dlna"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"

@@ -14,11 +14,6 @@ plugins {
 fun String.escapedForBuildConfig(): String =
     replace("\\", "\\\\").replace("\"", "\\\"")
 
-val castAppId: String =
-    (providers.gradleProperty("phairplay.castAppId").orNull
-        ?: providers.environmentVariable("PHAIRPLAY_CAST_APP_ID").orNull
-        ?: "").trim()
-
 android {
     namespace = "com.phairplay"
     compileSdk = 35
@@ -32,7 +27,6 @@ android {
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "CAST_APP_ID", "\"${castAppId.escapedForBuildConfig()}\"")
 
         // Native FairPlay (libplayfair.so) — build for all Android ABIs so PhairPlay runs on
         // the full range of Android TV / Fire TV hardware (32- and 64-bit ARM, plus x86/x86_64
@@ -240,9 +234,6 @@ dependencies {
     implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.exoplayer.dash)
 
-    // Google TV Cast Connect receiver SDK. Kept out of the Fire TV flavor because
-    // Fire TV lacks Google Play Services and cannot run Google Cast receiver APIs.
-    "googletvImplementation"(libs.play.services.cast.tv)
 
     // Unit Testing
     testImplementation(libs.junit)
