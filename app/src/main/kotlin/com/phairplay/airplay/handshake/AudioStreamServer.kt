@@ -540,9 +540,28 @@ class AudioStreamServer(
             val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
             ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
         } else 0L
-        val delay = bufferedMs + extraDelayMs
+        val delay = bufferedMs + extraDelayMs + outputLatencyMs()
         if (delay <= 0L) { onEnergy(value); return }
         energyHandler.postDelayed({ onEnergy(value) }, delay)
+    }
+
+    /**
+     * How far behind real time this device's audio output actually is, measured rather than assumed.
+     *
+     * AudioTrack.getTimestamp() reports the frame the hardware is playing and when it played it, so
+     * the gap between frames written and frames heard is the true output latency. Covers the mixer
+     * and HAL. It does NOT cover a Bluetooth link's own delay, which Android exposes no API for —
+     * that is what the user's audio trim is for.
+     */
+    private fun outputLatencyMs(): Long {
+        val track = audioTrack ?: return 0L
+        return runCatching {
+            val ts = android.media.AudioTimestamp()
+            if (!track.getTimestamp(ts)) return 0L
+            val written = track.playbackHeadPosition.toLong() and 0xFFFFFFFFL
+            val pending = written - ts.framePosition
+            if (pending <= 0) 0L else pending * 1000L / sampleRate.coerceAtLeast(1)
+        }.getOrDefault(0L)
     }
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */

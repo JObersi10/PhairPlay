@@ -39,7 +39,10 @@ data class NowPlayingInfo(
             year == other.year &&
             artwork.contentEquals(other.artwork) &&
             positionSec == other.positionSec &&
-            durationSec == other.durationSec
+            durationSec == other.durationSec &&
+            // Must be compared: StateFlow drops a value equal to the current one, so leaving this
+            // out meant a pause never reached the UI and the progress bar kept counting.
+            paused == other.paused
     }
 
     override fun hashCode(): Int {
@@ -48,6 +51,7 @@ data class NowPlayingInfo(
         result = 31 * result + (artist?.hashCode() ?: 0)
         result = 31 * result + (album?.hashCode() ?: 0)
         result = 31 * result + (artwork?.contentHashCode() ?: 0)
+        result = 31 * result + paused.hashCode()
         result = 31 * result + positionSec.hashCode()
         result = 31 * result + durationSec.hashCode()
         return result

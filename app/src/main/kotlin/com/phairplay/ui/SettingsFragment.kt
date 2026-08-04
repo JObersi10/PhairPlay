@@ -428,19 +428,20 @@ class SettingsFragment : Fragment() {
     }
 
     private fun beatPulseLabel(level: Int): String = getString(when (level) {
+        1 -> R.string.setting_beat_pulse_normal
         2 -> R.string.setting_beat_pulse_strong
         3 -> R.string.setting_beat_pulse_insane
-        else -> R.string.setting_beat_pulse_normal
+        else -> R.string.setting_beat_pulse_calm
     })
 
     private fun showBeatPulse(level: Int) { textBeatPulseValue.text = beatPulseLabel(level) }
 
     private fun pickBeatPulse() {
-        val labels = arrayOf(beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))
+        val labels = arrayOf(beatPulseLabel(0), beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.setting_beat_pulse)
             .setItems(labels) { _, which ->
-                val level = which + 1
+                val level = which
                 save { it.copy(beatPulse = level) }
                 showBeatPulse(level)
                 Logger.i("Beat pulse set to ${beatPulseLabel(level)}")

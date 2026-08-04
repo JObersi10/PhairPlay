@@ -501,6 +501,10 @@ class PhairPlayService : Service() {
             onEnergyChanged = { e -> _audioEnergy.value = e },
             onPinChanged = { pin ->
                 _pairingPin.value = pin
+                // The code is useless if nobody can see it. Pairing happens before CONNECTED, so
+                // waiting for the session to start meant a sleeping or home-screen Fire TV showed
+                // nothing while the sender sat waiting for a PIN.
+                if (pin != null) { wakeDisplay(); bringAppToFront() }
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,

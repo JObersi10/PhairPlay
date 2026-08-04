@@ -740,7 +740,7 @@ class NowPlayingScreen @JvmOverloads constructor(
     /** Applies the user's screensaver preferences and re-arms the idle countdown. */
     /** Beat Pulse from Settings: 1 Normal, 2 Strong, 3 Insane. */
     fun setBeatPulse(level: Int) {
-        dynamicBg.setBeatMultiplier(when (level) { 2 -> 2f; 3 -> 3.5f; else -> 1f })
+        dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
     }
 
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {

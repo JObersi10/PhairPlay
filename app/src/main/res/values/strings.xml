@@ -92,6 +92,7 @@
     <string name="setting_debug_overlay_subtitle">Show live FPS, queue and drop stats while streaming</string>
     <string name="setting_beat_pulse">Beat pulse</string>
     <string name="setting_beat_pulse_subtitle">How hard the Now Playing backdrop reacts to the music</string>
+    <string name="setting_beat_pulse_calm">Calm</string>
     <string name="setting_beat_pulse_normal">Normal</string>
     <string name="setting_beat_pulse_strong">Strong</string>
     <string name="setting_beat_pulse_insane">Insane</string>

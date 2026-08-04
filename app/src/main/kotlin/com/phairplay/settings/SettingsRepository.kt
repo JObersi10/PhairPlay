@@ -118,7 +118,7 @@ class SettingsRepository(private val context: Context) {
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
         backGoesHome       = this[Keys.BACK_GOES_HOME]           ?: false,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
-        beatPulse          = this[Keys.BEAT_PULSE]               ?: 1,
+        beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
