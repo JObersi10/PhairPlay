@@ -34,8 +34,17 @@ playing", in the spec and in the AirPlay HTML in the project folder. iOS nonethe
 immediately after RECORD at the start of every stream and again on every seek. Acting on the
 documentation instead of the device cost several rounds.
 
-The `PAUSE-PROBE` log line is still in `AudioStreamServer` and is worth keeping until this is
-confirmed by ear; it is one line per second.
+Confirmed working on device. The `PAUSE-PROBE` instrumentation has been removed.
+
+### Position sync
+
+Position now derives from the receiver's own audio clock rather than wall-clock extrapolation.
+`AudioStreamServer.playingRtpTimestamp()` returns the RTP timestamp currently reaching the
+speakers; the progress push supplies the track's starting timestamp in the same units; the
+difference is the position, re-read four times a second. The old path extrapolated from pushes that
+arrive only every few seconds and are quantised to whole frames, which is where the reported
+"2–4 seconds off" came from. `NowPlayingScreen`'s resync tolerance dropped from 2000ms to 400ms
+to match.
 
 ## Landed this session
 
@@ -53,8 +62,9 @@ confirmed by ear; it is one line per second.
 
 ## Unverified — needs one session each
 
-1. **Pause.** The mechanism is now measured rather than guessed, but nobody has watched the
-   progress bar stop yet.
+1. **Position sync** — the audio-clock path is new and unlistened-to. If position looks stuck,
+   check that progress pushes are arriving at all (`grep "SET_PARAMETER progress"`): without one,
+   `anchorStartTs` stays -1 and the ticker does nothing.
 2. **Back ending the stream.** The `releaseMediaComponents` fix is untested on device.
 3. **`BackAction` migration** from an install that had the old booleans set.
 4. **Beat delay** — the plumbing compiles; nobody has listened to it.

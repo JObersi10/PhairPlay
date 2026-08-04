@@ -630,7 +630,10 @@ class NowPlayingScreen @JvmOverloads constructor(
             val expectedMs = if (positionBaseEpoch > 0L)
                 positionBaseMs + ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
             else positionBaseMs
-            if (Math.abs(newPosMs - expectedMs) > 2000L) {
+            // 2000ms of slack used to be necessary because position was extrapolated from sparse,
+            // whole-second sender pushes. It now comes from the receiver's audio clock four times a
+            // second and is exact, so the tolerance only needs to cover local animation jitter.
+            if (Math.abs(newPosMs - expectedMs) > 400L) {
                 positionBaseMs = newPosMs
                 if (!isPaused) positionBaseEpoch = SystemClock.elapsedRealtime()
                 seekMultiplier = 1f

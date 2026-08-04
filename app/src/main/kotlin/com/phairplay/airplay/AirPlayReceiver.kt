@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -113,6 +114,7 @@ class AirPlayReceiver(
     // SupervisorJob: child coroutine failures don't propagate to siblings.
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
+    private var positionTicker: kotlinx.coroutines.Job? = null
 
     // Child components
     private var mdnsService: MdnsService? = null
@@ -155,6 +157,13 @@ class AirPlayReceiver(
     @Volatile private var npComposer: String? = null
     @Volatile private var npYear: Int? = null
     @Volatile private var npArtwork: ByteArray? = null
+    /**
+     * RTP timestamp of the current track's first sample, from the sender's progress push. The
+     * receiver's own playback clock is in the same units, so position is the difference between
+     * them — see [startPositionTicker].
+     */
+    @Volatile private var anchorStartTs = -1L
+
     @Volatile private var npPositionSec: Double = 0.0
     @Volatile private var npDurationSec: Double = 0.0
     @Volatile private var npDurationFromDmap: Double = 0.0
@@ -287,6 +296,7 @@ class AirPlayReceiver(
                 npPositionSec = pos; npDurationSec = dur
                 if (changed) emitNowPlaying()
             },
+            onPlaybackAnchor = { startTs, _ -> anchorStartTs = startTs },
             onVideoPlay = { url, start -> startUrlVideo(url, start) },
             onVideoRate = { rate -> urlVideoPlayer?.setRate(rate) },
             onVideoScrub = { pos -> urlVideoPlayer?.scrub(pos) },
@@ -538,7 +548,7 @@ class AirPlayReceiver(
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.
             onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
-            .also { audioServer = it; it.start(scope) }
+            .also { audioServer = it; it.start(scope); startPositionTicker() }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
@@ -615,6 +625,8 @@ class AirPlayReceiver(
         audioSocket = null
         mirrorServer?.stop()
         mirrorServer = null
+        positionTicker?.cancel(); positionTicker = null
+        anchorStartTs = -1L
         audioServer?.stop()
         audioServer = null
         bufferedAudioServer?.stop()
@@ -664,6 +676,35 @@ class AirPlayReceiver(
         )
     }
 
+    /**
+     * Keeps [npPositionSec] locked to the audio actually being played.
+     *
+     * Senders push progress every few seconds at best, and only in whole RTP frames against a
+     * track-relative anchor, so the UI used to dead-reckon from wall-clock time between pushes and
+     * accumulate a couple of seconds of error. Reading the receiver's own audio clock instead makes
+     * position exact and self-correcting: it advances at precisely the rate samples leave the
+     * speaker, and holds still during a pause without needing to be told.
+     */
+    private fun startPositionTicker() {
+        positionTicker?.cancel()
+        positionTicker = scope.launch {
+            while (isActive) {
+                delay(POSITION_TICK_MS)
+                val start = anchorStartTs
+                val playing = audioServer?.playingRtpTimestamp() ?: -1L
+                if (start < 0 || playing < 0) continue
+                val elapsed = ((playing - start) and 0xFFFFFFFFL) / 44100.0
+                // A track change lands the anchor and the clock on different timelines for a moment;
+                // an impossible position is that, not a seek, so wait for the next progress push.
+                if (elapsed < 0 || (npDurationSec > 0 && elapsed > npDurationSec + 1)) continue
+                if (kotlin.math.abs(elapsed - npPositionSec) > 0.25) {
+                    npPositionSec = elapsed
+                    emitNowPlaying()
+                }
+            }
+        }
+    }
+
     /** Drops stale track metadata/artwork when an audio stream ends (so it can't bleed into the next). */
     private fun clearNowPlayingMetadata() {
         npTitle = null; npArtist = null; npAlbum = null
@@ -690,6 +731,9 @@ class AirPlayReceiver(
     }
 
     companion object {
+        /** How often position is re-read from the audio clock. Fast enough to look continuous. */
+        private const val POSITION_TICK_MS = 250L
+
         // Hint dimensions for MediaCodec configuration.
         // Real resolution is encoded in the H.264 SPS NAL unit.
         private const val DEFAULT_VIDEO_WIDTH  = 1920

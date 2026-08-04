@@ -108,6 +108,12 @@ happens" — that advances the AES-CTR keystream and corrupts every later frame.
   Note FLUSH in particular: the spec calls it "flush the receiver's buffer and pause/stop what is
   playing", but iOS sends it right after RECORD at the start of every stream and again on seek.
   The device disagrees with the spec; trust the device.
+- **Position comes from the audio clock, not wall time.** Senders push progress only every few
+  seconds, so the UI used to extrapolate from the last push and drift a couple of seconds. The
+  progress push carries the track's first/last sample as RTP timestamps, and
+  `AudioStreamServer.playingRtpTimestamp()` reports the RTP timestamp currently reaching the
+  speakers (newest arrival minus the queue minus AudioTrack's own buffer). Position is the
+  difference. It cannot drift, and it stops by itself during a pause.
 - **`endSession` must release the media servers, not just the RTSP socket.** The RTSP control
   connection, the audio UDP socket and the mirror socket are independent. Closing the first leaves
   the other two receiving and playing, so Back appeared to do nothing.

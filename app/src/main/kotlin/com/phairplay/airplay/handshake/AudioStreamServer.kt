@@ -221,13 +221,11 @@ class AudioStreamServer(
                 try {
                     socket.receive(packet)
                 } catch (e: java.net.SocketTimeoutException) {
-                    probe(0)
                     if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
                     continue
                 }
                 if (audioIdle) { audioIdle = false; onAudioIdle(false) }
                 recv++
-                probe(packet.length)
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
                     rtpCount++
@@ -252,28 +250,6 @@ class AudioStreamServer(
      * reorder buffer. [src] may be a reused receive buffer, so the payload is copied out before any
      * cross-thread handoff. Thread-safe: the reorder buffer + dedup are accessed under [reorderLock].
      */
-    // --- Pause probe -------------------------------------------------------------------------
-    // Temporary instrumentation. Every second it reports how many packets arrived, how many
-    // audio bytes, and how far the sender's own RTP clock advanced relative to wall time.
-    // Whatever a paused sender does — stop sending, send silence, or freeze its timestamp —
-    // one of these three numbers has to change, and that number is the pause signal.
-    private var probeWallNs = 0L
-    private var probePackets = 0
-    private var probeBytes = 0L
-    private var probeStartTs = -1L
-
-    private fun probe(payloadLen: Int) {
-        val now = System.nanoTime()
-        if (probeWallNs == 0L) { probeWallNs = now; probeStartTs = lastRtpTs; return }
-        if (payloadLen > 0) { probePackets++; probeBytes += payloadLen }
-        val elapsedMs = (now - probeWallNs) / 1_000_000
-        if (elapsedMs < 1000) return
-        val tsAdvance = if (probeStartTs >= 0 && lastRtpTs >= 0) lastRtpTs - probeStartTs else -1
-        val tsMs = if (tsAdvance >= 0) tsAdvance * 1000 / sampleRate else -1
-        Logger.i("PAUSE-PROBE ${elapsedMs}ms: pkts=$probePackets bytes=$probeBytes rtpAdvance=${tsMs}ms")
-        probeWallNs = now; probePackets = 0; probeBytes = 0; probeStartTs = lastRtpTs
-    }
-
     private fun handleRtpPacket(src: ByteArray, offset: Int, length: Int) {
         if (length <= RTP_HEADER) return
         // THIS is the pause signal, established by measurement after four wrong guesses.
@@ -619,6 +595,23 @@ class AudioStreamServer(
      * and HAL. It does NOT cover a Bluetooth link's own delay, which Android exposes no API for —
      * that is what the user's audio trim is for.
      */
+    /**
+     * The RTP timestamp currently reaching the speakers, or -1 before the first packet.
+     *
+     * This is the receiver's true playback clock. The newest arrival is ahead of what is audible by
+     * everything still queued plus whatever AudioTrack is holding, so both are subtracted. Deriving
+     * the progress bar from this instead of extrapolating wall-clock time from a sender push means
+     * position cannot drift: it is measured against the same samples the user is hearing, and it
+     * stops on its own during a pause because the queue stops advancing.
+     */
+    fun playingRtpTimestamp(): Long {
+        val newest = lastRtpTs
+        if (newest < 0) return -1L
+        val queuedFrames = frameQueue.size.toLong() * framesPerPacket
+        val trackFrames = outputLatencyMs() * sampleRate / 1000L
+        return (newest - queuedFrames - trackFrames) and 0xFFFFFFFFL
+    }
+
     private fun outputLatencyMs(): Long {
         val track = audioTrack ?: return 0L
         return runCatching {

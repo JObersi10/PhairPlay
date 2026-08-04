@@ -81,6 +81,12 @@ open class RtspHandler(
     private val onShowPin: (pin: String?) -> Unit = {},
     /** PAUSE received (paused=true) or RECORD after PAUSE (paused=false). */
     private val onPlaybackPaused: (paused: Boolean) -> Unit = {},
+    /**
+     * The progress push in its native units: the RTP timestamps of the track's first and last
+     * sample. Reported alongside the derived seconds because the receiver's own audio clock is in
+     * the same units, which lets position be measured rather than extrapolated.
+     */
+    private val onPlaybackAnchor: (startTs: Long, endTs: Long) -> Unit = { _, _ -> },
     /** Sender name + device type resolved from mirror SETUP plist (called when mirror audio starts). */
     private val onSenderInfoChanged: (name: String, type: SenderDeviceType) -> Unit = { _, _ -> }
 ) {
@@ -1004,6 +1010,7 @@ open class RtspHandler(
                         Logger.d("Ignoring stale progress (pos=${pos.toInt()}s > dur=${dur.toInt()}s)")
                     } else {
                         onPlaybackPosition(pos, dur)
+                        onPlaybackAnchor(start, end)
                     }
                 }
             }
