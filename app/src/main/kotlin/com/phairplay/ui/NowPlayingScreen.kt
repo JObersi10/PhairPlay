@@ -50,7 +50,6 @@ class NowPlayingScreen @JvmOverloads constructor(
     private var presentationLatencyMs = 0L
     /** Last position the sender reported — an unchanged value across pushes means paused. */
     private var lastReportedPositionSec = -1.0
-    private var lastPositionChangedAt = 0L
     private var positionBaseEpoch = 0L // elapsedRealtime at last anchor
     private var durationMs = 0L
     private var currentTitle: String? = null
@@ -206,7 +205,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
         artworkView = ImageView(context).apply {
             layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-            scaleType = ImageView.ScaleType.CENTER_CROP
+            scaleType = ImageView.ScaleType.FIT_CENTER
             outlineProvider = object : android.view.ViewOutlineProvider() {
                 override fun getOutline(v: View, outline: android.graphics.Outline) {
                     outline.setRoundRect(0, 0, v.width, v.height, dp(14).toFloat())
@@ -618,6 +617,11 @@ class NowPlayingScreen @JvmOverloads constructor(
         // arriving. Inferring it from progress-push timing gave false pauses on sparse senders and
         // could never detect resume, because a paused sender stops sending the updates the
         // detector was watching.
+        if (isPaused && info.positionSec > lastReportedPositionSec && lastReportedPositionSec >= 0.0) {
+            isPaused = false
+            positionBaseEpoch = SystemClock.elapsedRealtime()
+            positionBaseMs = senderPositionMs(info.positionSec)
+        }
         lastReportedPositionSec = info.positionSec
 
         if (info.durationSec > 0) {
@@ -889,8 +893,6 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val SCROLL_HOLD_MS = 1_500L
         private const val SCROLL_REST_MS = 4_000L
 
-        /** How long the sender-reported position may sit still before it means "paused". */
-        private const val PAUSE_STALL_MS = 1_500L
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
         /** How often to nudge, how long the nudge takes, and how far — a handful of pixels. */
