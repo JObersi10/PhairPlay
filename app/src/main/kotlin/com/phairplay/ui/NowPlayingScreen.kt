@@ -131,16 +131,6 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Timer tick ───────────────────────────────────────────────────────────
     private val positionTick = object : Runnable {
         override fun run() {
-            // Buffered senders push progress only every few seconds, so checking for a stall only
-            // when a push arrives made pause land many seconds late. Check on every tick instead.
-            if (!isPaused && lastPositionChangedAt > 0L &&
-                SystemClock.elapsedRealtime() - lastPositionChangedAt > PAUSE_STALL_MS) {
-                if (positionBaseEpoch > 0L) {
-                    positionBaseMs += ((SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier).toLong()
-                    positionBaseEpoch = 0L
-                }
-                isPaused = true
-            }
             if (positionBaseEpoch > 0L) {
                 val elapsed = (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier
                 val now = positionBaseMs + elapsed.toLong()
@@ -210,7 +200,7 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         // Album art
         val artWrapper = FrameLayout(context).apply {
-            layoutParams = LinearLayout.LayoutParams(dp(280), dp(280)).also { it.rightMargin = dp(64) }
+            layoutParams = LinearLayout.LayoutParams(dp(340), dp(340)).also { it.rightMargin = dp(64) }
             elevation = dp(24).toFloat()
         }
         artworkView = ImageView(context).apply {
@@ -623,28 +613,11 @@ class NowPlayingScreen @JvmOverloads constructor(
             restartScrolls()
         }
 
-        // Second pause detector, from the sender's own progress pushes. It must be time-based:
-        // senders legitimately repeat the same position several times in a row at the start of a
-        // track (three pos=0 pushes is normal), and treating the first repeat as a pause froze the
-        // progress bar before it ever moved.
-        if (info.positionSec > 0.0 || durationMs > 0L) {
-            val now = SystemClock.elapsedRealtime()
-            if (info.positionSec != lastReportedPositionSec) {
-                lastReportedPositionSec = info.positionSec
-                lastPositionChangedAt = now
-                if (isPaused && !info.paused) {
-                    isPaused = false
-                    positionBaseEpoch = now
-                }
-            } else if (!isPaused && lastPositionChangedAt > 0L && false) {
-                if (positionBaseEpoch > 0L) {
-                    positionBaseMs += ((now - positionBaseEpoch) * seekMultiplier).toLong()
-                    positionBaseEpoch = 0L
-                }
-                isPaused = true
-                Timber.d("Progress unchanged for ${PAUSE_STALL_MS}ms — treating as paused")
-            }
-        }
+        // Pause now comes only from info.paused, which tracks whether audio packets are
+        // arriving. Inferring it from progress-push timing gave false pauses on sparse senders and
+        // could never detect resume, because a paused sender stops sending the updates the
+        // detector was watching.
+        lastReportedPositionSec = info.positionSec
 
         if (info.durationSec > 0) {
             durationMs = (info.durationSec * 1000).toLong()

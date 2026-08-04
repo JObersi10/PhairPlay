@@ -139,6 +139,8 @@ class AudioStreamServer(
     private var historyIdx = 0
     private var lastOnsetMs = 0L
     private var envelope = 0f
+    /** Previous RTP timestamp, for detecting a sender clock re-sync. */
+    @Volatile private var lastRtpTs = -1L
     private val energyHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
     /** UDP port macOS sends the audio RTP stream to (returned in the SETUP response). */
@@ -246,6 +248,24 @@ class AudioStreamServer(
     private fun handleRtpPacket(src: ByteArray, offset: Int, length: Int) {
         if (length <= RTP_HEADER) return
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
+        // RTP timestamp (bytes 4..7) is the sender's own playback clock. When a sender re-syncs
+        // mid-stream — an iPad "correcting itself" — it jumps, and everything already queued
+        // belongs to the old timeline. Playing it out drifts us permanently off. Drop the stale
+        // audio and re-prime so we line up with the new clock instead.
+        val rtpTs = ((src[offset + 4].toInt() and 0xFF).toLong() shl 24) or
+                    ((src[offset + 5].toInt() and 0xFF).toLong() shl 16) or
+                    ((src[offset + 6].toInt() and 0xFF).toLong() shl 8) or
+                    (src[offset + 7].toInt() and 0xFF).toLong()
+        if (lastRtpTs >= 0) {
+            val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
+            val drift = Math.abs(rtpTs - expected)
+            if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
+                Logger.i("Audio: sender clock jumped ${drift} samples — reprimimg")
+                frameQueue.clear()
+                synchronized(reorderLock) { reorder.clear(); nextSeq = -1; maxSeq = -1 }
+            }
+        }
+        lastRtpTs = rtpTs
         // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted audio payload (copied out of src).
         val payload = src.copyOfRange(offset + RTP_HEADER, offset + length)
         var resend: IntArray? = null
@@ -639,6 +659,8 @@ class AudioStreamServer(
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
         private const val AUDIO_IDLE_MS = 700
+        /** Timestamp discontinuity that means the sender restarted its clock (~0.5s at 44.1kHz). */
+        private const val RESYNC_JUMP_SAMPLES = 22_050L
 
         /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
         private const val LP_ALPHA = 0.018
