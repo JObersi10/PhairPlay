@@ -57,6 +57,8 @@ class AudioStreamServer(
     private val latencyMinSamples: Int = 11025,
     /** User A/V trim, also applied to the beat pulse so the visual matches what is heard. */
     private val extraDelayMs: Long = 0,
+    /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
+    private val beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
     /**
@@ -216,11 +218,13 @@ class AudioStreamServer(
                 try {
                     socket.receive(packet)
                 } catch (e: java.net.SocketTimeoutException) {
+                    probe(0)
                     if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
                     continue
                 }
                 if (audioIdle) { audioIdle = false; onAudioIdle(false) }
                 recv++
+                probe(packet.length)
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
                     rtpCount++
@@ -245,6 +249,28 @@ class AudioStreamServer(
      * reorder buffer. [src] may be a reused receive buffer, so the payload is copied out before any
      * cross-thread handoff. Thread-safe: the reorder buffer + dedup are accessed under [reorderLock].
      */
+    // --- Pause probe -------------------------------------------------------------------------
+    // Temporary instrumentation. Every second it reports how many packets arrived, how many
+    // audio bytes, and how far the sender's own RTP clock advanced relative to wall time.
+    // Whatever a paused sender does — stop sending, send silence, or freeze its timestamp —
+    // one of these three numbers has to change, and that number is the pause signal.
+    private var probeWallNs = 0L
+    private var probePackets = 0
+    private var probeBytes = 0L
+    private var probeStartTs = -1L
+
+    private fun probe(payloadLen: Int) {
+        val now = System.nanoTime()
+        if (probeWallNs == 0L) { probeWallNs = now; probeStartTs = lastRtpTs; return }
+        if (payloadLen > 0) { probePackets++; probeBytes += payloadLen }
+        val elapsedMs = (now - probeWallNs) / 1_000_000
+        if (elapsedMs < 1000) return
+        val tsAdvance = if (probeStartTs >= 0 && lastRtpTs >= 0) lastRtpTs - probeStartTs else -1
+        val tsMs = if (tsAdvance >= 0) tsAdvance * 1000 / sampleRate else -1
+        Logger.i("PAUSE-PROBE ${elapsedMs}ms: pkts=$probePackets bytes=$probeBytes rtpAdvance=${tsMs}ms")
+        probeWallNs = now; probePackets = 0; probeBytes = 0; probeStartTs = lastRtpTs
+    }
+
     private fun handleRtpPacket(src: ByteArray, offset: Int, length: Int) {
         if (length <= RTP_HEADER) return
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
@@ -560,7 +586,7 @@ class AudioStreamServer(
             val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
             ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
         } else 0L
-        val delay = bufferedMs + extraDelayMs + outputLatencyMs()
+        val delay = bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
         if (delay <= 0L) { onEnergy(value); return }
         energyHandler.postDelayed({ onEnergy(value) }, delay)
     }
@@ -658,7 +684,9 @@ class AudioStreamServer(
         private const val PRIME_TIMEOUT_MS = 700L
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
-        private const val AUDIO_IDLE_MS = 700
+        // Audio packets arrive every ~8ms while playing, and stop dead on pause. 400ms is far
+        // outside normal jitter but still fast enough that the UI pauses about when the user does.
+        private const val AUDIO_IDLE_MS = 400
         /** Timestamp discontinuity that means the sender restarted its clock (~0.5s at 44.1kHz). */
         private const val RESYNC_JUMP_SAMPLES = 22_050L
 

@@ -63,6 +63,8 @@ class AirPlayReceiver(
     private val rememberPinPairing: Boolean = true,
     /** User A/V-sync trim added on top of the sender's requested latency (AppSettings.audioDelayMs). */
     private val audioDelayMs: Int = 0,
+    /** Extra delay for the beat animation only (AppSettings.beatDelayMs). */
+    private val beatDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -196,6 +198,10 @@ class AirPlayReceiver(
     fun endSession() {
         Logger.i("Ending AirPlay session on user request")
         rtspHandler?.disconnectActiveClient()
+        // Closing the RTSP control socket does not touch the UDP media servers — they are separate
+        // sockets and keep receiving and playing whatever the sender is still transmitting, which is
+        // why Back looked like it did nothing. Tear the media down explicitly.
+        releaseMediaComponents()
         onStreamingStopped()
     }
 
@@ -526,13 +532,12 @@ class AirPlayReceiver(
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
             extraDelayMs = audioDelayMs.toLong(),
+            beatDelayMs = beatDelayMs.toLong(),
             onEnergy = { e -> onEnergyChanged(e) },
-            // Apple Music never sends RTSP PAUSE, so a stopped stream is the only reliable
-            // pause signal — without it the progress bar ran on through a paused track.
-            // Pause state comes only from RTSP FLUSH/RECORD. Senders keep the audio stream
-            // flowing through a pause, so nothing derived from packets or decoded PCM can tell
-            // the two apart — every such detector here ended up un-pausing immediately.
-            onAudioIdle = {})
+            // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
+            // can't mean "paused". The stream itself is the signal: this sender stops sending
+            // RTP entirely while paused and resumes the instant playback does.
+            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()

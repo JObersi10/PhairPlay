@@ -118,13 +118,8 @@ data class AppSettings(
      */
     val senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF,
 
-    /**
-     * When true, Back from the home screen stops the receiver and removes the app from the recents
-     * list, rather than just navigating away and leaving the service running in the background.
-     * Off by default — a background receiver is the point of the app — but useful while testing,
-     * where repeatedly backing out of a still-running app is a nuisance.
-     */
-    val backQuitsApp: Boolean = false,
+    /** What the Back button does. See [BackAction]. */
+    val backAction: BackAction = BackAction.STOP_STREAM,
 
     /**
      * Extra delay applied to AirPlay audio, in milliseconds, on top of the latency the sender asks
@@ -138,13 +133,6 @@ data class AppSettings(
     val audioDelayMs: Int = 0,
 
     /**
-     * When true, Back during a stream leaves PhairPlay for the Fire TV home screen instead of
-     * ending the session, so the sender keeps playing in the background. Off keeps the original
-     * behaviour, where Back stops the stream.
-     */
-    val backGoesHome: Boolean = false,
-
-    /**
      * Whether leaving the app during a video stream enters picture-in-picture instead of simply
      * backgrounding. Only affects mirroring — audio-only sessions have no video to shrink.
      */
@@ -152,6 +140,15 @@ data class AppSettings(
 
     /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
     val beatPulse: Int = 0,
+
+    /**
+     * Extra delay applied to the beat animation only, on top of [audioDelayMs], in milliseconds.
+     *
+     * A Bluetooth speaker adds its own output latency that the AudioTrack timestamp cannot see, so
+     * the sound the user hears lags the sound we measured. Trimming [audioDelayMs] to compensate
+     * would desync the audio itself; this shifts the visuals alone.
+     */
+    val beatDelayMs: Int = 0,
 
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
@@ -201,5 +198,30 @@ data class AppSettings(
 
         /** Maximum allowed length for the display name (mDNS limit). */
         const val DISPLAY_NAME_MAX_LENGTH = 63
+    }
+}
+
+/**
+ * What pressing Back does.
+ *
+ * This replaces a pair of independent booleans ("Back returns to Home" and "Back exits PhairPlay")
+ * that could both be on at once. Their combined behaviour was genuinely undefined from the user's
+ * side — the labels described two different questions (where does Back go, and does the receiver
+ * keep running) whose answers overlap. One ordered choice says exactly what happens instead.
+ */
+enum class BackAction {
+    /** Back ends the stream and returns to PhairPlay's waiting screen. The receiver keeps running. */
+    STOP_STREAM,
+
+    /** Back leaves PhairPlay for the Fire TV home screen. The stream and the receiver keep running. */
+    GO_HOME,
+
+    /** Back ends the stream, stops the receiver, and removes PhairPlay from recents. */
+    EXIT_APP,
+    ;
+
+    companion object {
+        fun fromName(name: String?): BackAction =
+            entries.firstOrNull { it.name == name } ?: STOP_STREAM
     }
 }

@@ -24,6 +24,7 @@ import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
 import com.phairplay.airplay.NowPlayingInfo
+import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.OnboardingFragment
@@ -79,11 +80,8 @@ class MainActivity : AppCompatActivity() {
     private var currentPin: String? = null
     private var currentVideoPlaying = false
 
-    /** Cached copy of AppSettings.backQuitsApp — onBackPressed can't suspend to read DataStore. */
-    private var backQuitsApp = false
-
-    /** Cached AppSettings.backGoesHome: Back during a stream backgrounds instead of ending it. */
-    private var backGoesHome = false
+    /** Cached copy of AppSettings.backAction — onBackPressed can't suspend to read DataStore. */
+    private var backAction = BackAction.STOP_STREAM
 
     /** Which screen this session owns, latched until it ends. */
     private enum class Mode { NONE, AUDIO, VIDEO }
@@ -245,31 +243,30 @@ class MainActivity : AppCompatActivity() {
         if (currentVideoPlaying || currentNowPlaying != null ||
             currentAirPlayState == ProtocolState.CONNECTED
         ) {
-            if (backQuitsApp) {
-                // Quit beats "return to Home": leaving the receiver advertising is the opposite of
-                // what quitting means, so end the stream before stopping.
-                Timber.d("Back during session with backQuitsApp — ending session and quitting")
-                service?.endCurrentSession()
-                ServiceController.stop(this)
-                finishAndRemoveTask()
-                return
+            when (backAction) {
+                BackAction.EXIT_APP -> {
+                    Timber.d("Back during session, action=EXIT_APP — ending session and quitting")
+                    service?.endCurrentSession()
+                    ServiceController.stop(this)
+                    finishAndRemoveTask()
+                }
+                BackAction.GO_HOME -> {
+                    // moveTaskToBack backgrounds the task without finishing it, so the sender keeps
+                    // playing and the service can bring us forward again when something changes.
+                    Timber.d("Back during session, action=GO_HOME — backgrounding, session continues")
+                    moveTaskToBack(true)
+                }
+                BackAction.STOP_STREAM -> {
+                    Timber.d("Back during session, action=STOP_STREAM — ending AirPlay session")
+                    service?.endCurrentSession()
+                }
             }
-            if (backGoesHome) {
-                // Leave the stream running and drop to the Fire TV home screen. moveTaskToBack
-                // backgrounds the task without finishing it, so the sender keeps playing and the
-                // service can bring us forward again when something changes.
-                Timber.d("Back pressed during session — backgrounding, session continues")
-                moveTaskToBack(true)
-                return
-            }
-            Timber.d("Back pressed during session — ending AirPlay session")
-            service?.endCurrentSession()
             return
         }
-        // Settings → "Back exits PhairPlay": stop the receiver and drop the task instead of leaving
-        // a background service behind. Same effect as the Quit row, without the dialog.
-        if (backQuitsApp) {
-            Timber.d("Back pressed with backQuitsApp — stopping service and finishing task")
+        // No stream on screen. Only EXIT_APP has anything left to do — the other two have already
+        // happened by the time you are back on the waiting screen.
+        if (backAction == BackAction.EXIT_APP) {
+            Timber.d("Back with action=EXIT_APP — stopping service and finishing task")
             ServiceController.stop(this)
             finishAndRemoveTask()
             return
@@ -513,8 +510,7 @@ class MainActivity : AppCompatActivity() {
                     settings.screensaverEnabled, settings.screensaverTimeoutMin
                 )
                 // Cached because onBackPressed is synchronous and can't await DataStore.
-                backQuitsApp = settings.backQuitsApp
-                backGoesHome = settings.backGoesHome
+                backAction = settings.backAction
                 pipEnabled = settings.pipEnabled
                 nowPlayingScreen.setBeatPulse(settings.beatPulse)
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time

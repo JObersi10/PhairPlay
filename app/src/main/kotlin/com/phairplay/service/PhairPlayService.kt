@@ -508,6 +508,7 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
+            beatDelayMs = settings.beatDelayMs,
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state

@@ -1044,20 +1044,16 @@ open class RtspHandler(
         return RtspResponse(statusCode = 501, statusMessage = "Not Implemented", protocol = request.responseProtocol())
     }
 
-    /** Handles FLUSH — macOS requests we discard buffered media data (seek/pause). */
     /**
-     * Handles FLUSH — this IS the pause command, not just a buffer hint.
+     * Handles FLUSH — discard buffered media. **Not** a pause signal, despite the spec wording.
      *
-     * The AirPlay spec describes FLUSH as "flush the receiver's buffer and pause/stop what is
-     * playing", and senders use it every time the user hits pause. We had been answering 200 and
-     * ignoring it, which is why every attempt to infer a pause from packet timing or progress
-     * pushes was fighting a signal that was already arriving explicitly.
-     *
-     * Resume comes back as RECORD, or simply as audio starting to flow again.
+     * Device logs settle this: iOS sends FLUSH immediately after RECORD at the start of every
+     * stream, again on seek, and again on pause. Treating it as "paused" latched the UI at the
+     * first note of playback. Pause is detected from the audio stream going silent instead —
+     * this sender genuinely stops sending RTP while paused (see AudioStreamServer.AUDIO_IDLE_MS).
      */
     private fun handleFlush(@Suppress("UNUSED_PARAMETER") request: RtspRequest): RtspResponse {
-        Logger.i("FLUSH — sender paused")
-        onPlaybackPaused(true)
+        Logger.d("FLUSH — buffer flush")
         return RtspResponse(statusCode = 200, statusMessage = "OK")
     }
 

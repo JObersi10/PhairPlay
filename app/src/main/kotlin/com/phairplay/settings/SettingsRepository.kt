@@ -114,11 +114,18 @@ class SettingsRepository(private val context: Context) {
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
         showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
-        backQuitsApp       = this[Keys.BACK_QUITS_APP]           ?: false,
+        // Migration: BACK_ACTION replaced two overlapping booleans. Honour the old keys when the
+        // new one has never been written, so an upgrade keeps whatever the user had chosen.
+        backAction         = this[Keys.BACK_ACTION]?.let { BackAction.fromName(it) }
+            ?: when {
+                this[Keys.BACK_QUITS_APP] == true -> BackAction.EXIT_APP
+                this[Keys.BACK_GOES_HOME] == true -> BackAction.GO_HOME
+                else -> BackAction.STOP_STREAM
+            },
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
-        backGoesHome       = this[Keys.BACK_GOES_HOME]           ?: false,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
+        beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
@@ -142,11 +149,11 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
         this[Keys.START_ON_BOOT]        = settings.startOnBoot
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
-        this[Keys.BACK_QUITS_APP]       = settings.backQuitsApp
+        this[Keys.BACK_ACTION]          = settings.backAction.name
         this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
-        this[Keys.BACK_GOES_HOME]       = settings.backGoesHome
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
+        this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
@@ -172,11 +179,14 @@ class SettingsRepository(private val context: Context) {
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")
         val START_ON_BOOT       = booleanPreferencesKey("start_on_boot")
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
+        // Legacy, read-only: superseded by BACK_ACTION but still consulted when migrating.
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
+        val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
+        val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")

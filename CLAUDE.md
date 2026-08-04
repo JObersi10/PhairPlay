@@ -99,6 +99,22 @@ happens" — that advances the AES-CTR keystream and corrupts every later frame.
 
 ## Hard-won details
 
+- **Pause detection is unsolved — do not guess again.** Three approaches have been tried and all
+  failed on device: (a) progress `SET_PARAMETER` pushes, which are sparse and quantised to whole
+  seconds; (b) decoded-PCM silence; (c) RTSP `FLUSH`. FLUSH is the tempting one because the spec
+  calls it "flush the receiver's buffer and pause/stop what is playing" — but device logs show iOS
+  sends FLUSH immediately after RECORD at the *start* of every stream, again on seek, and again on
+  pause. Treating it as "paused" latches the UI at the first note. `AUDIO_IDLE_MS` (silent RTP
+  socket) is the current mechanism and is also unconfirmed. A `PAUSE-PROBE` line now logs, once a
+  second, packet count, byte count and how far the sender's RTP clock advanced against wall time —
+  pause on device, then read those three numbers before changing anything.
+- **`endSession` must release the media servers, not just the RTSP socket.** The RTSP control
+  connection, the audio UDP socket and the mirror socket are independent. Closing the first leaves
+  the other two receiving and playing, so Back appeared to do nothing.
+- **Back is one ordered choice, not two switches.** `BackAction` (STOP_STREAM / GO_HOME /
+  EXIT_APP) replaced `backQuitsApp` + `backGoesHome`, which could both be on and described two
+  different questions. `SettingsRepository` migrates the old keys on first read.
+
 - **Sender name.** At `CONNECTED` the only name available is the RTSP User-Agent
   fallback ("AirPlay"). The real name arrives ~40 ms later in the now-playing
   plist, so `rememberSender` is called again from `onNowPlayingChanged`, and a

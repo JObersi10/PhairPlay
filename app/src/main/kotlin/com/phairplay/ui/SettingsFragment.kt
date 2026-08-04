@@ -17,6 +17,7 @@ import androidx.lifecycle.lifecycleScope
 import com.phairplay.BuildConfig
 import com.phairplay.R
 import com.phairplay.settings.AppSettings
+import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.util.Logger
 import kotlinx.coroutines.flow.first
@@ -58,9 +59,11 @@ class SettingsFragment : Fragment() {
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
-    private lateinit var rowBackQuits: View
-    private lateinit var rowBackHome: View
+    private lateinit var rowBackAction: LinearLayout
+    private lateinit var textBackActionValue: TextView
     private lateinit var rowPip: View
+    private lateinit var rowBeatDelay: LinearLayout
+    private lateinit var textBeatDelayValue: TextView
     private lateinit var rowBeatPulse: LinearLayout
     private lateinit var textBeatPulseValue: TextView
     private lateinit var rowAudioDelay: LinearLayout
@@ -112,9 +115,11 @@ class SettingsFragment : Fragment() {
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
-        rowBackQuits        = view.findViewById(R.id.row_back_quits)
-        rowBackHome         = view.findViewById(R.id.row_back_home)
+        rowBackAction       = view.findViewById(R.id.row_back_action)
+        textBackActionValue = view.findViewById(R.id.text_back_action_value)
         rowPip              = view.findViewById(R.id.row_pip)
+        rowBeatDelay        = view.findViewById(R.id.row_beat_delay)
+        textBeatDelayValue  = view.findViewById(R.id.text_beat_delay_value)
         rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
         textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
@@ -154,8 +159,6 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
-        configureToggleRow(rowBackQuits,    R.string.setting_back_quits,         R.string.setting_back_quits_subtitle)
-        configureToggleRow(rowBackHome,     R.string.setting_back_home,          R.string.setting_back_home_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
@@ -223,11 +226,11 @@ class SettingsFragment : Fragment() {
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
-        setToggle(rowBackQuits, settings.backQuitsApp)
-        setToggle(rowBackHome, settings.backGoesHome)
+        showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
         showBeatPulse(settings.beatPulse)
+        showBeatDelay(settings.beatDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
         showSenderVolumeMode(settings.senderVolumeMode)
@@ -299,14 +302,11 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
-        setToggleListener(rowBackQuits) { enabled -> save { it.copy(backQuitsApp = enabled) } }
-        setToggleListener(rowBackHome) { enabled ->
-            Logger.i("Back-returns-to-Home toggled to $enabled")
-            save { it.copy(backGoesHome = enabled) }
-        }
+        rowBackAction.setOnClickListener { pickBackAction() }
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
+        rowBeatDelay.setOnClickListener { pickBeatDelay() }
         setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
@@ -450,6 +450,71 @@ class SettingsFragment : Fragment() {
             .show()
     }
 
+    private fun showBeatDelay(ms: Int) {
+        textBeatDelayValue.text = if (ms == 0) getString(R.string.setting_audio_delay_none) else "+$ms ms"
+    }
+
+    /**
+     * Shifts the beat animation later without touching audio timing.
+     *
+     * A Bluetooth speaker's own output latency is invisible to AudioTrack's timestamp, so the beat
+     * fires when the PCM leaves the device rather than when the user hears it. Correcting that with
+     * the audio delay would push the audio itself out of sync with the sender, so it gets its own dial.
+     */
+    private fun pickBeatDelay() {
+        val labels = BEAT_DELAY_CHOICES.map {
+            if (it == 0) getString(R.string.setting_audio_delay_none) else "+$it ms"
+        }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_beat_delay)
+            .setItems(labels) { _, which ->
+                val ms = BEAT_DELAY_CHOICES[which]
+                save { it.copy(beatDelayMs = ms) }
+                showBeatDelay(ms)
+                Logger.i("Beat delay set to $ms ms — restarting receivers to apply")
+                ServiceController.restart(requireContext())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun backActionLabel(action: BackAction): String = getString(when (action) {
+        BackAction.STOP_STREAM -> R.string.back_action_stop_stream
+        BackAction.GO_HOME     -> R.string.back_action_go_home
+        BackAction.EXIT_APP    -> R.string.back_action_exit_app
+    })
+
+    private fun backActionDetail(action: BackAction): String = getString(when (action) {
+        BackAction.STOP_STREAM -> R.string.back_action_stop_stream_detail
+        BackAction.GO_HOME     -> R.string.back_action_go_home_detail
+        BackAction.EXIT_APP    -> R.string.back_action_exit_app_detail
+    })
+
+    private fun showBackAction(action: BackAction) {
+        textBackActionValue.text = backActionLabel(action)
+    }
+
+    /**
+     * One ordered choice instead of two overlapping switches.
+     *
+     * Each option spells out its consequence, because the distinction that matters — whether the
+     * receiver keeps advertising after you leave — is invisible from the screen you land on.
+     */
+    private fun pickBackAction() {
+        val options = BackAction.entries
+        val labels = options.map { "${backActionLabel(it)}\n${backActionDetail(it)}" }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_back_action)
+            .setItems(labels) { _, which ->
+                val action = options[which]
+                save { it.copy(backAction = action) }
+                showBackAction(action)
+                Logger.i("Back action set to $action")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun showAudioDelay(ms: Int) {
         textAudioDelayValue.text = if (ms == 0) getString(R.string.setting_audio_delay_none) else "+$ms ms"
     }
@@ -527,5 +592,6 @@ class SettingsFragment : Fragment() {
 
         /** A/V sync trim options, in milliseconds added to the sender's requested latency. */
         val AUDIO_DELAY_CHOICES = listOf(0, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 3000)
+        val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 400, 500, 750, 1000)
     }
 }

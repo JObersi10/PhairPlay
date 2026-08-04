@@ -1,124 +1,90 @@
 # PhairPlay — Handoff
 
-Last updated: 2026-07-29, end of session.
+Last updated: 2026-08-04.
 Branch `feature/receiver-ux-and-cast-removal`, **not pushed**.
 
-Read `CLAUDE.md` first for build, device and architecture notes — especially the
-native-library verification step, which is not optional.
+Read `CLAUDE.md` first — especially the native-library verification step, which is not optional,
+and the "Hard-won details" entry on pause detection.
 
-## State
+## Where things stand
 
-Everything below is committed and the working tree is clean. Both flavors build,
-`app:testFiretvDebugUnitTest` passes, and the current APK is installed on the Fire
-TV at `192.168.1.246`.
+Installed on the Fire TV at `192.168.1.246`. Both flavors build.
 
-## Commits this session
+### The open bug: pause is still wrong
+
+The Now Playing progress bar keeps counting while the sender is paused, then snaps back roughly
+six seconds later. Three attempts have failed, and the failures are informative:
+
+| Attempt | Why it failed |
+|---|---|
+| Progress `SET_PARAMETER` pushes | Sparse, and `pos` is quantised to whole seconds |
+| Decoded-PCM silence | A paused sender's stream is not necessarily silence |
+| RTSP `FLUSH` | iOS sends FLUSH right after RECORD at stream start, and on seek — not just on pause |
+
+The FLUSH one is worth dwelling on, because the spec genuinely says FLUSH means "flush the
+receiver's buffer and pause/stop what is playing", and the AirPlay documentation HTML in the
+project folder repeats it. The device disagrees with the spec. Trust the device.
+
+**Current mechanism:** `AudioStreamServer.AUDIO_IDLE_MS = 400`. A socket read timeout with no
+packet is treated as paused; the next packet resumes. This is *also unconfirmed* — the log
+evidence that packets stop during a pause was weak, because only the first six RTP packets are
+ever logged, so a gap in the log does not prove a gap in the stream.
+
+**Next step, and do this before writing any more code.** A `PAUSE-PROBE` line now logs once a
+second:
 
 ```
-(head)   Debug HUD on the audio screen + "Back exits PhairPlay" option
-349bffe  Default sender volume to software gain only
-9f0dbfc  Don't end an AirPlay session on a stream-level TEARDOWN
-74ecddd  Don't let a failed native library load kill the app
-127a2b0  Fix sender volume having no audible effect
-e69af9f  Fix ALAC decoder crash, last-sender name, and shutdown log noise
-c767018  (earlier) Receiver UX, onboarding, Cast removal
+PAUSE-PROBE 1002ms: pkts=115 bytes=118450 rtpAdvance=1000ms
 ```
 
-## Verified working on device
+Play, pause for ~10s, resume, then `curl -s http://192.168.1.246:8001/ | grep PAUSE-PROBE`.
+Whatever a paused sender does — stop transmitting, send silence, or freeze its RTP clock — one of
+those three numbers must change, and that number is the pause signal. Remove the probe once it has
+answered the question.
 
-- AirPlay audio: ALAC decode, artwork with crossfade, marquee text, MENU info panel
-- Volume reads correctly in the info panel — the user confirmed it shows both the
-  Fire TV Bluetooth speaker level and the phone's current level
-- Miracast advertising, after `ACCESS_FINE_LOCATION` is granted at runtime
-- DLNA including GENA eventing — a real control point at `192.168.1.190:5001`
-  received initial events for all three services
-- Onboarding, including the recommended-settings page and visible focus highlight
-- Wake lock and Wi-Fi lock held during a session
-- Duplicate-start guards: `bind errors this run: 0`
-- Service survives the app being swiped away
+## Landed this session
+
+- `AirPlayReceiver.endSession()` now calls `releaseMediaComponents()`. Closing the RTSP socket left
+  the audio and mirror UDP servers running, which is why Back looked like it did nothing.
+- **Back is now one setting, not two.** `BackAction` — STOP_STREAM (default) / GO_HOME / EXIT_APP —
+  replaces `backQuitsApp` and `backGoesHome`. Those were two booleans answering two different
+  questions with overlapping answers, and nobody could tell which was which. Each dialog option
+  states its consequence, including whether the receiver keeps advertising.
+  `SettingsRepository` migrates the old DataStore keys, so an upgrade keeps the user's choice.
+- **Beat delay** setting (0–1000ms, `AppSettings.beatDelayMs`), separate from audio delay. A
+  Bluetooth speaker's output latency is invisible to `AudioTrack.getTimestamp`, so the beat fires
+  when PCM leaves the device rather than when it is heard. Correcting that via the audio delay
+  would desync the audio itself, hence a second dial that moves visuals only.
 
 ## Unverified — needs one session each
 
-1. **The TEARDOWN fix (`9f0dbfc`) — highest priority.** The user said "seems good
-   now", but the log they sent was from *before* the fix. Nothing has confirmed it.
-   Connect and look for:
-   ```
-   TEARDOWN streams=[96] — stopped those, session continues (active=[])
-   ```
-   and confirm the session does **not** print `Session ended — returning to the
-   previous app`.
+1. **Pause.** See above. Nothing about it is confirmed.
+2. **Back ending the stream.** The `releaseMediaComponents` fix is untested on device.
+3. **`BackAction` migration** from an install that had the old booleans set.
+4. **Beat delay** — the plumbing compiles; nobody has listened to it.
+5. **Overnight sleep.** Leave the TV off overnight, then connect. Should work first try.
 
-2. **Volume, hardware path.** Settings were reset mid-session and re-onboarded, so
-   the stored mode is now the new `OFF` default. To test whether
-   `MODIFY_AUDIO_SETTINGS` fixed the hardware path, set Settings → sender volume →
-   external-only, play over Bluetooth, move the slider, then
-   `grep -iE "Sender volume|rejected"`. If the index moves and audio actually gets
-   quieter, flip the default back to `EXTERNAL_ONLY`. If it logs
-   `Device volume rejected`, `OFF` is correct and can be documented as final.
-   Note: the earlier "it doesn't work" evidence predates the permission fix, so
-   this is genuinely undecided.
+## Open work, not started
 
-3. **Overnight sleep.** Leave the TV off overnight, then connect. Should work on
-   the first attempt — previously took two tries. Tests the
-   `ConnectivityManager` IP-change watcher.
+### Mirroring freeze (iOS 26.1)
 
-4. **Debug HUD on the audio screen** and **"Back exits PhairPlay"** — both shipped
-   in the last commit, neither exercised yet.
+Diagnosed, not fixed; see `CLAUDE.md` for the symptom and capture procedure. Needs the type-5
+payload hex first. Do not feed an unknown payload through `cipher.update()` to see what happens —
+that advances the AES-CTR keystream and corrupts every later frame.
 
-## Open work
+### 7-second mirror connect
 
-### Mirroring freeze (iOS 26.1) — the real remaining bug
+Measured: our own path is ~111ms, the RTSP handshake ~600ms. The remaining ~6s is iOS-side and may
+not be ours to fix.
 
-Diagnosed but not fixed; see `CLAUDE.md` for the full symptom and the capture
-procedure. Needs the type-5 payload hex before anything can be attempted. Nothing
-was guessed at deliberately: decrypting an unknown payload type would desync the
-AES-CTR keystream.
+### Deferred by the user
 
-### Audio buffering — FIXED, unverified on device
-
-Caused both reported symptoms: choppy audio at session start, and glitching when
-pressing Home mid-session. Not an underpowered Fire TV — `dup 0%`, `resendReq=2`
-out of 5000 and a keeping-up decoder ruled that out.
-
-Evidence was `queue=89` against `AUDIO_QUEUE_CAPACITY = 96` (a frame count, not a
-percent — the trailing `%` in a pasted zsh log is the no-newline marker), i.e. a
-~710ms backlog while AudioTrack held ~40ms. `AudioTrack.write` with
-WRITE_BLOCKING paces at exactly realtime, so nothing drained that lead and the
-queue's overflow eviction became the only relief — one glitch per dropped frame.
-
-Three changes in `AudioStreamServer`:
-
-1. `TARGET_BUFFER_MS = 300` — the builder had `setBufferSizeInBytes(minBuf)` (~40ms)
-   while its own log line printed `minBuf * 2`, so the logged latency never matched
-   reality. Both now agree.
-2. `awaitPrimedQueue()` — accumulate `PRIME_FRAMES = 12` before the first decode,
-   bounded by `PRIME_TIMEOUT_MS`. Playback used to start on packet zero with an
-   empty pipeline, so the first scheduling delay was already an underrun.
-3. `resyncIfBacklogged()` — at `RESYNC_HIGH_WATER = 64` frames, drop down to
-   `RESYNC_TARGET = 16` in one go. One artefact instead of a permanent backlog.
-
-To verify: play audio, press Home, then check the stats line. Expect
-`buffer=...(~300ms latency)`, `queue=` well under 64, and `qDrop` flat. A
-`backlog resync` line is the safety net working, not a regression — but if it
-appears repeatedly, the producer is genuinely outrunning the consumer and needs a
-real clock-rate fix rather than periodic dropping.
-
-### Not started
-
-- Onboarding media (recordings/pictures) — the user mentioned it, then deferred
-- Lyrics — explicitly deferred
-- Sender-type display — explicitly deferred
+Onboarding media, lyrics, sender-type display.
 
 ## Cautions
 
-- **The exFAT drive corrupts native build output.** Verify before every install;
-  see `CLAUDE.md`. It can in principle corrupt source files too — if a file starts
-  behaving impossibly, check `git status` before debugging the logic.
+- **The exFAT drive corrupts native build output.** Verify the ELF magic before every install; see
+  `CLAUDE.md`. It can corrupt source files too — if a file behaves impossibly, check `git status`
+  before debugging the logic.
+- A killed Gradle run can leave `~/.gradle/caches/journal-1` locked. The error names the owner PID.
 - **Nothing is pushed.** The user has not asked for it.
-- **Resolved:** the `pinAuth=false` log line was not a wrong setting. DataStore held
-  `airplay_pin_auth` as `12 02 08 01` (true) — the user's choice saved fine. The
-  receivers had simply started in `onCreate` nine seconds before onboarding wrote
-  the answers, and nothing restarted them. Fixed by restarting the service from
-  `onFinished`. The user was right and the log was right; only the ordering was
-  wrong. Worth remembering that "the setting didn't save" and "the setting saved but
-  nothing re-read it" look identical from a log line.
