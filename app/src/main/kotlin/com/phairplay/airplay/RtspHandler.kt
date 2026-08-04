@@ -883,6 +883,9 @@ open class RtspHandler(
         // AirPlay 2 mirroring has no ANNOUNCE/SDP — RECORD just acknowledges the session.
         onPlaybackPaused(false)
         if (isMirrorSession) {
+            // RTP-Info: seq=<n>;rtptime=<t> is the sender's start anchor for this stream. Logged so
+            // A/V alignment can be tied to the sender's clock rather than to arrival time.
+            request.headers["RTP-Info"]?.let { Logger.i("RECORD RTP-Info: $it") }
             stamp("RECORD")
             Logger.i("RECORD (mirror session) — OK")
             return RtspResponse(

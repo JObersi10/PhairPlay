@@ -131,8 +131,9 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Timer tick ───────────────────────────────────────────────────────────
     private val positionTick = object : Runnable {
         override fun run() {
-            if (positionBaseEpoch > 0L) {
-                val elapsed = (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier
+            run {
+                val elapsed = if (positionBaseEpoch > 0L)
+                    (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier else 0f
                 val now = positionBaseMs + elapsed.toLong()
                 val clamped = if (durationMs > 0L) now.coerceAtMost(durationMs) else now
                 timeElapsed.text = formatTime(clamped / 1000.0)

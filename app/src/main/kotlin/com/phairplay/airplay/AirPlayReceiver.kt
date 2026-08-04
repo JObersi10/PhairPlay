@@ -291,7 +291,11 @@ class AirPlayReceiver(
             rememberPinPairing = rememberPinPairing,
             pairingStore = pairingStore,
             onShowPin = { pin -> onPinChanged(pin) },
-            onPlaybackPaused = { paused -> npPaused = paused; emitNowPlaying() },
+            onPlaybackPaused = { paused ->
+                // Senders FLUSH once at session start to clear the buffer, before a single packet
+                // has played. Treating that as a pause froze the progress row at 0:00 immediately.
+                if (!paused || audioPlaying) { npPaused = paused; emitNowPlaying() }
+            },
             onSenderInfoChanged = { name, type ->
                 if (name.isNotBlank()) npSenderName = name
                 npSenderDeviceType = type
