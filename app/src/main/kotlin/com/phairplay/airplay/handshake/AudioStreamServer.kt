@@ -67,8 +67,6 @@ class AudioStreamServer(
      * paused track. The stream itself is unambiguous: paused senders stop transmitting.
      */
     val onAudioIdle: (Boolean) -> Unit = {},
-    /** Fired when a packet arrives from the network — the only reliable "still playing" signal. */
-    val onPacketReceived: () -> Unit = {},
 ) {
     private val key = SecretKeySpec(MirrorCrypto.audioKey(aesKey, ecdhSecret), "AES")
     private val iv = IvParameterSpec(aesIv.copyOf(16))
@@ -222,7 +220,6 @@ class AudioStreamServer(
                     continue
                 }
                 if (audioIdle) { audioIdle = false; onAudioIdle(false) }
-                onPacketReceived()
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")

@@ -291,11 +291,9 @@ class AirPlayReceiver(
             rememberPinPairing = rememberPinPairing,
             pairingStore = pairingStore,
             onShowPin = { pin -> onPinChanged(pin) },
-            onPlaybackPaused = { paused ->
-                // Senders FLUSH once at session start to clear the buffer, before a single packet
-                // has played. Treating that as a pause froze the progress row at 0:00 immediately.
-                if (!paused || audioPlaying) { npPaused = paused; emitNowPlaying() }
-            },
+            // FLUSH pauses, RECORD resumes — the two RTSP verbs the spec defines for exactly this.
+            // The session-start FLUSH is harmless because RECORD follows it immediately.
+            onPlaybackPaused = { paused -> npPaused = paused; emitNowPlaying() },
             onSenderInfoChanged = { name, type ->
                 if (name.isNotBlank()) npSenderName = name
                 npSenderDeviceType = type
@@ -531,10 +529,10 @@ class AirPlayReceiver(
             onEnergy = { e -> onEnergyChanged(e) },
             // Apple Music never sends RTSP PAUSE, so a stopped stream is the only reliable
             // pause signal — without it the progress bar ran on through a paused track.
-            // Resume must key off packets ARRIVING, not PCM decoding: after a pause the decoder
-            // keeps draining seconds of queued audio, which kept clearing the paused flag.
-            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() },
-            onPacketReceived = { if (npPaused) { npPaused = false; emitNowPlaying() } })
+            // Pause state comes only from RTSP FLUSH/RECORD. Senders keep the audio stream
+            // flowing through a pause, so nothing derived from packets or decoded PCM can tell
+            // the two apart — every such detector here ended up un-pausing immediately.
+            onAudioIdle = {})
             .also { audioServer = it; it.start(scope) }
         audioPlaying = true
         emitNowPlaying()
