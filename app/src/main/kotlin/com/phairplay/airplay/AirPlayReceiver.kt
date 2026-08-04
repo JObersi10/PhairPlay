@@ -528,7 +528,14 @@ class AirPlayReceiver(
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
             extraDelayMs = audioDelayMs.toLong(),
-            onEnergy = { e -> onEnergyChanged(e) },
+            onEnergy = { e ->
+                // Decoded audio is the ground truth for "playing". FLUSH sets paused without the
+                // stream ever going idle, so the idle transition can't clear it and every other
+                // resume signal (RECORD, advancing progress) is sender-dependent. If PCM is coming
+                // out of the decoder, we are not paused.
+                if (npPaused) { npPaused = false; emitNowPlaying() }
+                onEnergyChanged(e)
+            },
             // Apple Music never sends RTSP PAUSE, so a stopped stream is the only reliable
             // pause signal — without it the progress bar ran on through a paused track.
             onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })  // resume: audio flowing again
