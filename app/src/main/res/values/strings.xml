@@ -204,4 +204,10 @@
     <string name="setting_quit">Quit PhairPlay</string>
     <string name="setting_quit_subtitle">Stops all receivers and closes the app</string>
     <string name="setting_quit_confirm">Stop receiving and close PhairPlay? Senders won\'t see this TV until you open it again.</string>
+    <!-- Formatted UI strings. Placeholders rather than concatenation so they can be translated
+         and so right-to-left locales can reorder them. -->
+    <string name="time_remaining_format">-%1$s</string>
+    <string name="audio_from_sender">Audio from %1$s</string>
+    <string name="onboarding_step">STEP %1$d OF %2$d</string>
+    <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  Tail: http://%2$s:%4$s</string>
 </resources>

@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <base-config cleartextTrafficPermitted="true"/>
+<network-security-config xmlns:tools="http://schemas.android.com/tools">
+    <!--
+        Cleartext is not a shortcut here, it is the protocols.
+
+        AirPlay RTSP, RAOP, DLNA/UPnP (SSDP + SOAP) and Miracast are all defined over plain HTTP on
+        the local network, and senders address this device by link-local IP, for which no
+        certificate can exist. There is nothing to encrypt against and nothing to validate.
+        AirPlay's own payload encryption (fp-setup, pair-verify, AES) is unaffected by this setting.
+    -->
+    <base-config cleartextTrafficPermitted="true" tools:ignore="InsecureBaseConfiguration" />
 </network-security-config>

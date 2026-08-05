@@ -22,6 +22,12 @@ class VideoDecoder(outputSurface: Any?) {
 
     fun initialize(sps: ByteArray, pps: ByteArray, width: Int, height: Int) {}
     fun decodeNalUnit(nalUnit: ByteArray, presentationTimeUs: Long = 0L) {}
+    /**
+     * Matches the real decoder's in-place surface swap. Returns false so any caller takes the
+     * "rebuild the decoder" branch, which is the path with no Android dependencies.
+     */
+    fun setOutputSurface(surface: Any?): Boolean = false
+
     fun release() {}
 
     companion object {

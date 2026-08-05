@@ -28,6 +28,7 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.appcompat.content.res.AppCompatResources
 import com.phairplay.R
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.airplay.SenderDeviceType
@@ -138,7 +139,8 @@ class NowPlayingScreen @JvmOverloads constructor(
                 timeElapsed.text = formatTime(clamped / 1000.0)
                 if (durationMs > 0L) {
                     progressBar.setValue(((clamped.toFloat() / durationMs) * 10000).toInt())
-                    timeRemaining.text = "-${formatTime((durationMs - clamped) / 1000.0)}"
+                    timeRemaining.text = context.getString(
+                        R.string.time_remaining_format, formatTime((durationMs - clamped) / 1000.0))
                 }
             }
             handler.postDelayed(this, 250)
@@ -595,7 +597,7 @@ class NowPlayingScreen @JvmOverloads constructor(
                 SenderDeviceType.MAC     -> "Unknown Mac"
                 SenderDeviceType.UNKNOWN -> "Unknown iPhone"
             } else info.senderName
-            pillLabel.text = "Audio from $deviceName"
+            pillLabel.text = context.getString(R.string.audio_from_sender, deviceName)
         }
 
         updateInfoPanel(info)
@@ -681,7 +683,8 @@ class NowPlayingScreen @JvmOverloads constructor(
             // Fill the same square the album art occupies, with the glyph inset. Handing the
             // ImageView a bare icon let CENTER_CROP scale the glyph to the full frame, which read
             // as a round blob rather than a cover-shaped placeholder.
-            val glyph = (context.getDrawable(R.drawable.ic_airplay) ?: ColorDrawable(Color.TRANSPARENT))
+            val glyph = (AppCompatResources.getDrawable(context, R.drawable.ic_airplay)
+                ?: ColorDrawable(Color.TRANSPARENT))
                 .mutate().apply { setTint(Color.parseColor("#66FFFFFF")) }
             LayerDrawable(arrayOf(ColorDrawable(Color.parseColor("#1AFFFFFF")), glyph)).apply {
                 setLayerInset(1, dp(80), dp(80), dp(80), dp(80))

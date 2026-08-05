@@ -56,7 +56,15 @@ sourceSets {
                 // VideoDecoder is shadowed by src/stubs/VideoDecoder.kt which has no
                 // MediaCodec/Surface dependencies but exposes the companion-object
                 // members (parseSpsResolution, SpsBitReader) needed by VideoDecoderSpsTest.
-                "**/airplay/VideoDecoder.kt"
+                "**/airplay/VideoDecoder.kt",
+                // SharedMediaPlayer is built on ExoPlayer (androidx.media3), which ships as AARs
+                // that cannot be resolved without AGP. Shadowed by src/stubs/SharedMediaPlayer.kt
+                // so DlnaServer — which owns one — still compiles for the protocol tests.
+                "**/media/SharedMediaPlayer.kt",
+                // AirPlayVideoPlayer is ExoPlayer-based for the same reason; shadowed by
+                // src/stubs/AirPlayVideoPlayer.kt, which also carries the PlaybackInfo data class
+                // that the RTSP tests read.
+                "**/airplay/AirPlayVideoPlayer.kt"
             )
         }
     }

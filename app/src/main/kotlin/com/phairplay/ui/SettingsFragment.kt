@@ -170,7 +170,9 @@ class SettingsFragment : Fragment() {
         val ip = getWifiIp() ?: return
         val port = com.phairplay.diagnostic.DiagnosticServer.PORT
         val tailPort = com.phairplay.diagnostic.DiagnosticServer.TAIL_PORT
-        textVersionValue.text = "${BuildConfig.VERSION_NAME}\nLogs: http://$ip:$port  Tail: http://$ip:$tailPort"
+        textVersionValue.text =
+            getString(R.string.settings_version_logs,
+                BuildConfig.VERSION_NAME, ip, port.toString(), tailPort.toString())
     }
 
     private fun getWifiIp(): String? {

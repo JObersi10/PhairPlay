@@ -26,6 +26,15 @@ class DynamicBackground @JvmOverloads constructor(
     }
     private val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    // ── Per-frame scratch, allocated once ────────────────────────────────────
+    // onDraw runs ~60x/sec; anything new()'d in there is pure garbage-collector pressure.
+    private val blobMix = FloatArray(4)
+    private val blobColors = IntArray(4)
+    private var textGrad: RadialGradient? = null
+    private var textGradX = Float.NaN
+    private var textGradY = Float.NaN
+    private var textGradR = Float.NaN
+
     // Six palette colours; four blobs each lerp between two of them so the backdrop keeps
     // shifting even on a paused track. Cross-faded on song change.
     private val colors = IntArray(PALETTE_SIZE) { Color.parseColor(DEFAULTS[it % DEFAULTS.size]) }
@@ -117,11 +126,14 @@ class DynamicBackground @JvmOverloads constructor(
 
         // Each blob rides between two palette entries, driven by a drift float, so four blobs
         // express six colours and keep "vibing" without any extra animators.
-        val fr = floatArrayOf(a3, 1f - a2, a1, 1f - a3)
-        val cs = IntArray(4) { i ->
+        // Reused rather than reallocated: this runs on every frame, and two fresh arrays per draw
+        // is exactly the garbage that shows up as stutter on a low-end Fire TV.
+        blobMix[0] = a3; blobMix[1] = 1f - a2; blobMix[2] = a1; blobMix[3] = 1f - a3
+        val cs = blobColors
+        for (i in 0 until 4) {
             val c1 = blend(colors[(i * 2) % PALETTE_SIZE], targets[(i * 2) % PALETTE_SIZE], f)
             val c2 = blend(colors[(i * 2 + 1) % PALETTE_SIZE], targets[(i * 2 + 1) % PALETTE_SIZE], f)
-            blend(c1, c2, fr[i])
+            cs[i] = blend(c1, c2, blobMix[i])
         }
         blob(canvas, cx0, cy0, r, cs[0], beatAlpha)
         blob(canvas, cx1, cy1, r, cs[1], beatAlpha)
@@ -135,10 +147,16 @@ class DynamicBackground @JvmOverloads constructor(
         // the title/artist/album to stay legible without muting the rest of the backdrop.
         val fx = textFocusX; val fy = textFocusY; val fr2 = textFocusRadius
         if (fr2 > 0f) {
-            val textGrad = RadialGradient(fx * w, fy * h, fr2 * maxOf(w, h),
-                intArrayOf(TEXT_DARKEN_ARGB, 0x00000000), floatArrayOf(0f, 1f), Shader.TileMode.CLAMP)
+            // Rebuilt only when its geometry actually changes; RadialGradient allocates natively
+            // and this used to happen on every single frame.
+            val radius = fr2 * maxOf(w, h)
+            if (textGrad == null || textGradX != fx * w || textGradY != fy * h || textGradR != radius) {
+                textGradX = fx * w; textGradY = fy * h; textGradR = radius
+                textGrad = RadialGradient(textGradX, textGradY, radius,
+                    TEXT_GRAD_COLORS, TEXT_GRAD_STOPS, Shader.TileMode.CLAMP)
+            }
             clearPaint.shader = textGrad
-            canvas.drawCircle(fx * w, fy * h, fr2 * maxOf(w, h), clearPaint)
+            canvas.drawCircle(textGradX, textGradY, radius, clearPaint)
             clearPaint.shader = null
         }
     }
@@ -206,6 +224,7 @@ class DynamicBackground @JvmOverloads constructor(
     private var textFocusRadius = 0f
 
     companion object {
+
         private const val PALETTE_SIZE = 6
 
         /** Vividness push. Do not raise VALUE_CEILING past ~0.85 — that is where text starts to lose. */
@@ -218,6 +237,10 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** Darkness directly under the text block; the gradient fades to nothing from there. */
         private const val TEXT_DARKEN_ARGB = 0x8C000000.toInt()
+
+        /** Colours and stops for the text scrim. Constant, so they are shared, not rebuilt per frame. */
+        private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
+        private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 
         private val DEFAULTS = arrayOf("#1a1a2e", "#16213e", "#0f3460", "#220033", "#2a1a3e", "#0d2b4e")
     }
