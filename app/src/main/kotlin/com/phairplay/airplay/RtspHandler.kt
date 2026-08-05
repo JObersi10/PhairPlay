@@ -363,6 +363,7 @@ open class RtspHandler(
         "/fp-setup"    -> handleFpSetup(request)
         "/feedback"    -> handleFeedback(request)
         "/audioMode"   -> RtspResponse(200, "OK", protocol = request.responseProtocol())
+        "/reverse"     -> handleReverse(request)
         // AirPlay video URL mode (non-mirroring): play a URL + drive transport.
         "/play"        -> handleVideoPlay(request)
         "/rate"        -> handleVideoRate(request)
@@ -427,6 +428,33 @@ open class RtspHandler(
         val info = onPlaybackInfo()
         val body = "duration: %.6f\r\nposition: %.6f\r\n".format(info?.durationSec ?: 0.0, info?.positionSec ?: 0.0)
         return RtspResponse(200, "OK", body = body, contentType = "text/parameters", protocol = request.responseProtocol())
+    }
+
+    /**
+     * POST /reverse — the sender's event channel for AirPlay video.
+     *
+     * Before it will play a URL, a video sender asks to turn this socket around: it sends
+     * `Upgrade: PTTH/1.0` and expects `101 Switching Protocols`, after which the *receiver* may push
+     * unsolicited events (playback state changes) back down the same connection. It is a plain HTTP
+     * upgrade handshake, backwards.
+     *
+     * We answer the upgrade and then never push anything, which is legitimate — the sender polls
+     * `GET /playback-info` regardless, and that is where it actually reads our state from. What is
+     * not legitimate is the 501 this used to fall through to: senders treat a refused event channel
+     * as a receiver that cannot do video at all and abandon the whole attempt, which is what a
+     * generic "something went wrong" in the sending app looks like from the outside.
+     */
+    private fun handleReverse(request: RtspRequest): RtspResponse {
+        // Headers keep the casing the sender used, and this one is not consistently cased across
+        // iOS versions — match it without caring.
+        val purpose = request.headers.entries
+            .firstOrNull { it.key.equals("X-Apple-Purpose", ignoreCase = true) }?.value ?: "unknown"
+        Logger.i("POST /reverse — event channel requested (purpose=$purpose)")
+        return RtspResponse(
+            101, "Switching Protocols",
+            protocol = request.responseProtocol(),
+            headers = mapOf("Upgrade" to "PTTH/1.0", "Connection" to "Upgrade")
+        )
     }
 
     /** POST /stop — stop URL playback. */

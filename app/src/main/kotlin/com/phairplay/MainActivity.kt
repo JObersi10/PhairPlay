@@ -25,6 +25,7 @@ import com.phairplay.service.PhairPlayService
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
 import com.phairplay.service.ServiceController
+import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
@@ -517,26 +518,47 @@ class MainActivity : AppCompatActivity() {
             return true
         }
 
-        // Video sessions (mirroring and AirPlay URL video) get the on-screen bar. Audio sessions
-        // fall through to the DACP remote-control routing below, which is their own control scheme.
+        // ─── Video sessions (screen mirroring and AirPlay URL video) ────────────────────────
+        //
+        // Split from audio deliberately. The two have different natural mappings: on a video the
+        // D-pad is for the on-screen bar, and the dedicated media keys drive the sender's
+        // transport. On audio the D-pad is free, so it gets the scrubbing.
         if (sessionMode == Mode.VIDEO && streamingContainer.visibility == View.VISIBLE) {
             if (mirrorControls.isShowing()) {
-                // Let the platform's focus search drive the buttons.
-                return super.onKeyDown(keyCode, event)
+                // The bar owns the D-pad while it is up — let focus search drive the buttons.
+                if (isNavigationKey(keyCode)) return super.onKeyDown(keyCode, event)
+            } else if (isNavigationKey(keyCode) ||
+                keyCode == android.view.KeyEvent.KEYCODE_MENU ||
+                keyCode == android.view.KeyEvent.KEYCODE_INFO
+            ) {
+                // Menu/Info are the other "show me what I can do here" keys on TV remotes.
+                mirrorControls.reveal()
+                return true
             }
-            when (keyCode) {
-                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
-                android.view.KeyEvent.KEYCODE_DPAD_UP,
-                android.view.KeyEvent.KEYCODE_DPAD_DOWN,
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
-                android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
-                android.view.KeyEvent.KEYCODE_ENTER,
-                android.view.KeyEvent.KEYCODE_MENU,
-                android.view.KeyEvent.KEYCODE_INFO -> {
-                    mirrorControls.reveal()
-                    return true
-                }
+
+            // Media keys keep working either way, so the remote can drive playback without
+            // bringing the bar up over the picture at all.
+            val videoCommand = when (keyCode) {
+                android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
+                android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
+                android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> DacpClient.CMD_PLAY_PAUSE
+                android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> DacpClient.CMD_NEXT
+                android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> DacpClient.CMD_PREV
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_FF) else null
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND ->
+                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_REW) else null
+                android.view.KeyEvent.KEYCODE_VOLUME_UP   -> DacpClient.CMD_VOLUME_UP
+                android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> DacpClient.CMD_VOLUME_DOWN
+                else -> null
             }
+            if (videoCommand != null) {
+                service?.sendAirPlayRemoteCommand(videoCommand)
+                return true
+            }
+            return super.onKeyDown(keyCode, event)
         }
 
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
@@ -551,6 +573,14 @@ class MainActivity : AppCompatActivity() {
                 if (nowPlayingScreen.visibility == View.VISIBLE) return nowPlayingScreen.toggleInfoPanel()
             }
 
+            // Audio mapping: D-pad left/right scrubs *within* the track, the dedicated media
+            // keys change track. The D-pad is the one control every TV remote has, and scrubbing
+            // is the thing you reach for most while listening — so it gets the good buttons.
+            //
+            // DACP has no "seek by N seconds": beginrew/beginff start a continuous seek that runs
+            // until playresume stops it. Holding the key therefore scrubs and releasing it plays
+            // on (see onKeyUp), while a quick tap lands as a short nudge. That is also why the
+            // release is what resumes, rather than a second press.
             val command = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
@@ -558,22 +588,24 @@ class MainActivity : AppCompatActivity() {
                 android.view.KeyEvent.KEYCODE_DPAD_CENTER -> {
                     if (isSeekActive) {
                         isSeekActive = false
-                        com.phairplay.airplay.DacpClient.CMD_PLAY_RESUME
+                        DacpClient.CMD_PLAY_RESUME
                     } else {
                         nowPlayingScreen.togglePause()
-                        com.phairplay.airplay.DacpClient.CMD_PLAY_PAUSE
+                        DacpClient.CMD_PLAY_PAUSE
                     }
                 }
                 android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
-                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> com.phairplay.airplay.DacpClient.CMD_NEXT
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> DacpClient.CMD_NEXT
                 android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD,
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> com.phairplay.airplay.DacpClient.CMD_PREV
-                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> if (event?.repeatCount == 0) { isSeekActive = true; com.phairplay.airplay.DacpClient.CMD_FF } else null
-                android.view.KeyEvent.KEYCODE_MEDIA_REWIND      -> if (event?.repeatCount == 0) { isSeekActive = true; com.phairplay.airplay.DacpClient.CMD_REW } else null
-                android.view.KeyEvent.KEYCODE_VOLUME_UP   -> com.phairplay.airplay.DacpClient.CMD_VOLUME_UP
-                android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> com.phairplay.airplay.DacpClient.CMD_VOLUME_DOWN
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> DacpClient.CMD_PREV
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_FF) else null
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND ->
+                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_REW) else null
+                android.view.KeyEvent.KEYCODE_VOLUME_UP   -> DacpClient.CMD_VOLUME_UP
+                android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> DacpClient.CMD_VOLUME_DOWN
                 else -> null
             }
             if (command != null) {
@@ -584,17 +616,27 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    /**
+     * Ends a hold-to-seek started in [onKeyDown]. DACP seeks run until they are told to stop, so
+     * without this a single tap of D-pad right would scrub to the end of the track.
+     */
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
-        if (overlayActive) {
-            val command: String? = null
-            if (command != null) {
-                service?.sendAirPlayRemoteCommand(command)
-                return true
-            }
+        if (isSeekActive && keyCode in SEEK_KEYS) {
+            isSeekActive = false
+            service?.sendAirPlayRemoteCommand(DacpClient.CMD_PLAY_RESUME)
+            return true
         }
         return super.onKeyUp(keyCode, event)
     }
+
+    /** Marks a seek as running so [onKeyUp] knows to stop it, and returns the command to send. */
+    private fun beginSeek(command: String): String {
+        isSeekActive = true
+        return command
+    }
+
+    /** D-pad directions and OK — the keys the on-screen controls consume during a video session. */
+    private fun isNavigationKey(keyCode: Int): Boolean = keyCode in NAVIGATION_KEYS
 
     /**
      * Pushes the user's screensaver preferences into [NowPlayingScreen]. Read here rather than in
@@ -686,6 +728,24 @@ class MainActivity : AppCompatActivity() {
         private const val BASE_LATENCY_MS = 250
 
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
+
+        /** Keys that reveal (and then drive) the on-screen controls during a video session. */
+        private val NAVIGATION_KEYS = setOf(
+            android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+            android.view.KeyEvent.KEYCODE_DPAD_UP,
+            android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+            android.view.KeyEvent.KEYCODE_ENTER,
+        )
+
+        /** Keys whose release ends a hold-to-seek. */
+        private val SEEK_KEYS = setOf(
+            android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+            android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+            android.view.KeyEvent.KEYCODE_MEDIA_REWIND,
+        )
         /** Set by PhairPlayService when it opens this Activity for an incoming sender. */
         const val EXTRA_OPENED_BY_SENDER = "com.phairplay.extra.OPENED_BY_SENDER"
     }

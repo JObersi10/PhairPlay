@@ -20,7 +20,7 @@ PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and 
 
 ## Current Status — v1.0.0-beta.1
 
-PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed beta release. Download the APK directly from the [GitHub Releases page](https://github.com/mazer666/PhairPlay/releases).
+PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed beta release. Download the APK directly from the [GitHub Releases page](https://github.com/JObersi10/PhairPlay/releases). CI publishes a rolling `latest-debug` release with both flavour APKs on every push to `main`.
 
 The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
 
@@ -95,7 +95,7 @@ never going to connect.
 
 ### Option A: Download a Release APK (easiest)
 
-Go to the [Releases page](https://github.com/mazer666/PhairPlay/releases) and download the APK for your device:
+Go to the [Releases page](https://github.com/JObersi10/PhairPlay/releases) and download the APK for your device:
 
 | APK | Device |
 |-----|--------|
@@ -114,7 +114,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 
 2. **Clone the repository**
    ```bash
-   git clone https://github.com/mazer666/PhairPlay.git
+   git clone https://github.com/JObersi10/PhairPlay.git
    cd PhairPlay
    ```
 

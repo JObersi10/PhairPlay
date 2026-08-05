@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Now Playing transport row instead — two control schemes on one screen would compete
 
 ### Changed
+- Remote key mapping now differs by session type. Video (mirroring, AirPlay video): D-pad reveals
+  the on-screen controls, and the dedicated media keys drive play/pause and previous/next. Audio:
+  D-pad left/right scrubs within the track — hold to seek, release to resume — and the media
+  previous/next keys change track. The D-pad is the one control every TV remote has, so on audio it
+  gets scrubbing, the thing you reach for most while listening
 - Miracast is now built only for the Google TV flavour. Fire OS keeps Wi-Fi Direct behind Amazon's
   own display stack, so senders found the receiver and then timed out; Fire TV builds no longer
   advertise it, no longer show its card or setting, and no longer ask for the runtime location
@@ -24,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The app's own UI no longer takes remote input while a session owns the screen. The overlay was
   drawn on top but the Home page underneath kept its focusable buttons, so during AirPlay audio the
   D-pad walked an invisible Home page and a click could stop the service behind the card
+- `POST /reverse` is answered with `101 Switching Protocols` instead of falling through to `501`.
+  Video senders open this event channel before they will play anything, and treat a refusal as a
+  receiver that cannot do video at all — which is what a generic "something went wrong" in the
+  sending app looks like from the outside
 - AirPlay video URL mode (`POST /play` — YouTube, Safari) now works. ExoPlayer was being driven
   straight from the RTSP socket thread, which it rejects outright, and the output surface does not
   exist yet at the moment `/play` arrives; playback is now marshalled to the main thread and the
