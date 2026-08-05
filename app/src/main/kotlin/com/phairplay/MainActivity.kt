@@ -1,6 +1,8 @@
 package com.phairplay
 
 import android.app.PictureInPictureParams
+import android.graphics.Rect
+import androidx.annotation.RequiresApi
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -221,15 +223,41 @@ class MainActivity : AppCompatActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        if (pipEnabled && currentVideoPlaying && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            runCatching {
-                enterPictureInPictureMode(
-                    PictureInPictureParams.Builder()
-                        .setAspectRatio(Rational(16, 9))
-                        .build()
-                )
-            }
+        // On API 31+ the system auto-enters PiP from setAutoEnterEnabled, so this path is only the
+        // fallback for older releases. Entering again on 31+ would animate twice.
+        if (pipEnabled && currentVideoPlaying &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+        ) {
+            runCatching { enterPictureInPictureMode(pipParams()) }
         }
+    }
+
+    /**
+     * PiP parameters for the video surface.
+     *
+     * `setAutoEnterEnabled` hands the transition to the system, which animates from the real video
+     * bounds instead of snapping — the jump-cut you get from calling `enterPictureInPictureMode`
+     * yourself on API 31+. `setSourceRectHint` tells it which bounds those are; without it the
+     * animation scales from the whole window and the video appears to leap.
+     */
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun pipParams(): PictureInPictureParams {
+        val builder = PictureInPictureParams.Builder().setAspectRatio(Rational(16, 9))
+        val bounds = Rect()
+        if (streamingScreen.getGlobalVisibleRect(bounds) && !bounds.isEmpty) {
+            builder.setSourceRectHint(bounds)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(pipEnabled && currentVideoPlaying)
+        }
+        return builder.build()
+    }
+
+    /** Re-publishes PiP params whenever the thing they describe changes. */
+    private fun refreshPipParams() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
+        runCatching { setPictureInPictureParams(pipParams()) }
     }
 
     @Deprecated("Deprecated in Java")
@@ -512,6 +540,7 @@ class MainActivity : AppCompatActivity() {
                 // Cached because onBackPressed is synchronous and can't await DataStore.
                 backAction = settings.backAction
                 pipEnabled = settings.pipEnabled
+                refreshPipParams()
                 nowPlayingScreen.setBeatPulse(settings.beatPulse)
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
                 // reflects what is coming out of the speakers rather than what has been received.
@@ -614,6 +643,7 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             svc.videoPlaying.collectLatest { playing ->
                 currentVideoPlaying = playing
+                refreshPipParams()
                 updateOverlay()
             }
         }

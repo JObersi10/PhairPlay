@@ -199,7 +199,7 @@ class OnboardingFragment : Fragment() {
         if (!isAdded) return
         itemsContainer.removeAllViews()
         prefRows.clear()
-        stepLabel.text = "STEP ${page + 1} OF $PAGE_COUNT"
+        stepLabel.text = getString(R.string.onboarding_step, page + 1, PAGE_COUNT)
 
         when (page) {
             PAGE_WELCOME -> {

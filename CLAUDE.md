@@ -164,6 +164,30 @@ happens" — that advances the AES-CTR keystream and corrupts every later frame.
   the lag and the invisible highlight. Repaint rows in place, and use a
   `StateListDrawable` with `state_focused` so TV focus is visible.
 
+## CI
+
+Three GitHub Actions jobs, all of which must stay green: `:test-runner:test` (JVM protocol tests),
+plus lint and a debug APK for each of the `firetv` and `googletv` flavors.
+
+- **`:test-runner` compiles `app/src/main` on a plain JVM**, without AGP, so anything in app code
+  that touches an AAR-only dependency (androidx.media3/ExoPlayer) or a real Android class breaks
+  it. The fix is a stub in `test-runner/src/stubs/` plus an `exclude` entry in
+  `test-runner/build.gradle.kts` — see `SharedMediaPlayer`, `AirPlayVideoPlayer`, `VideoDecoder`.
+  A stub must keep the real class's public surface, or the protocol tests stop compiling.
+- **`lint { warningsAsErrors = true }`**, so any new warning fails CI. Prefer fixing over adding to
+  the `disable` set; suppress only where the check genuinely does not apply, and say why.
+- **The `foojay-resolver-convention` plugin in `settings.gradle.kts` is load-bearing.**
+  `:test-runner` pins `jvmToolchain(17)`, and Gradle configures every module on every build, so on
+  a machine whose only JDK is Android Studio's bundled 21 even `:app:assembleFiretvDebug` failed.
+  The module had been commented out of `settings.gradle.kts` to work around that, which silently
+  meant CI ran a module local builds never compiled.
+
+Run the whole matrix before pushing:
+
+```bash
+./gradlew :test-runner:test :app:lintFiretvDebug :app:assembleFiretvDebug :app:lintGoogletvDebug :app:assembleGoogletvDebug
+```
+
 ## Testing
 
 `./gradlew app:testFiretvDebugUnitTest`. Both flavors must compile.

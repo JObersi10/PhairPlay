@@ -1,3 +1,8 @@
+> **Archived 2026-08-04.** Google Cast was removed from PhairPlay entirely. Port 8009 is held
+> permanently by `com.amazon.cast.sink` on Fire TV, and a receiver must answer Google's
+> `DeviceAuthMessage` with a certificate chain signed by a Google CA that an open-source
+> project cannot obtain. Kept for historical context only — none of the steps below apply.
+
 # Google Cast App ID
 
 PhairPlay cannot invent a Google Cast App ID locally. The ID is assigned by
