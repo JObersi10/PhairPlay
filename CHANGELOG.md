@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Now Playing backdrop rebuilt: palette-driven animated blobs that react to a bass-onset beat
+  detector, with a Beat Pulse strength setting (Calm / Normal / Strong / Insane)
+- Beat delay setting — shifts the beat animation without touching audio timing, for Bluetooth
+  speakers whose output latency `AudioTrack` cannot see
+- Audio delay setting (up to 3000 ms) for A/V trim
+- Debug HUD on the audio screen, and a diagnostic server on ports 8001/8002
+- OLED-shift screensaver for the Now Playing card
+
+### Changed
+- **Back is now one setting instead of two.** `BackAction` — stop the stream, go to the Fire TV home
+  screen, or exit PhairPlay — replaces the `backQuitsApp` and `backGoesHome` switches, which could
+  both be on at once and described two different questions. Existing preferences are migrated.
+- Playback position is derived from the receiver's own audio clock rather than extrapolated from
+  the sender's sparse progress pushes, so it no longer drifts seconds out
+
+### Fixed
+- Pause is detected correctly. A paused iOS sender keeps transmitting at full rate with its RTP
+  clock advancing; the packets are simply empty, which is why every timing-based detector failed
+- Back now ends the stream — `endSession` closed the RTSP socket but left the audio and mirror UDP
+  servers running
+- ALAC decoder crash (SIGSEGV) on malformed frames: Apple's reference bit reader over-reads past the
+  buffer, so decoding now happens from a padded copy
+- Stream-level TEARDOWN no longer ends the whole session, which had been killing iOS renegotiation
+- Audio buffer starvation that caused choppy playback at session start and when pressing Home
+- CI: `:test-runner` is back in `settings.gradle.kts` (the JDK 17 toolchain issue that caused it to
+  be commented out is fixed with the foojay resolver), ExoPlayer-based classes are stubbed for the
+  AGP-free JVM build, and all lint errors are resolved
+
+### Removed
+- Google Cast, entirely — port 8009 is held by `com.amazon.cast.sink` on Fire TV and the
+  `DeviceAuthMessage` handshake needs a Google-CA-signed certificate chain that cannot be obtained
+
 ---
 
 ## [1.0.0-beta.1] - 2026-06-14
