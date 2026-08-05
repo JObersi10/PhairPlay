@@ -24,8 +24,13 @@ PhairPlay's AirPlay 2 receiver is fully implemented and available as a signed be
 
 The AirPlay 2 stack is complete end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
 
-DLNA/UPnP MediaRenderer works, including GENA eventing. Miracast advertises and implements its RTSP
-control plane; MPEG-TS media decode is not done. Google Cast has been **removed** — see below.
+DLNA/UPnP MediaRenderer works, including GENA eventing. Google Cast has been **removed** — see below.
+
+Miracast is now **Google TV only**. It advertises and implements its RTSP control plane there, but
+MPEG-TS media decode is still not done. It is compiled out of Fire TV builds entirely: Fire OS keeps
+Wi-Fi Direct behind Amazon's own display stack, so a sender would find the receiver and then time
+out — and offering it cost a runtime location prompt on Android 12 and below for a feature that was
+never going to connect.
 
 ## Features
 
@@ -35,7 +40,9 @@ control plane; MPEG-TS media decode is not done. Google Cast has been **removed*
 - HomeKit-style pairing (Ed25519/X25519) and legacy SRP PIN pairing
 - Mirroring audio: AAC-ELD, AAC-LC, ALAC — with independent A/V start/stop
 - System audio streaming (ALAC, unencrypted) — reliable path for app audio
-- AirPlay video URL mode (`/play` content) + transport controls (play/pause/scrub)
+- AirPlay video URL mode (`/play` content) + transport controls (play/pause/scrub) — the TV fetches
+  and plays the stream itself, so AirPlaying from YouTube or Safari arrives at source quality
+  instead of as a re-encode of the phone's screen
 - Now-playing metadata (DMAP) with album artwork overlay
 - DACP reverse remote — TV remote controls the sender's playback
 - NTP timing and UDP audio retransmit (packet-loss recovery)
@@ -47,7 +54,7 @@ control plane; MPEG-TS media decode is not done. Google Cast has been **removed*
 - Mirror audio toggle and PIN-auth toggle in Settings
 - Works on Google TV (Android 10+) and Fire TV (Android 7+)
 - DLNA/UPnP MediaRenderer (AVTransport, RenderingControl, ConnectionManager) with GENA eventing
-- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane
+- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane (Google TV builds only)
 - Zero ads, zero analytics, zero internet required
 - Open source — Apache 2.0 license
 
@@ -58,6 +65,8 @@ control plane; MPEG-TS media decode is not done. Google Cast has been **removed*
 - **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
 - **Cloud/remote streaming** — local network only
 - **Miracast media playback** — control plane is ready; MPEG-TS decode is not implemented
+- **Miracast on Fire TV** — compiled out; Fire OS does not expose a Wi-Fi Direct stack that can
+  complete a WFD session
 - **Google Cast** — removed, and not coming back. Port 8009 is permanently held by
   `com.amazon.cast.sink` on Fire TV, and a receiver must answer Google's `DeviceAuthMessage` with a
   certificate chain signed by a Google CA that cannot be obtained for an open-source project.
@@ -186,7 +195,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 - **Apple Music in-app audio is not decryptable.** macOS protects it with FairPlay on every AirPlay path. Route the Mac's system audio output instead (works fine).
 - **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
 - **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
-- **Miracast** — Wi-Fi Direct and RTSP control plane work; MPEG-TS media decode is future work.
+- **Miracast** — Google TV builds only, and even there the RTSP control plane works but MPEG-TS media decode is future work. Fire TV builds omit it.
 - If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
 - On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
 - **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.

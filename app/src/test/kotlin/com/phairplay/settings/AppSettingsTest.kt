@@ -1,5 +1,6 @@
 package com.phairplay.settings
 
+import com.phairplay.DeviceFeatures
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -94,14 +95,19 @@ class AppSettingsTest {
         assertTrue(settings.anyProtocolEnabled)
     }
 
+    /**
+     * Miracast only counts where the flavour can actually run it. On Fire TV the preference can
+     * still be true — carried over from a Google TV install or an older build — but the receiver is
+     * compiled out, so a "Miracast only" configuration leaves the service with nothing to do.
+     */
     @Test
-    fun `anyProtocolEnabled is true when only Miracast is enabled`() {
+    fun `anyProtocolEnabled follows the flavour for a Miracast-only configuration`() {
         val settings = AppSettings(airPlayEnabled = false, miracastEnabled = true, dlnaEnabled = false)
-        assertTrue(settings.anyProtocolEnabled)
+        assertEquals(DeviceFeatures.MIRACAST_SUPPORTED, settings.anyProtocolEnabled)
     }
 
     @Test
-    fun `anyProtocolEnabled is true when only Cast is enabled`() {
+    fun `anyProtocolEnabled is true when only DLNA is enabled`() {
         val settings = AppSettings(airPlayEnabled = false, miracastEnabled = false, dlnaEnabled = true)
         assertTrue(settings.anyProtocolEnabled)
     }

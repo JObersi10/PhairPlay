@@ -20,6 +20,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import androidx.core.app.NotificationCompat
+import com.phairplay.DeviceFeatures
 import com.phairplay.MainActivity
 import com.phairplay.R
 import android.view.Surface
@@ -403,7 +404,9 @@ class PhairPlayService : Service() {
         updateNotification(isRunning = true)
 
         if (settings.airPlayEnabled)   startAirPlay(settings)
-        if (settings.miracastEnabled)  startMiracast()
+        // The stored preference can still be true from a Google TV install or an older build; the
+        // flavour constant is the authority on whether the hardware can finish a WFD session.
+        if (settings.miracastEnabled && DeviceFeatures.MIRACAST_SUPPORTED) startMiracast()
         if (settings.dlnaEnabled)      startDlna()
     }
 

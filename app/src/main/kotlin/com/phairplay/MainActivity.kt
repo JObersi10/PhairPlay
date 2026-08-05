@@ -29,6 +29,7 @@ import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.ui.HomeFragment
+import com.phairplay.ui.MirrorControls
 import com.phairplay.ui.OnboardingFragment
 import com.phairplay.ui.NowPlayingScreen
 import com.phairplay.ui.PhotoScreen
@@ -72,6 +73,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var photoScreen: PhotoScreen
     private lateinit var nowPlayingScreen: NowPlayingScreen
     private lateinit var pinScreen: PinScreen
+    private lateinit var mirrorControls: MirrorControls
 
     // Service binding — gives access to state flows for showing/hiding the streaming overlay
     private var service: PhairPlayService? = null
@@ -330,13 +332,46 @@ class MainActivity : AppCompatActivity() {
             it.onNextClick     = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_NEXT) }
         }
         pinScreen = PinScreen(this)
+        mirrorControls = MirrorControls(this).also {
+            it.onStopClick = {
+                Timber.d("Mirror controls: stop — ending session")
+                service?.endCurrentSession()
+            }
+            it.onPipClick = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    runCatching { enterPictureInPictureMode(pipParams()) }
+                        .onFailure { e -> Timber.w(e, "PiP from mirror controls failed") }
+                }
+            }
+        }
         streamingContainer.addView(streamingScreen)
         streamingContainer.addView(photoScreen)
         streamingContainer.addView(nowPlayingScreen)
         streamingContainer.addView(pinScreen)
+        // Added last so it draws over the video surface rather than under it.
+        streamingContainer.addView(mirrorControls)
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
+    }
+
+    /**
+     * Stops the app's own UI from taking input while a session owns the screen.
+     *
+     * WHY: the streaming overlay is only drawn on top — the HomeFragment underneath kept its
+     * focusable buttons, so during AirPlay audio the D-pad still walked an invisible Home page and
+     * a click could start or stop the service behind the now-playing card.
+     *
+     * BLOCK_DESCENDANTS is what actually does it. Setting `isFocusable = false` on the container
+     * alone does not stop focus reaching its children.
+     */
+    private fun setOverlayOwnsInput(owns: Boolean) {
+        contentContainer.descendantFocusability =
+            if (owns) FrameLayout.FOCUS_BLOCK_DESCENDANTS else FrameLayout.FOCUS_AFTER_DESCENDANTS
+        navItemHome.isFocusable = !owns
+        navItemSettings.isFocusable = !owns
+        // Swallow stray touches so nothing beneath the full-screen overlay is clickable either.
+        streamingContainer.isClickable = owns
     }
 
     /**
@@ -406,6 +441,9 @@ class MainActivity : AppCompatActivity() {
         streamingScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
+        // The bar stays hidden until the user asks for it; this only makes it available.
+        mirrorControls.setPipAvailable(pipEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+        setOverlayOwnsInput(true)
     }
 
     fun showPhotoScreen(photoFrame: PhotoFrame) {
@@ -416,6 +454,8 @@ class MainActivity : AppCompatActivity() {
             photoScreen.visibility = View.VISIBLE
             streamingContainer.visibility = View.VISIBLE
             streamingContainer.bringToFront()
+            mirrorControls.hideBar()
+            setOverlayOwnsInput(true)
         }
     }
 
@@ -428,6 +468,9 @@ class MainActivity : AppCompatActivity() {
         nowPlayingScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
+        // Audio sessions get NowPlayingScreen's own transport row, not the mirroring bar.
+        mirrorControls.hideBar()
+        setOverlayOwnsInput(true)
     }
 
     /**
@@ -447,6 +490,10 @@ class MainActivity : AppCompatActivity() {
         // path already taken when the app backgrounds.
         streamingScreen.visibility = View.GONE
         streamingContainer.visibility = View.GONE
+        mirrorControls.hideBar()
+        // Hand the app's own UI back its focus, or the user would be left on a Home page that
+        // ignores the remote.
+        setOverlayOwnsInput(false)
     }
 
     /** Returns the SurfaceView Surface for the VideoDecoder. */
@@ -462,10 +509,36 @@ class MainActivity : AppCompatActivity() {
         // OnBackPressedDispatcher, where a fragment or the overlay can swallow the event before the
         // Activity sees it — which is why both Back settings appeared to do nothing.
         if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
+            // Back closes the controls before it means anything else, matching how it already
+            // closes the now-playing info panel first.
+            if (mirrorControls.hideBar()) return true
             @Suppress("DEPRECATION")
             onBackPressed()
             return true
         }
+
+        // Video sessions (mirroring and AirPlay URL video) get the on-screen bar. Audio sessions
+        // fall through to the DACP remote-control routing below, which is their own control scheme.
+        if (sessionMode == Mode.VIDEO && streamingContainer.visibility == View.VISIBLE) {
+            if (mirrorControls.isShowing()) {
+                // Let the platform's focus search drive the buttons.
+                return super.onKeyDown(keyCode, event)
+            }
+            when (keyCode) {
+                android.view.KeyEvent.KEYCODE_DPAD_CENTER,
+                android.view.KeyEvent.KEYCODE_DPAD_UP,
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN,
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
+                android.view.KeyEvent.KEYCODE_ENTER,
+                android.view.KeyEvent.KEYCODE_MENU,
+                android.view.KeyEvent.KEYCODE_INFO -> {
+                    mirrorControls.reveal()
+                    return true
+                }
+            }
+        }
+
         val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
         if (overlayActive) {
             // Any remote press counts as presence — restart the Now Playing idle countdown.
@@ -558,14 +631,20 @@ class MainActivity : AppCompatActivity() {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             wanted += android.Manifest.permission.POST_NOTIFICATIONS
-            // The modern, location-free way to ask for Wi-Fi Direct. Only exists from API 33.
-            wanted += android.Manifest.permission.NEARBY_WIFI_DEVICES
-        } else {
-            // Below API 33 the Wi-Fi P2P APIs are gated on location instead. Miracast silently
-            // refuses to register its P2P service without one of the two, which is why the receiver
-            // logged "missing Wi-Fi Direct permission" on every start — the manifest declared them
-            // but nothing ever asked the user.
-            wanted += android.Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        // Wi-Fi Direct permissions are Miracast's alone. Asking for them on a build that never
+        // starts Miracast means a location prompt — the scariest one we show — bought nothing.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // The modern, location-free way to ask for Wi-Fi Direct. Only exists from API 33.
+                wanted += android.Manifest.permission.NEARBY_WIFI_DEVICES
+            } else {
+                // Below API 33 the Wi-Fi P2P APIs are gated on location instead. Miracast silently
+                // refuses to register its P2P service without one of the two, which is why the
+                // receiver logged "missing Wi-Fi Direct permission" on every start — the manifest
+                // declared them but nothing ever asked the user.
+                wanted += android.Manifest.permission.ACCESS_FINE_LOCATION
+            }
         }
 
         val missing = wanted.filter {
@@ -744,5 +823,7 @@ class MainActivity : AppCompatActivity() {
         pinScreen.visibility = View.VISIBLE
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
+        mirrorControls.hideBar()
+        setOverlayOwnsInput(true)
     }
 }

@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.Protocol
@@ -116,8 +117,14 @@ class HomeFragment : Fragment() {
      */
     private fun configureProtocolCards() {
         setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
-        setupCard(cardMiracast,  R.drawable.ic_miracast, R.string.protocol_miracast)
         setupCard(cardDlna,      R.drawable.ic_cast,     R.string.protocol_dlna)
+        // Fire TV cannot complete a Miracast session, so the card would sit on "Advertising" for
+        // ever and invite the user to try something that never connects. See DeviceFeatures.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast)
+        } else {
+            cardMiracast.visibility = View.GONE
+        }
     }
 
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {

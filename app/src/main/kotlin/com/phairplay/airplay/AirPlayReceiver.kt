@@ -580,6 +580,9 @@ class AirPlayReceiver(
      */
     private fun startUrlVideo(url: String, startFraction: Double) {
         onSenderNameChanged("AirPlay")
+        // Marks this as a video session, so emitNowPlaying() won't put the audio-only card over the
+        // picture if the sender also sends track metadata for what it handed us.
+        videoPlaying = true
         emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
         val player = urlVideoPlayer ?: AirPlayVideoPlayer(
             context = context,
@@ -594,6 +597,7 @@ class AirPlayReceiver(
     private fun stopUrlVideo() {
         urlVideoPlayer?.release()
         urlVideoPlayer = null
+        videoPlaying = false
         onStreamingStopped()
         Logger.i("AirPlay URL video stopped")
     }

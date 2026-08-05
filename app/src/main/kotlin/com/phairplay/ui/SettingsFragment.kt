@@ -15,6 +15,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import com.phairplay.BuildConfig
+import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.BackAction
@@ -151,7 +152,13 @@ class SettingsFragment : Fragment() {
     /** Sets all row labels and subtitles from string resources. */
     private fun setRowLabels() {
         configureToggleRow(rowAirPlay,      R.string.setting_airplay_enabled,    R.string.setting_airplay_subtitle)
-        configureToggleRow(rowMiracast,     R.string.setting_miracast_enabled,   R.string.setting_miracast_subtitle)
+        // Hidden rather than disabled on Fire TV: a greyed-out row still reads as "this device could
+        // do Miracast", and it cannot. See DeviceFeatures.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            configureToggleRow(rowMiracast, R.string.setting_miracast_enabled, R.string.setting_miracast_subtitle)
+        } else {
+            rowMiracast.visibility = View.GONE
+        }
         configureToggleRow(rowDlna,         R.string.setting_dlna_enabled,       R.string.setting_dlna_subtitle)
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)

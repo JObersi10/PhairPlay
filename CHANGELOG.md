@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- On-screen controls for video sessions (screen mirroring and AirPlay video): press the D-pad to
+  reveal Stop streaming and Picture-in-picture, auto-hiding after 4 seconds. Audio sessions keep
+  the Now Playing transport row instead — two control schemes on one screen would compete
+
+### Changed
+- Miracast is now built only for the Google TV flavour. Fire OS keeps Wi-Fi Direct behind Amazon's
+  own display stack, so senders found the receiver and then timed out; Fire TV builds no longer
+  advertise it, no longer show its card or setting, and no longer ask for the runtime location
+  permission that only Miracast needed on Android 12 and below
+
+### Fixed
+- The app's own UI no longer takes remote input while a session owns the screen. The overlay was
+  drawn on top but the Home page underneath kept its focusable buttons, so during AirPlay audio the
+  D-pad walked an invisible Home page and a click could stop the service behind the card
+- AirPlay video URL mode (`POST /play` — YouTube, Safari) now works. ExoPlayer was being driven
+  straight from the RTSP socket thread, which it rejects outright, and the output surface does not
+  exist yet at the moment `/play` arrives; playback is now marshalled to the main thread and the
+  surface attached as soon as the Activity produces one
+
+### Added
 - Now Playing backdrop rebuilt: palette-driven animated blobs that react to a bass-onset beat
   detector, with a Beat Pulse strength setting (Calm / Normal / Strong / Insane)
 - Beat delay setting — shifts the beat animation without touching audio timing, for Bluetooth

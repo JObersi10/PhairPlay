@@ -25,6 +25,7 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -218,11 +219,16 @@ class OnboardingFragment : Fragment() {
                         granted = hasPermission(Manifest.permission.POST_NOTIFICATIONS),
                     ) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ) }
                 }
-                addPermissionRow(
-                    R.string.onboarding_perm_location,
-                    R.string.onboarding_perm_location_why,
-                    granted = hasWifiDirectPermission(),
-                ) { requestPermissions(wifiDirectPermissions(), REQ) }
+                // Wi-Fi Direct exists here for Miracast and nothing else, so on a build that never
+                // starts Miracast this asks for location — the most alarming permission we show —
+                // in exchange for no capability at all. See DeviceFeatures.
+                if (DeviceFeatures.MIRACAST_SUPPORTED) {
+                    addPermissionRow(
+                        R.string.onboarding_perm_location,
+                        R.string.onboarding_perm_location_why,
+                        granted = hasWifiDirectPermission(),
+                    ) { requestPermissions(wifiDirectPermissions(), REQ) }
+                }
             }
             PAGE_OPTIONAL -> {
                 titleView.setText(R.string.onboarding_optional_title)
@@ -288,10 +294,13 @@ class OnboardingFragment : Fragment() {
             R.string.protocol_airplay, isCheckbox = true,
             isSelectedProvider = { draft?.airPlayEnabled == true },
         ) { updateDraft { it.copy(airPlayEnabled = !it.airPlayEnabled) } }
-        addChoiceRow(
-            R.string.protocol_miracast, isCheckbox = true,
-            isSelectedProvider = { draft?.miracastEnabled == true },
-        ) { updateDraft { it.copy(miracastEnabled = !it.miracastEnabled) } }
+        // Offered only where the hardware can actually complete a WFD session — see DeviceFeatures.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            addChoiceRow(
+                R.string.protocol_miracast, isCheckbox = true,
+                isSelectedProvider = { draft?.miracastEnabled == true },
+            ) { updateDraft { it.copy(miracastEnabled = !it.miracastEnabled) } }
+        }
         addChoiceRow(
             R.string.protocol_dlna, isCheckbox = true,
             isSelectedProvider = { draft?.dlnaEnabled == true },

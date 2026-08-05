@@ -1,5 +1,6 @@
 package com.phairplay.settings
 
+import com.phairplay.DeviceFeatures
 import com.phairplay.media.VolumeControlMode
 
 /**
@@ -190,7 +191,7 @@ data class AppSettings(
      * If all three are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || miracastEnabled || dlnaEnabled
+        get() = airPlayEnabled || (miracastEnabled && DeviceFeatures.MIRACAST_SUPPORTED) || dlnaEnabled
 
     companion object {
         /** The default settings instance used on first launch. */
