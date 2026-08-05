@@ -542,14 +542,15 @@ class MainActivity : AppCompatActivity() {
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
                 android.view.KeyEvent.KEYCODE_MEDIA_PLAY,
                 android.view.KeyEvent.KEYCODE_MEDIA_PAUSE -> DacpClient.CMD_PLAY_PAUSE
+                // Every media key on the remote skips. Fire TV remotes label these ⏪/⏩ and send
+                // REWIND/FAST_FORWARD, not PREVIOUS/NEXT — there is no separate track button — so
+                // both spellings have to mean skip or the physical buttons do the wrong thing.
                 android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> DacpClient.CMD_NEXT
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> DacpClient.CMD_NEXT
                 android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> DacpClient.CMD_PREV
-                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
-                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_FF) else null
-                android.view.KeyEvent.KEYCODE_MEDIA_REWIND ->
-                    if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_REW) else null
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD,
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> DacpClient.CMD_PREV
                 android.view.KeyEvent.KEYCODE_VOLUME_UP   -> DacpClient.CMD_VOLUME_UP
                 android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> DacpClient.CMD_VOLUME_DOWN
                 else -> null
@@ -594,15 +595,18 @@ class MainActivity : AppCompatActivity() {
                         DacpClient.CMD_PLAY_PAUSE
                     }
                 }
+                // Media keys skip tracks. Fire TV remotes label these ⏪/⏩ and send
+                // REWIND/FAST_FORWARD rather than PREVIOUS/NEXT, so both spellings mean skip —
+                // seeking lives on the D-pad, which is where it was asked for.
                 android.view.KeyEvent.KEYCODE_MEDIA_NEXT,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD -> DacpClient.CMD_NEXT
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD,
+                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> DacpClient.CMD_NEXT
                 android.view.KeyEvent.KEYCODE_MEDIA_PREVIOUS,
-                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD -> DacpClient.CMD_PREV
-                android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
-                android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+                android.view.KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD,
+                android.view.KeyEvent.KEYCODE_MEDIA_REWIND -> DacpClient.CMD_PREV
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT ->
                     if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_FF) else null
-                android.view.KeyEvent.KEYCODE_DPAD_LEFT,
-                android.view.KeyEvent.KEYCODE_MEDIA_REWIND ->
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT ->
                     if (event?.repeatCount == 0) beginSeek(DacpClient.CMD_REW) else null
                 android.view.KeyEvent.KEYCODE_VOLUME_UP   -> DacpClient.CMD_VOLUME_UP
                 android.view.KeyEvent.KEYCODE_VOLUME_DOWN -> DacpClient.CMD_VOLUME_DOWN
@@ -743,8 +747,6 @@ class MainActivity : AppCompatActivity() {
         private val SEEK_KEYS = setOf(
             android.view.KeyEvent.KEYCODE_DPAD_LEFT,
             android.view.KeyEvent.KEYCODE_DPAD_RIGHT,
-            android.view.KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
-            android.view.KeyEvent.KEYCODE_MEDIA_REWIND,
         )
         /** Set by PhairPlayService when it opens this Activity for an incoming sender. */
         const val EXTRA_OPENED_BY_SENDER = "com.phairplay.extra.OPENED_BY_SENDER"

@@ -19,7 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the on-screen controls, and the dedicated media keys drive play/pause and previous/next. Audio:
   D-pad left/right scrubs within the track — hold to seek, release to resume — and the media
   previous/next keys change track. The D-pad is the one control every TV remote has, so on audio it
-  gets scrubbing, the thing you reach for most while listening
+  gets scrubbing, the thing you reach for most while listening. Fire TV remotes label their media
+  keys ⏪/⏩ and send `MEDIA_REWIND`/`MEDIA_FAST_FORWARD` rather than `MEDIA_PREVIOUS`/`MEDIA_NEXT`
+  — there is no separate track button — so both spellings mean skip
 - Miracast is now built only for the Google TV flavour. Fire OS keeps Wi-Fi Direct behind Amazon's
   own display stack, so senders found the receiver and then timed out; Fire TV builds no longer
   advertise it, no longer show its card or setting, and no longer ask for the runtime location

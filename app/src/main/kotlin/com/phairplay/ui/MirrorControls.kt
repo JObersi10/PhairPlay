@@ -3,6 +3,7 @@ package com.phairplay.ui
 import android.content.Context
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
@@ -103,24 +104,51 @@ class MirrorControls @JvmOverloads constructor(
         Button(context).apply {
             setText(labelRes)
             isAllCaps = false
-            setTextColor(color(R.color.text_primary))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
             isFocusable = true
             isFocusableInTouchMode = true
             background = focusBackground()
             setPadding(dp(28), dp(12), dp(28), dp(12))
             setOnClickListener { onClick() }
-            // Any interaction with the bar restarts its countdown, so it can't vanish under a
-            // user who is still deciding.
-            setOnFocusChangeListener { _, hasFocus -> if (hasFocus) scheduleAutoHide() }
+            // A TV user cannot tell which button is selected from the background tint alone at
+            // couch distance, so focus also lifts the button and brightens its label.
+            setOnFocusChangeListener { v, hasFocus ->
+                (v as Button).setTextColor(
+                    color(if (hasFocus) R.color.text_on_accent else R.color.text_secondary)
+                )
+                v.animate().scaleX(if (hasFocus) FOCUS_SCALE else 1f)
+                    .scaleY(if (hasFocus) FOCUS_SCALE else 1f)
+                    .setDuration(FOCUS_ANIM_MS).start()
+                if (hasFocus) scheduleAutoHide()
+            }
+            setTextColor(color(R.color.text_secondary))
             (layoutParams as? LinearLayout.LayoutParams ?: LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
             ).also { layoutParams = it }).marginStart = dp(8)
         }
 
-    private fun focusBackground(): GradientDrawable = GradientDrawable().apply {
-        cornerRadius = dp(10).toFloat()
-        setColor(color(R.color.background_surface_elevated))
+    /**
+     * Focused / unfocused pill. Built in code rather than as a drawable resource so the corner
+     * radius and the dp padding above stay in one place.
+     *
+     * The unfocused fill is deliberately dark and semi-transparent: this sits over live video, and
+     * an opaque bar would block more of the picture than it needs to.
+     */
+    private fun focusBackground(): StateListDrawable {
+        val focused = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(color(R.color.accent_blue))
+        }
+        val normal = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(0xB32C2C2E.toInt())
+            setStroke(dp(1), 0x33FFFFFF)
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), focused)
+            addState(intArrayOf(android.R.attr.state_pressed), focused)
+            addState(intArrayOf(), normal)
+        }
     }
 
     /**
@@ -131,7 +159,9 @@ class MirrorControls @JvmOverloads constructor(
         val wasHidden = visibility != VISIBLE
         visibility = VISIBLE
         bringToFront()
-        if (wasHidden) stopButton.requestFocus()
+        // GONE views have no layout, so a requestFocus in the same frame as the reveal is
+        // dropped — which is what left the bar visible with nothing highlighted.
+        if (wasHidden) post { stopButton.requestFocus() }
         scheduleAutoHide()
         return wasHidden
     }
@@ -172,5 +202,9 @@ class MirrorControls @JvmOverloads constructor(
     private companion object {
         /** Long enough to read the two labels and pick one, short enough not to sit over a film. */
         const val AUTO_HIDE_MS = 4_000L
+
+        /** Focused buttons grow slightly — the standard Android TV affordance. */
+        const val FOCUS_SCALE = 1.08f
+        const val FOCUS_ANIM_MS = 120L
     }
 }
