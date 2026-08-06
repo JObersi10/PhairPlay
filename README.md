@@ -61,7 +61,12 @@ never going to connect.
 ## What PhairPlay Does NOT Do
 
 - **FairPlay DRM content** (Netflix, Disney+, Apple TV+) — Apple DRM; not decryptable by any open-source receiver
-- **Apple Music in-app audio** — protected on every AirPlay path; use system audio output instead
+- **macOS Music app audio (FairPlay v2)** — the Music app FairPlay-encrypts everything it sends over
+  AirPlay, including local library files, and our FairPlay **v2** key derivation produces a stream key
+  that does not decrypt: every ALAC frame fails and the decode-health guard mutes the output rather
+  than emitting static. This is *not* an Apple Music DRM limitation — a local file fails identically.
+  The FairPlay **v3** path used by screen mirroring and Safari is correct. Workaround: set the Mac's
+  system audio output to the TV instead of using Music's own AirPlay picker (unencrypted ALAC, works)
 - **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
 - **Cloud/remote streaming** — local network only
 - **Miracast media playback** — control plane is ready; MPEG-TS decode is not implemented
@@ -192,7 +197,7 @@ Then install it via ADB (see the Sideloading Guide below) or a sideloading app l
 ## Known Limitations
 
 - **Beta software** — the AirPlay 2 stack is complete but real-device validation with various macOS/iOS senders is ongoing. Please report issues.
-- **Apple Music in-app audio is not decryptable.** macOS protects it with FairPlay on every AirPlay path. Route the Mac's system audio output instead (works fine).
+- **The macOS Music app's own AirPlay is silent.** Music FairPlay-encrypts everything it sends, local files included, and our FairPlay v2 key derivation is wrong — so the audio decodes to nothing and is muted deliberately. Route the Mac's **system audio output** to the TV instead (works fine). Not a DRM limitation; a real bug on our side.
 - **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
 - **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
 - **Miracast** — Google TV builds only, and even there the RTSP control plane works but MPEG-TS media decode is future work. Fire TV builds omit it.
