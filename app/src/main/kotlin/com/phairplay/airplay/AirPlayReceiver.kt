@@ -386,7 +386,12 @@ class AirPlayReceiver(
                 emitNowPlaying()
             },
             onPlaybackPosition = { pos, dur ->
-                val changed = kotlin.math.abs(pos - npPositionSec) > 2.0 || dur != npDurationSec
+                // The sender is authoritative, so take its value and show it. There used to be a
+                // 2-second dead zone here, which is precisely wrong while seeking: the TV remote
+                // sends the sender fast-forwarding, our local clock keeps advancing at 1x from a
+                // now-stale anchor, and the correcting push was being swallowed for being close to
+                // the wrong number we were already showing.
+                val changed = displayedSecond(pos) != displayedSecond(npPositionSec) || dur != npDurationSec
                 npPositionSec = pos; npDurationSec = dur
                 if (changed) emitNowPlaying()
             },
@@ -862,6 +867,13 @@ class AirPlayReceiver(
      * position exact and self-correcting: it advances at precisely the rate samples leave the
      * speaker, and holds still during a pause without needing to be told.
      */
+    /**
+     * The whole second the UI renders for a position. Emitting on a change of *this* rather than on
+     * a raw delta keeps the counter moving every second without redrawing four times a second for
+     * digits nobody sees.
+     */
+    private fun displayedSecond(seconds: Double): Long = seconds.toLong()
+
     private fun startPositionTicker() {
         positionTicker?.cancel()
         positionTicker = scope.launch {
@@ -874,10 +886,13 @@ class AirPlayReceiver(
                 // A track change lands the anchor and the clock on different timelines for a moment;
                 // an impossible position is that, not a seek, so wait for the next progress push.
                 if (elapsed < 0 || (npDurationSec > 0 && elapsed > npDurationSec + 1)) continue
-                if (kotlin.math.abs(elapsed - npPositionSec) > 0.25) {
-                    npPositionSec = elapsed
-                    emitNowPlaying()
-                }
+                // Emit whenever the second the user can actually see changes. The old test was
+                // "moved more than 0.25s", which at normal speed is exactly one tick's worth of
+                // progress — so it sat on its own threshold and dropped updates unpredictably,
+                // making the counter stutter instead of counting.
+                val changed = displayedSecond(elapsed) != displayedSecond(npPositionSec)
+                npPositionSec = elapsed
+                if (changed) emitNowPlaying()
             }
         }
     }

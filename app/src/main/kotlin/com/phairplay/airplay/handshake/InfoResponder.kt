@@ -78,5 +78,5 @@ object InfoResponder {
     private const val STATUS_FLAG_PIN_REQUIRED = 0x8L
 
     private const val MODEL = "AppleTV6,2"
-    private const val SOURCE_VERSION = "377.40.00"
+    private const val SOURCE_VERSION = AirPlayVersion.ADVERTISED
 }

@@ -1,5 +1,6 @@
 package com.phairplay.airplay
 
+import com.phairplay.airplay.handshake.AirPlayVersion
 import com.phairplay.airplay.handshake.FairPlay
 import com.phairplay.airplay.handshake.InfoResponder
 import com.phairplay.airplay.handshake.MediaRemote
@@ -383,7 +384,19 @@ open class RtspHandler(
 
     /** Routes AirPlay 2 GET requests by URI path. */
     private fun routeGet(request: RtspRequest): RtspResponse = when (request.uri.substringBefore("?")) {
-        "/info"          -> handleInfo(request)
+        // Whether this carries DACP-ID decides whether the TV remote can control the sender at all,
+        // and the sender makes that call once, here, from the version we advertise. Log it either
+        // way — a missing header is the finding, and it is invisible unless named.
+        "/info"          -> handleInfo(request).also {
+            if (!loggedInfoRemoteAuthority) {
+                loggedInfoRemoteAuthority = true
+                val id = request.headers["DACP-ID"]
+                Logger.i(
+                    if (id != null) "GET /info granted remote authority: DACP-ID=$id (srcvers ${AirPlayVersion.ADVERTISED})"
+                    else "GET /info WITHOUT DACP-ID — sender withheld remote authority (srcvers ${AirPlayVersion.ADVERTISED})"
+                )
+            }
+        }
         "/playback-info" -> handlePlaybackInfo(request)
         "/scrub"         -> handleScrubGet(request)
         "/server-info"   -> handleServerInfo(request)
@@ -483,6 +496,9 @@ open class RtspHandler(
      */
     /** One dump per session — the list does not change while a sender is connected. */
     private var loggedSupportedCommands = false
+
+    /** One line per session about whether the sender granted DACP reverse-control authority. */
+    private var loggedInfoRemoteAuthority = false
 
     /**
      * Renders a decoded plist value as readable text. Deliberately structural rather than a raw
@@ -652,7 +668,7 @@ open class RtspHandler(
             "features" to 0x1E5A7FFFF7L,
             "model" to "AppleTV6,2",
             "protovers" to "1.1",
-            "srcvers" to "377.40.00",
+            "srcvers" to AirPlayVersion.ADVERTISED,
         )
         return RtspResponse(
             200, "OK",

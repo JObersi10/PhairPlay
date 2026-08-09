@@ -321,6 +321,6 @@ class MdnsService(
         private const val AIRPLAY_MODEL = "AppleTV6,2"
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
-        private const val AIRPLAY_SERVER_VERSION = "377.40.00"
+        private const val AIRPLAY_SERVER_VERSION = com.phairplay.airplay.handshake.AirPlayVersion.ADVERTISED
     }
 }
