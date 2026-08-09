@@ -305,8 +305,16 @@ class AirPlayReceiver(
                 "params" to mapOf("mrCommandFromReceiver" to MediaRemote.encodeSendCommand(command)),
             )
         )
+        val host = eventClientSocket?.inetAddress?.hostAddress?.substringBefore('%')
         val head = buildString {
-            append("POST /command RTSP/1.0\r\n")
+            // HTTP/1.1, not RTSP/1.0. The first attempt used RTSP/1.0 to match the rest of our
+            // session and drew no reply of any kind, not even an error — and a frame the far end
+            // cannot parse as a request is the best explanation for total silence. `/command` is
+            // an HTTP-style POST rather than an RTSP method, so the protocol token is the cheapest
+            // candidate to flip. `Host` goes with it: an HTTP/1.1 request without one is malformed,
+            // which would produce exactly the same silence for a second reason.
+            append("POST /command HTTP/1.1\r\n")
+            append("Host: ${host ?: "localhost"}\r\n")
             append("CSeq: ${eventCseq.getAndIncrement()}\r\n")
             append("Content-Type: application/x-apple-binary-plist\r\n")
             append("Content-Length: ${body.size}\r\n\r\n")

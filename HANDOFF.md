@@ -78,12 +78,19 @@ See `CLAUDE.md` "Open bugs" for the full diagnosis of each.
    error is itself a clue: it suggests the sender is not parsing our frames as requests, so the
    fault is more likely the framing or the transport than the key name.
 
-   Three candidates remain, in order of cost: the request line may need to be `HTTP/1.1` rather
-   than `RTSP/1.0`; the envelope key may be something we have not guessed; or the real path may be
-   a type-130 data stream (`controlType: 2`), which pyatv uses for MRP — but that stream is opened
-   by the *controller*, and the iPhone never opens one to us, so a receiver may have no way to ask
-   for it. Nothing in any public source documents this direction; GitHub code search for
-   `mrCommandFromReceiver` returns zero hits.
+   `HTTP/1.1` (with a `Host` header) in place of `RTSP/1.0` was tried and changed nothing — still
+   not one byte back. Worth recording *why* that matters: across a whole session the iPhone opens
+   the event channel and then **never writes to it either**. Traffic in both directions is zero.
+   That points away from a bad envelope and towards the event channel simply not being the
+   transport for this: it looks like a channel the sender establishes for liveness and receiver
+   notifications, not a request path it will service.
+
+   That leaves the type-130 data stream (`controlType: 2`), which is what pyatv uses for MRP. The
+   obstacle is direction: that stream is opened by the *controller*, and the iPhone never opens one
+   to us, so it is not yet clear a receiver can ask for one at all. Nothing in any public source
+   documents this direction; GitHub code search for `mrCommandFromReceiver` returns zero hits, and
+   no open-source receiver (airplay2-receiver included) implements it — they all just acknowledge
+   `/command` and stop.
 
    Note the entry list also decodes some implausible command numbers (`Command25021`). The values
    we care about are read correctly, but the decoder likely desynchronises on a few of the larger
