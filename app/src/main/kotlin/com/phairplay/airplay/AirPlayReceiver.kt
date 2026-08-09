@@ -694,8 +694,10 @@ class AirPlayReceiver(
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         return MirrorStreamServer(
             aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight,
-            // A sender that goes quiet without a TEARDOWN (phone screen off) used to leave the
-            // session "live" with its last frame frozen on the TV. Tear it down ourselves.
+            // A sender that goes quiet without a TEARDOWN (phone screen off, or an app taking over
+            // with its own fullscreen player) used to leave the session "live" with its last frame
+            // frozen on the TV. Tear it down ourselves.
+            onConnectionEnded = { stopMirrorVideo() },
         )
             .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort

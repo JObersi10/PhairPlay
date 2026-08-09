@@ -38,11 +38,16 @@ class MirrorStreamServer(
     private val width: Int = 1920,
     private val height: Int = 1080,
     /**
-     * Reports whether video has gone idle, i.e. no frames for [IDLE_TIMEOUT_MS] while the session is
-     * still connected — what happens when the phone's screen switches off. The session is
-     * deliberately kept alive (locking the phone must not end a mirror); the UI just blanks so the
-     * last frame isn't left frozen on the panel, and unblanks when frames resume.
+     * The sender closed the video data connection without an RTSP TEARDOWN.
+     *
+     * This is not a rare edge: it is what an app switching to its own fullscreen player does —
+     * TikTok, for one — and what a phone does when it stops mirroring abruptly. Nothing else tells
+     * us, so without this the receiver keeps believing video is live and leaves the UI parked on a
+     * Surface that will never receive another frame: a black screen that outlasts the stream.
+     *
+     * Not called for a deliberate [stop], which is the receiver's own doing and already handled.
      */
+    private val onConnectionEnded: () -> Unit = {},
 ) {
     private sealed class Item
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
@@ -53,6 +58,8 @@ class MirrorStreamServer(
     private val queue = ArrayBlockingQueue<Item>(QUEUE_CAPACITY)
 
     @Volatile private var running = false
+    /** Set by [stop] so the reader can tell our own shutdown from the sender hanging up. */
+    @Volatile private var stopping = false
     @Volatile private var client: Socket? = null
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
@@ -87,6 +94,7 @@ class MirrorStreamServer(
     }
 
     fun stop() {
+        stopping = true
         running = false
         runCatching { client?.close() }
         runCatching { serverSocket.close() }
@@ -170,6 +178,10 @@ class MirrorStreamServer(
         } finally {
             running = false
             Logger.i("Mirror data connection ended")
+            if (!stopping) {
+                Logger.i("Sender dropped the video connection without a TEARDOWN — ending video")
+                runCatching { onConnectionEnded() }
+            }
         }
     }
 
