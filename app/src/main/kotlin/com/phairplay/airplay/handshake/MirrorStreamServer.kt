@@ -60,6 +60,8 @@ class MirrorStreamServer(
     @Volatile private var running = false
     /** Set by [stop] so the reader can tell our own shutdown from the sender hanging up. */
     @Volatile private var stopping = false
+    /** Why the reader loop finished — the difference between a hand-off and a failure. */
+    @Volatile private var endReason = "unknown"
     @Volatile private var client: Socket? = null
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
@@ -170,14 +172,17 @@ class MirrorStreamServer(
                     }
                 }
             }
+            endReason = "sender closed the stream (EOF)"
         } catch (e: java.net.SocketTimeoutException) {
             // A quiet sender is not a disconnect — a phone sitting on a static screen sends nothing
             // for long stretches. Keep waiting; the session ends when the socket actually closes.
+            endReason = "read timed out"
         } catch (e: Exception) {
+            endReason = "${e.javaClass.simpleName}: ${e.message}"
             if (running) Logger.e("Mirror reader error", e)
         } finally {
             running = false
-            Logger.i("Mirror data connection ended")
+            Logger.i("Mirror data connection ended — $endReason")
             if (!stopping) {
                 Logger.i("Sender dropped the video connection without a TEARDOWN — ending video")
                 runCatching { onConnectionEnded() }
@@ -201,7 +206,8 @@ class MirrorStreamServer(
             lastStatMs = now
             StreamStats.videoDropPct = framesDropped * 100 / framesIn
             Logger.i("Video stats: in=$framesIn dropped=$framesDropped " +
-                "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps")
+                "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps " +
+                "→ ${surfaceLabel(configuredSurface)}")
         }
     }
 
@@ -271,7 +277,18 @@ class MirrorStreamServer(
         decoder = VideoDecoder(surface).also { it.initialize(sc + sps, sc + pps, width, height) }
         awaitingKeyframe = true                                // a fresh decoder must start at an IDR
         StreamStats.videoRes = "${width}x${height}"
-        Logger.i("Mirror decoder (re)built for surface (sps=${sps.size}B pps=${pps.size}B)")
+        Logger.i("Mirror decoder (re)built for ${surfaceLabel(surface)} surface (sps=${sps.size}B pps=${pps.size}B)")
+    }
+
+    /**
+     * Names a surface for the log: which one the decoder is actually drawing into is the single
+     * fact that separates "mirroring works" from "mirroring is decoding perfectly into a buffer
+     * nobody can see", and until now nothing recorded it.
+     */
+    private fun surfaceLabel(s: Surface?): String = when {
+        s == null -> "none"
+        s === offscreenReader?.surface -> "OFF-SCREEN (not visible)"
+        else -> "live"
     }
 
     private fun decodeFrame(annexB: ByteArray) {
