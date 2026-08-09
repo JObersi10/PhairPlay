@@ -6,6 +6,8 @@ import com.phairplay.airplay.handshake.AirPlayNtpClient
 import com.phairplay.airplay.handshake.AudioStreamServer
 import com.phairplay.airplay.handshake.BufferedAudioServer
 import com.phairplay.airplay.handshake.EventCipher
+import com.phairplay.airplay.handshake.MediaRemote
+import com.phairplay.airplay.handshake.PlistCodec
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -143,6 +145,20 @@ class AirPlayReceiver(
     @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
+
+    /**
+     * The event channel's encryption state and output stream, held so the TV remote can *send* on
+     * it. The channel is receiver→sender: we issue the requests and the sender answers, which is
+     * why the outbound half is the interesting one here (pyatv, on the sender side, notes it has to
+     * swap its read/write keys for exactly this reason).
+     */
+    @Volatile private var eventCipher: EventCipher? = null
+    @Volatile private var eventOutput: java.io.OutputStream? = null
+    /** Serialises remote-command writes against the reply the read loop is decrypting. */
+    private val eventWriteLock = Any()
+    private val eventCseq = java.util.concurrent.atomic.AtomicInteger(1)
+    /** MediaRemote commands the current sender said it would accept. Empty until it tells us. */
+    @Volatile private var supportedRemoteCommands: Set<Int> = emptySet()
     @Volatile private var mirrorAesKey: ByteArray? = null
     @Volatile private var mirrorEcdhSecret: ByteArray? = null
     @Volatile private var mirrorAesIv: ByteArray? = null
@@ -240,10 +256,73 @@ class AirPlayReceiver(
      * AirPlay sender — e.g. play/pause or skip what the Mac/iPhone is streaming. No-op if no sender
      * has advertised a DACP identity yet.
      */
-    fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
+    fun sendRemoteCommand(command: String) {
+        if (dacpClient.isAvailable) {
+            dacpClient.sendCommand(command)
+            return
+        }
+        // AirPlay 2 senders never advertise a DACP identity, so there is no legacy address to call.
+        // Their control path is MediaRemote over the event channel.
+        val mrp = DACP_TO_MEDIA_REMOTE[command]
+        if (mrp == null) {
+            Logger.i("Remote '$command' ignored — no DACP sender and no MediaRemote equivalent")
+            return
+        }
+        sendMediaRemoteCommand(mrp)
+    }
 
-    /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
-    fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
+    /** True once *some* reverse-control path exists — legacy DACP or MediaRemote. */
+    fun isRemoteControlAvailable(): Boolean =
+        dacpClient.isAvailable || (eventCipher != null && supportedRemoteCommands.isNotEmpty())
+
+    /**
+     * Sends one MediaRemote command to the sender over the event channel.
+     *
+     * The message itself is settled: a `ProtocolMessage{type: SEND_COMMAND_MESSAGE}` carrying a
+     * `SendCommandMessage{command}` (see [MediaRemote]). What is *not* settled is the plist wrapper
+     * the AirPlay layer expects around it. The sender→receiver direction uses
+     * `{type: updateMRSupportedCommands, params: {mrSupportedCommandsFromSender: […]}}`, so the
+     * mirror of that naming is the best-supported reading, and it is what we send. The sender's
+     * status line comes back through the read loop above and is logged, so a wrong guess shows up
+     * as a concrete error rather than silence.
+     *
+     * @return false when there is no event channel or the sender did not advertise this command.
+     */
+    fun sendMediaRemoteCommand(command: Int): Boolean {
+        val cipher = eventCipher
+        val output = eventOutput
+        if (cipher == null || output == null) {
+            Logger.i("MediaRemote ${MediaRemote.name(command)} dropped — no event channel")
+            return false
+        }
+        if (supportedRemoteCommands.isNotEmpty() && command !in supportedRemoteCommands) {
+            Logger.i("MediaRemote ${MediaRemote.name(command)} dropped — sender does not support it")
+            return false
+        }
+        val body = PlistCodec.encode(
+            mapOf(
+                "type" to "sendCommand",
+                "params" to mapOf("mrCommandFromReceiver" to MediaRemote.encodeSendCommand(command)),
+            )
+        )
+        val head = buildString {
+            append("POST /command RTSP/1.0\r\n")
+            append("CSeq: ${eventCseq.getAndIncrement()}\r\n")
+            append("Content-Type: application/x-apple-binary-plist\r\n")
+            append("Content-Length: ${body.size}\r\n\r\n")
+        }.toByteArray(Charsets.US_ASCII)
+        // Off the main thread: this is called straight from onKeyDown, and a socket write there is
+        // a NetworkOnMainThreadException — which is thrown *before* a single byte leaves, so the
+        // command silently did nothing while looking like it had been attempted.
+        scope.launch(Dispatchers.IO) {
+            synchronized(eventWriteLock) {
+                runCatching { cipher.write(output, head + body) }
+                    .onSuccess { Logger.i("MediaRemote ${MediaRemote.name(command)} sent (${body.size}B plist)") }
+                    .onFailure { Logger.e("MediaRemote ${MediaRemote.name(command)} failed", it) }
+            }
+        }
+        return true
+    }
 
     // ─── Private: startup ────────────────────────────────────────────────────
 
@@ -272,6 +351,7 @@ class AirPlayReceiver(
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
+            onSupportedRemoteCommands = { supportedRemoteCommands = it },
             onMirrorSetupKeys = { aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
@@ -541,6 +621,8 @@ class AirPlayReceiver(
                         drainPlaintextEventChannel(input, output)
                         return@use
                     }
+                    eventCipher = cipher
+                    eventOutput = output
                     while (isActive) {
                         val frame = runCatching { cipher.read(input) }.getOrElse { e ->
                             Logger.w("Event channel decrypt failed (${e.message}) — closing")
@@ -549,20 +631,33 @@ class AirPlayReceiver(
                         val req = RtspRequestReader(EVENT_MAX_BYTES, EVENT_MAX_BYTES)
                             .read(frame.inputStream())
                         if (req == null) {
-                            Logger.i("Event channel: ${frame.size}B frame that is not an RTSP request")
+                            // Not a request — most often the sender's *answer* to a command we sent.
+                            // Surfacing the status line is the only feedback we get on whether the
+                            // command was understood, so log it rather than the byte count alone.
+                            val head = frame.toString(Charsets.US_ASCII).substringBefore("\r\n")
+                            if (head.startsWith("RTSP/") || head.startsWith("HTTP/")) {
+                                Logger.i("Event channel reply: $head")
+                            } else {
+                                Logger.i("Event channel: ${frame.size}B frame that is not an RTSP request")
+                            }
                             continue
                         }
                         Logger.i("Event channel ${req.method} ${req.uri}")
                         val proto = if (req.protocol.startsWith("HTTP")) "HTTP/1.1" else "RTSP/1.0"
                         val cseq = req.headers["CSeq"] ?: "0"
                         val reply = "$proto 200 OK\r\nCSeq: $cseq\r\nContent-Length: 0\r\n\r\n"
-                        runCatching { cipher.write(output, reply.toByteArray(Charsets.US_ASCII)) }
+                        synchronized(eventWriteLock) {
+                            runCatching { cipher.write(output, reply.toByteArray(Charsets.US_ASCII)) }
+                        }
                     }
                 }
             } catch (e: Exception) {
                 if (eventSocket != null) Logger.d("Event channel closed")
             } finally {
                 eventClientSocket = null
+                eventCipher = null
+                eventOutput = null
+                supportedRemoteCommands = emptySet()
             }
         }
         // AirPlay 2 NTP is receiver-initiated: poll the sender's timing port so macOS proceeds.
@@ -805,6 +900,22 @@ class AirPlayReceiver(
     }
 
     companion object {
+
+        /**
+         * DACP command → MediaRemote `Command`, so one TV-remote key press works against either
+         * kind of sender. Volume is absent on purpose: AirPlay volume is an RTSP `SET_PARAMETER`,
+         * not a transport command, and it already has its own path.
+         */
+        private val DACP_TO_MEDIA_REMOTE = mapOf(
+            DacpClient.CMD_PLAY_PAUSE to MediaRemote.TOGGLE_PLAY_PAUSE,
+            DacpClient.CMD_PLAY_RESUME to MediaRemote.PLAY,
+            DacpClient.CMD_NEXT to MediaRemote.NEXT_TRACK,
+            DacpClient.CMD_PREV to MediaRemote.PREVIOUS_TRACK,
+            DacpClient.CMD_FF to MediaRemote.BEGIN_FAST_FORWARD,
+            DacpClient.CMD_FF_STOP to MediaRemote.END_FAST_FORWARD,
+            DacpClient.CMD_REW to MediaRemote.BEGIN_REWIND,
+            DacpClient.CMD_REW_STOP to MediaRemote.END_REWIND,
+        )
 
         /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
         private const val EVENT_MAX_BYTES = 256 * 1024

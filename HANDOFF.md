@@ -54,17 +54,41 @@ See `CLAUDE.md` "Open bugs" for the full diagnosis of each.
    after 300 ms instead of waiting, then retargeting the live codec with `setOutputSurface` when the
    real Surface appears (no keyframe wait). An earlier attempt that blocked the mirror SETUP reply
    was reverted — the Surface cannot exist at that point, so it only added 2.5 s per connect.
-2. **Remote skip/next does nothing on AirPlay 2 senders — needs MediaRemote. Parked.**
-   Not a mapping regression: the key mapping is intact and the `Active-Remote` header parsing is
-   unconditional. AirPlay 2 senders send no `DACP-ID`/`Active-Remote`, so `DacpClient` has no
-   address. Legacy RAOP senders (TikTok, Mac Music) still work.
-   Dumping the sender's `POST /command` payload settled how the modern path works:
-   `params={mrSupportedCommandsFromSender=[<104B>, <226B>, <765B>, … 36 blobs]}` — opaque
-   MediaRemote **protobuf** messages in a plist wrapper, not a plist vocabulary. Implementing it
-   means MRP encoding (pyatv ships the `.proto` files): a subsystem, not a tweak.
-   Event-channel encryption **is done and working** (`Event channel cipher ready`, no tag
-   failures) — it was a prerequisite, but the sender writes nothing there, so it was never the
-   blocker.
+2. **Remote skip/next does nothing on AirPlay 2 senders. Half-solved; the send envelope is unknown.**
+   Not a mapping regression: the key mapping is intact and `Active-Remote` parsing is unconditional.
+   AirPlay 2 senders send no `DACP-ID`/`Active-Remote`, so `DacpClient` has no address. Legacy RAOP
+   senders (TikTok, Mac Music) still work through DACP.
+
+   What is now settled and on disk:
+   - The sender's vocabulary decodes. `mrSupportedCommandsFromSender` carries 37 serialized
+     MediaRemote `CommandInfo` protobufs, and `MediaRemote.decodeCommandInfo` reads them:
+     `Play, Pause, TogglePlayPause, Stop, NextTrack, PreviousTrack, BeginFastForward, …` all
+     enabled; `SkipForward`/`SkipBackward` explicitly disabled. So the sender *will* accept a skip.
+   - Our `SendCommandMessage` is right. `MediaRemote.encodeSendCommand` is byte-for-byte identical
+     to what protobuf's own serializer emits for the same message — verified against pyatv's
+     generated code, not asserted.
+   - The event channel is the receiver→sender direction (pyatv has to swap its read/write keys on
+     the sender side for exactly this reason), and we can write on it: twelve commands went out
+     encrypted with no error.
+
+   What is NOT settled: **the plist envelope around the protobuf.** We send the mirror of the
+   inbound naming, `{type: sendCommand, params: {mrCommandFromReceiver: <ProtocolMessage>}}`. The
+   iPhone's response to all twelve was *nothing at all* — no reply on the event channel, no change
+   in the `SET_PARAMETER now-playing` metadata after `NextTrack`. Total silence rather than an
+   error is itself a clue: it suggests the sender is not parsing our frames as requests, so the
+   fault is more likely the framing or the transport than the key name.
+
+   Three candidates remain, in order of cost: the request line may need to be `HTTP/1.1` rather
+   than `RTSP/1.0`; the envelope key may be something we have not guessed; or the real path may be
+   a type-130 data stream (`controlType: 2`), which pyatv uses for MRP — but that stream is opened
+   by the *controller*, and the iPhone never opens one to us, so a receiver may have no way to ask
+   for it. Nothing in any public source documents this direction; GitHub code search for
+   `mrCommandFromReceiver` returns zero hits.
+
+   Note the entry list also decodes some implausible command numbers (`Command25021`). The values
+   we care about are read correctly, but the decoder likely desynchronises on a few of the larger
+   blobs; worth a look before trusting the full list.
+
 3. **macOS audio backlog churn** — ~12 `backlog resync` trims in 3 s.
 4. **FairPlay v2 key derivation** — the macOS Music app is silent. Separate RE job.
 5. **`Apple-Response` / TikTok** — built, never exercised.

@@ -2,6 +2,7 @@ package com.phairplay.airplay
 
 import com.phairplay.airplay.handshake.FairPlay
 import com.phairplay.airplay.handshake.InfoResponder
+import com.phairplay.airplay.handshake.MediaRemote
 import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.airplay.handshake.PairingSession
 import com.phairplay.airplay.handshake.PlistCodec
@@ -34,6 +35,8 @@ open class RtspHandler(
     private val onStreamingStopped: () -> Unit,
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
     private val onPhotoCleared: () -> Unit = {},
+    /** MediaRemote commands the sender advertised as enabled (see `updateMRSupportedCommands`). */
+    private val onSupportedRemoteCommands: (Set<Int>) -> Unit = {},
     /**
      * AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret + the sender's
      * address and timing port (so the receiver can start NTP). Returns (eventPort, timingPort).
@@ -493,6 +496,71 @@ open class RtspHandler(
         else -> value.toString()
     }
 
+    /**
+     * Turns `mrSupportedCommandsFromSender` into the set of MediaRemote commands this sender will
+     * accept, and hands it to the receiver so the TV remote knows what it can drive.
+     *
+     * The blobs are serialized `CommandInfo` protobufs, not plists — see [MediaRemote]. Decoding
+     * them is what turned "36 opaque blobs" into a vocabulary; anything that fails to decode is
+     * counted and reported rather than dropped, because a silent miss here would look identical to
+     * a sender that supports nothing.
+     */
+    /**
+     * Decodes one `mrSupportedCommandsFromSender` entry, whatever form it arrives in.
+     *
+     * Senders have been observed describing commands two ways, so both are handled rather than
+     * betting on one: a plist dictionary keyed `kCommandInfoCommandKey`/`kCommandInfoEnabledKey`
+     * (either inline or as a nested binary plist inside a data blob), and a serialized MediaRemote
+     * `CommandInfo` protobuf. They carry the same two facts.
+     */
+    private fun decodeSupportedCommand(entry: Any?): MediaRemote.SupportedCommand? = when (entry) {
+        is Map<*, *> -> fromCommandInfoDict(entry)
+        is ByteArray ->
+            if (entry.size >= BPLIST_MAGIC.size && entry.copyOf(BPLIST_MAGIC.size).contentEquals(BPLIST_MAGIC)) {
+                runCatching { fromCommandInfoDict(PlistCodec.decode(entry)) }.getOrNull()
+            } else {
+                MediaRemote.decodeCommandInfo(entry)
+            }
+        else -> null
+    }
+
+    private fun fromCommandInfoDict(dict: Map<*, *>): MediaRemote.SupportedCommand? {
+        val command = (dict["kCommandInfoCommandKey"] as? Number)?.toInt() ?: return null
+        val enabled = when (val e = dict["kCommandInfoEnabledKey"]) {
+            is Boolean -> e
+            is Number -> e.toInt() != 0
+            else -> true
+        }
+        return MediaRemote.SupportedCommand(command, enabled)
+    }
+
+    private fun captureSupportedCommands(plist: Map<String, Any?>?) {
+        val params = plist?.get("params") as? Map<*, *> ?: return
+        val blobs = params["mrSupportedCommandsFromSender"] as? List<*> ?: return
+        val commands = blobs.mapNotNull { decodeSupportedCommand(it) }
+        val undecodable = blobs.size - commands.size
+        if (commands.isEmpty()) {
+            // Say what the entries actually *are* rather than only that they failed — a leading
+            // "bplist00" means a nested plist, 0x08 means a protobuf, anything else means neither.
+            val sample = blobs.firstOrNull()
+            val shape = when (sample) {
+                is ByteArray -> "bytes[${sample.size}] " +
+                    sample.take(COMMAND_SAMPLE_BYTES).joinToString("") { "%02x".format(it) }
+                null -> "null"
+                else -> "${sample.javaClass.simpleName}: ${describe(sample).take(COMMAND_SAMPLE_CHARS)}"
+            }
+            Logger.w("updateMRSupportedCommands: ${blobs.size} entries, none decoded. First = $shape")
+            return
+        }
+        val enabled = commands.filter { it.enabled }.map { it.command }.toSet()
+        Logger.i(
+            "Sender supports ${commands.size} MediaRemote commands" +
+                (if (undecodable > 0) " ($undecodable undecodable)" else "") +
+                ": ${commands.joinToString(", ")}"
+        )
+        onSupportedRemoteCommands(enabled)
+    }
+
     private fun handleCommand(request: RtspRequest): RtspResponse {
         val plist = runCatching { PlistCodec.decode(request.bodyBytes) }.getOrNull()
         val type = plist?.get("type") as? String ?: "unknown"
@@ -509,6 +577,7 @@ open class RtspHandler(
             loggedSupportedCommands = true
             Logger.i("POST /command keys=${plist.keys} body=${describe(plist).take(SUPPORTED_COMMANDS_LOG_CHARS)}")
         }
+        if (type == "updateMRSupportedCommands") captureSupportedCommands(plist)
         // Bodyless 200, the way a real Apple TV answers. An empty *plist* is not the same thing as
         // no body: the sender parses what it is given, and a zero-key plist where it expects either
         // nothing or a populated ack is a parse it can reject silently.
@@ -1287,6 +1356,13 @@ open class RtspHandler(
 
         /** Skip the small placeholder message the sender leads with; dump the real list. */
         private const val COMMAND_DUMP_MIN_BYTES = 1000
+
+        /** Enough of an undecodable entry to tell a plist, a protobuf and neither apart. */
+        private const val COMMAND_SAMPLE_BYTES = 24
+        private const val COMMAND_SAMPLE_CHARS = 300
+
+        /** Leading bytes of a binary plist — "bplist0". */
+        private val BPLIST_MAGIC = "bplist0".toByteArray(Charsets.US_ASCII)
 
         private const val RTSP_PORT = 7000
 
