@@ -118,12 +118,14 @@ comparable implementation.
 | RFC2198 RTP redundancy (bit 61) | Not present. |
 | `streamConnections` (bit 59) | We use a `streamConnectionID` for mirroring; not the same feature. |
 | RTCP | `RtpInterleaved` recognises channel 1 and deliberately ignores it. |
-| Spotify / live streams with AES keys | Untested — unknown rather than absent. |
+| ~~Spotify / live streams with AES keys~~ | **Works** (confirmed 2026-08-09). |
 
 **If multi-room is the goal, the order is:** PTP first (nothing else syncs without it), then
 `SETPEERS` to learn the group, then `SETRATEANCHORTIME` to share the anchor, then cross-device
 latency compensation. The three RTSP verbs already arrive and are already parsed enough to log —
-`handleBufferedControl` is where they land. The feature bits advertised in `AIRPLAY_FEATURES`
+`handleBufferedControl` is where they land — but note it logs at `Logger.d`, which Fire OS drops
+for this package, and it collapses lists to `list[n]`. Both need fixing before a capture of a real
+grouping attempt is worth anything; that is the first commit of any multi-room work. The feature bits advertised in `AIRPLAY_FEATURES`
 (`0x5A7FFFF7,0x1E`) will need auditing at the same time, since claiming a capability we do not
 implement is its own class of bug.
 
