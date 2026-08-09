@@ -1,98 +1,92 @@
 # PhairPlay — Handoff
 
-Last updated: 2026-08-04.
-Branch `feature/receiver-ux-and-cast-removal`, pushed to the `jobersi` remote
-(github.com/JObersi10/PhairPlay). `origin` points at mazer666's copy — do not push there.
+Last updated: 2026-08-07.
+Branch `feature/receiver-controls-and-miracast`, last pushed commit `03fd793` on the `jobersi`
+remote (github.com/JObersi10/PhairPlay). `origin` points at mazer666's copy — do not push there.
+
+**There is uncommitted work in the tree.** Everything in "Landed this session" below is on disk
+only. A snapshot of an earlier state of it also exists on the local branch `scrap/airplay-video-hunt`.
 
 Read `CLAUDE.md` first — especially the native-library verification step, which is not optional,
-and the "Hard-won details" entry on pause detection.
+and the build environment note (there is no system JDK or Android SDK; both live on the drive).
 
 ## Where things stand
 
-Installed on the Fire TV at `192.168.1.246`. Both flavors build.
+Screen mirroring **works** from both iPhone (iOS 26.1) and macOS — 42–45 fps, drops confined to
+the first second. That was the headline bug and it is fixed. What remains is rough edges around it.
 
-### Pause — solved, needs confirming on device
+The Fire TV's IP moves; it has been `192.168.1.246` and `192.168.1.108` within one session. Check
+`adb devices` rather than trusting either.
 
-A paused iOS sender keeps sending at full rate (~128 packets/sec) with its RTP clock advancing in
-real time. The packets are empty: 44 bytes of header, no audio.
+## Landed this session (uncommitted)
 
-```
-12:22:13  pkts=128  bytes=5632     paused
-12:22:16  pkts=128  bytes=5632     paused
-12:22:18  pkts=125  bytes=117763   playing
-```
+- **Bodyless `POST /command`.** The one that mattered. iOS was being answered with an empty binary
+  plist, abandoned the session silently after `RECORD`, and never sent the `streams` SETUP —
+  mirroring showed nothing at all. An Apple TV replies with no body; now so do we.
+- **`pk` in the mDNS TXT record** (plus `protovers=1.1`). iPhones and iPads were leaving PhairPlay
+  out of the AirPlay picker entirely while macOS listed it. Verified on the wire.
+- **Touch support**, alongside the remote, routed by the same `sessionMode` latch: tap reveals the
+  mirror control bar on video, tap is play/pause on audio, horizontal fling changes track. No
+  scrubbing by touch. Gestures are ignored in PiP and when no session owns the screen.
+- **Tablet-installable.** `leanback` is no longer `required`, and the launcher intent carries
+  `LAUNCHER` as well as `LEANBACK_LAUNCHER`. Use the `googletv` flavour for tablets.
+- **`Streaming from %1$s`** literal on the Home card — `setText(resId)` does not substitute
+  arguments. Formatted properly now, with a plain "Streaming" fallback during pairing.
+- **Session goes idle when the phone stops mirroring.** `TEARDOWN streams=[110]` left the overlay
+  on a frozen last frame: `emitNowPlaying()` with no metadata emits null, and the service reads
+  "null while CONNECTED" as a running video session. Now drops to `ADVERTISING` when nothing is
+  playing, while keeping the RTSP session up for iOS renegotiation.
+- **4-second handover grace** before the app hands the TV back. Mirroring→video tears down one
+  session and opens another a beat later, and leaving in the gap looked like a self-quit.
+- **Event channel answers requests** (200 + echoed CSeq) instead of silently draining them.
+- **`Apple-Response`** for legacy RAOP senders that put an `Apple-Challenge` on OPTIONS — TikTok
+  hung up immediately without it. **Untested.**
+- Quieter teardown: a deliberate close no longer logs a stack trace as an error.
+- Model bumped `AppleTV5,3` → `AppleTV6,2`, server version `220.68` → `377.40.00`.
 
-That is the whole reason four earlier detectors failed — packet arrival, RTP-clock advance,
-decoded-PCM silence and RTSP `FLUSH` all look identical whether or not the sender is paused. Only
-the payload size differs, by a factor of twenty.
+## Open work
 
-`handleRtpPacket` now treats 12 consecutive packets of ≤ `KEEPALIVE_MAX_BYTES` (64) as a pause,
-and the first real frame as a resume — roughly 100ms either way. Dropping those packets also stops
-them reaching the decoder, which had been decoding 32-byte fragments into garbage.
+See `CLAUDE.md` "Open bugs" for the full diagnosis of each.
 
-Worth recording: FLUSH is documented as "flush the receiver's buffer and pause/stop what is
-playing", in the spec and in the AirPlay HTML in the project folder. iOS nonetheless sends it
-immediately after RECORD at the start of every stream and again on every seek. Acting on the
-documentation instead of the device cost several rounds.
+1. ~~Cold first connect shows nothing.~~ **Fixed and confirmed on device** (2026-08-07): first
+   attempt decodes at +91 ms with no reconnect. Two things got it there — pre-warming the Surface
+   from `onSenderApproaching`, and `MirrorStreamServer` falling back to an off-screen `ImageReader`
+   after 300 ms instead of waiting, then retargeting the live codec with `setOutputSurface` when the
+   real Surface appears (no keyframe wait). An earlier attempt that blocked the mirror SETUP reply
+   was reverted — the Surface cannot exist at that point, so it only added 2.5 s per connect.
+2. **Remote skip/next does nothing on AirPlay 2 senders — needs MediaRemote. Parked.**
+   Not a mapping regression: the key mapping is intact and the `Active-Remote` header parsing is
+   unconditional. AirPlay 2 senders send no `DACP-ID`/`Active-Remote`, so `DacpClient` has no
+   address. Legacy RAOP senders (TikTok, Mac Music) still work.
+   Dumping the sender's `POST /command` payload settled how the modern path works:
+   `params={mrSupportedCommandsFromSender=[<104B>, <226B>, <765B>, … 36 blobs]}` — opaque
+   MediaRemote **protobuf** messages in a plist wrapper, not a plist vocabulary. Implementing it
+   means MRP encoding (pyatv ships the `.proto` files): a subsystem, not a tweak.
+   Event-channel encryption **is done and working** (`Event channel cipher ready`, no tag
+   failures) — it was a prerequisite, but the sender writes nothing there, so it was never the
+   blocker.
+3. **macOS audio backlog churn** — ~12 `backlog resync` trims in 3 s.
+4. **FairPlay v2 key derivation** — the macOS Music app is silent. Separate RE job.
+5. **`Apple-Response` / TikTok** — built, never exercised.
 
-Confirmed working on device. The `PAUSE-PROBE` instrumentation has been removed.
+## Testing notes
 
-### Position sync
-
-Position now derives from the receiver's own audio clock rather than wall-clock extrapolation.
-`AudioStreamServer.playingRtpTimestamp()` returns the RTP timestamp currently reaching the
-speakers; the progress push supplies the track's starting timestamp in the same units; the
-difference is the position, re-read four times a second. The old path extrapolated from pushes that
-arrive only every few seconds and are quantised to whole frames, which is where the reported
-"2–4 seconds off" came from. `NowPlayingScreen`'s resync tolerance dropped from 2000ms to 400ms
-to match.
-
-## Landed this session
-
-- `AirPlayReceiver.endSession()` now calls `releaseMediaComponents()`. Closing the RTSP socket left
-  the audio and mirror UDP servers running, which is why Back looked like it did nothing.
-- **Back is now one setting, not two.** `BackAction` — STOP_STREAM (default) / GO_HOME / EXIT_APP —
-  replaces `backQuitsApp` and `backGoesHome`. Those were two booleans answering two different
-  questions with overlapping answers, and nobody could tell which was which. Each dialog option
-  states its consequence, including whether the receiver keeps advertising.
-  `SettingsRepository` migrates the old DataStore keys, so an upgrade keeps the user's choice.
-- **Beat delay** setting (0–1000ms, `AppSettings.beatDelayMs`), separate from audio delay. A
-  Bluetooth speaker's output latency is invisible to `AudioTrack.getTimestamp`, so the beat fires
-  when PCM leaves the device rather than when it is heard. Correcting that via the audio delay
-  would desync the audio itself, hence a second dial that moves visuals only.
-
-## Unverified — needs one session each
-
-1. **Position sync** — the audio-clock path is new and unlistened-to. If position looks stuck,
-   check that progress pushes are arriving at all (`grep "SET_PARAMETER progress"`): without one,
-   `anchorStartTs` stays -1 and the ticker does nothing.
-2. **Back ending the stream.** The `releaseMediaComponents` fix is untested on device.
-3. **`BackAction` migration** from an install that had the old booleans set.
-4. **Beat delay** — the plumbing compiles; nobody has listened to it.
-5. **Overnight sleep.** Leave the TV off overnight, then connect. Should work first try.
-
-## Open work, not started
-
-### Mirroring freeze (iOS 26.1)
-
-Diagnosed, not fixed; see `CLAUDE.md` for the symptom and capture procedure. Needs the type-5
-payload hex first. Do not feed an unknown payload through `cipher.update()` to see what happens —
-that advances the AES-CTR keystream and corrupts every later frame.
-
-### 7-second mirror connect
-
-Measured: our own path is ~111ms, the RTSP handshake ~600ms. The remaining ~6s is iOS-side and may
-not be ours to fix.
-
-### Deferred by the user
-
-Onboarding media, lyrics, sender-type display.
+- The Mac is slow to connect because **PIN auth is on** and macOS is not a remembered controller,
+  so it runs the full SRP handshake across two TCP connections every time (~8 s, most of it a gap
+  while it reconnects). The iPhone is remembered and skips it. This is configuration, not a bug.
+- `Logger.d` is invisible on Fire OS even in a debug build — the whole class is dropped for this
+  package. Anything you need to see must be `Logger.i`. This cost several rounds of guessing before
+  it was noticed: 0 `D/Logger` lines against 370 `I/Logger` ones.
+- Read the trace with `adb -s <ip>:5555 logcat -d -v time Logger:V "*:S"`, filtering out
+  `UNHANDLED` and `backlog` noise.
 
 ## Cautions
 
 - **The exFAT drive corrupts native build output.** Verify the ELF magic before every install; see
   `CLAUDE.md`. It can corrupt source files too — if a file behaves impossibly, check `git status`
   before debugging the logic.
-- A killed Gradle run can leave `~/.gradle/caches/journal-1` locked. The error names the owner PID.
-- **Two remotes.** `jobersi` is the user's fork and the one to push to. `origin` is
-  mazer666's repository. The branch tracks `jobersi`.
+- **A wedged Gradle daemon blocks every later build and looks like slowness.** `pkill` may not take;
+  use `kill -9`. Never pipe a build through `tail` — output is buffered until exit, so a running
+  build is indistinguishable from a hung one.
+- **Two remotes.** `jobersi` is the user's fork and the one to push to. `origin` is mazer666's
+  repository.

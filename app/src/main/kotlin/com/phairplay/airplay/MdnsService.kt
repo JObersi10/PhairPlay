@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import com.phairplay.service.ProtocolState
+import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.util.Logger
 import com.phairplay.util.NetworkUtils
 
@@ -173,6 +174,11 @@ class MdnsService(
             setAttribute("vv", "2")                             // AirPlay protocol version 2
             setAttribute("pi", NetworkUtils.getPersistentUuid(context))
             setAttribute("flags", "0x4")                        // Screen-mirroring receiver
+            setAttribute("protovers", "1.1")
+            // The Ed25519 identity, hex-encoded — the same key GET /info returns.
+            // iOS and iPadOS use pk to decide a receiver supports pair-verify and only list the
+            // ones that advertise it, which is why the Mac could see PhairPlay and they could not.
+            setAttribute("pk", PairingKeys.get(context).edPublic.joinToString("") { "%02x".format(it) })
         }
 
         airPlayListener = createRegistrationListener(
@@ -312,9 +318,9 @@ class MdnsService(
         private const val AIRPLAY_FEATURES = "0x5A7FFFF7,0x1E"
 
         /** Pretend to be an Apple TV so macOS uses the screen mirroring protocol. */
-        private const val AIRPLAY_MODEL = "AppleTV5,3"
+        private const val AIRPLAY_MODEL = "AppleTV6,2"
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
-        private const val AIRPLAY_SERVER_VERSION = "220.68"
+        private const val AIRPLAY_SERVER_VERSION = "377.40.00"
     }
 }

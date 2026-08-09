@@ -77,6 +77,6 @@ object InfoResponder {
     /** Status bit advertising that the receiver requires PIN pairing (0x8 — verify vs macOS). */
     private const val STATUS_FLAG_PIN_REQUIRED = 0x8L
 
-    private const val MODEL = "AppleTV5,3"
-    private const val SOURCE_VERSION = "220.68"
+    private const val MODEL = "AppleTV6,2"
+    private const val SOURCE_VERSION = "377.40.00"
 }

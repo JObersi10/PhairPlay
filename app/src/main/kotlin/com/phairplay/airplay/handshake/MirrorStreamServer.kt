@@ -65,6 +65,7 @@ class MirrorStreamServer(
     // the app backgrounds and creates a NEW one on return, so we watch for the identity changing
     // and rebuild the decoder — otherwise video stays black after foregrounding.
     @Volatile private var configuredSurface: Surface? = null
+    @Volatile private var offscreenReader: android.media.ImageReader? = null
     private var framePtsUs = 0L
     private var framesIn = 0
     private var framesDropped = 0
@@ -218,13 +219,22 @@ class MirrorStreamServer(
         } finally {
             decoder?.release()
             decoder = null
+            offscreenReader?.close()
+            offscreenReader = null
         }
     }
 
     private fun configureDecoder(sps: ByteArray, pps: ByteArray) {
         // New SPS/PPS (or first config) — cache it and (re)build against the current surface.
         val d = decoder
-        val surface = awaitSurface()
+        // Fall back to an off-screen surface rather than waiting. The sender leads with the only
+        // IDR it will send for the next several seconds, and a cold Activity start (worse still
+        // after the task was swiped away) takes longer than that to produce a real Surface. Waiting
+        // means missing the IDR, which is what made every first mirroring attempt black until the
+        // user disconnected and reconnected. Decoding off-screen instead keeps the reference frames
+        // warm, and decodeFrame retargets the running codec the moment the real Surface appears —
+        // setOutputSurface, so no keyframe wait at the swap.
+        val surface = awaitSurface() ?: offscreenSurface()
         if (d != null && d.isHealthy && sps.contentEquals(lastSps) && pps.contentEquals(lastPps) &&
             surface === configuredSurface) return
         lastSps = sps
@@ -256,7 +266,13 @@ class MirrorStreamServer(
         // Re-attach to the live Surface if it changed (the app was backgrounded and returned, so the
         // SurfaceView made a new Surface). Without this, video stays black after foregrounding.
         val liveSurface = surfaceProvider()
-        if (liveSurface !== configuredSurface) {
+        // While decoding off-screen there is deliberately no display surface, and configuredSurface
+        // is the ImageReader's. Without this guard that mismatch would rebuild the decoder against
+        // null on every single frame.
+        val offscreen = offscreenReader?.surface
+        if (liveSurface == null && configuredSurface === offscreen && offscreen != null) {
+            // keep decoding off-screen
+        } else if (liveSurface !== configuredSurface) {
             // Prefer retargeting the existing codec: a rebuild resets reference state and stalls on
             // awaitingKeyframe until the sender's next IDR, which is the black-screen-for-seconds
             // effect after coming back from Home. Only rebuild if the swap isn't possible.
@@ -264,6 +280,9 @@ class MirrorStreamServer(
             if (swapped) {
                 configuredSurface = liveSurface
                 Logger.i("Mirror: surface changed — retargeted decoder in place (no keyframe wait)")
+                // The off-screen buffers are dead weight once the picture has somewhere real to go.
+                offscreenReader?.close()
+                offscreenReader = null
             } else {
                 Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — rebuilding decoder")
                 rebuildDecoder(liveSurface)
@@ -299,6 +318,24 @@ class MirrorStreamServer(
             }
         }
         return false
+    }
+
+    /**
+     * A throwaway Surface backed by an [android.media.ImageReader], used only to keep the decoder
+     * running while there is nowhere to show the picture. Images must be drained or the codec stalls
+     * once the reader's buffers are all held, so every frame is acquired and immediately closed.
+     */
+    private fun offscreenSurface(): Surface {
+        offscreenReader?.let { return it.surface }
+        val reader = android.media.ImageReader.newInstance(
+            width, height, android.graphics.ImageFormat.PRIVATE, OFFSCREEN_BUFFERS
+        )
+        reader.setOnImageAvailableListener({ r ->
+            runCatching { r.acquireLatestImage()?.close() }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
+        offscreenReader = reader
+        Logger.i("Mirror: no display surface yet — decoding off-screen until one appears")
+        return reader.surface
     }
 
     /** The streaming Surface appears shortly after CONNECTED is emitted; poll briefly. */
@@ -347,7 +384,10 @@ class MirrorStreamServer(
         private const val DEAD_SENDER_MS = 30_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
-        private const val SURFACE_WAIT_TRIES = 50
+        private const val SURFACE_WAIT_TRIES = 3      // ~300ms, then decode off-screen instead
         private const val SURFACE_WAIT_MS = 100L
+
+        /** Enough for the codec to have somewhere to write while we wait for the real Surface. */
+        private const val OFFSCREEN_BUFFERS = 4
     }
 }

@@ -37,6 +37,8 @@
     <string name="protocol_detail_waiting">Waiting for sender…</string>
     <!-- %1$s = sender display name -->
     <string name="protocol_detail_connected">Streaming from %1$s</string>
+    <!-- Same card, before the sender's name is known (during pairing). -->
+    <string name="protocol_detail_connected_unknown">Streaming</string>
     <string name="protocol_detail_error">Check Wi-Fi settings</string>
 
     <!-- ── Service states (header badge) ───────────────────────── -->

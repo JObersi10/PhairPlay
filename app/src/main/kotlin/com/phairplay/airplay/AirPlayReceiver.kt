@@ -5,6 +5,7 @@ import android.view.Surface
 import com.phairplay.airplay.handshake.AirPlayNtpClient
 import com.phairplay.airplay.handshake.AudioStreamServer
 import com.phairplay.airplay.handshake.BufferedAudioServer
+import com.phairplay.airplay.handshake.EventCipher
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -69,6 +70,11 @@ class AirPlayReceiver(
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
+    /**
+     * A sender just opened the control socket. Used to bring the Activity up early so its Surface
+     * exists before the first video packet — see `RtspHandler.onSenderApproaching`.
+     */
+    private val onSenderApproaching: () -> Unit = {},
     /**
      * Offered every sender volume change (dB, −30…0). Return true if the level was applied to the
      * output device, in which case the software gain stays at unity so the two don't compound —
@@ -314,7 +320,8 @@ class AirPlayReceiver(
                 if (name.isNotBlank()) npSenderName = name
                 npSenderDeviceType = type
                 emitNowPlaying()
-            }
+            },
+            onSenderApproaching = { onSenderApproaching() }
         ).also { it.start(scope) }
         Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
     }
@@ -480,6 +487,23 @@ class AirPlayReceiver(
      * channel (macOS connects to it), and switch the UI to the streaming surface.
      * @return the event channel's TCP port.
      */
+    /**
+     * Pre-encryption behaviour, kept only for senders that never ran pair-verify: read cleartext
+     * RTSP and answer 200. Modern senders encrypt, so this path should not normally be taken.
+     */
+    private fun drainPlaintextEventChannel(input: java.io.InputStream, output: java.io.OutputStream) {
+        val reader = RtspRequestReader(EVENT_MAX_BYTES, EVENT_MAX_BYTES)
+        while (true) {
+            val req = reader.read(input) ?: return
+            Logger.i("Event channel (plaintext) ${req.method} ${req.uri}")
+            val proto = if (req.protocol.startsWith("HTTP")) "HTTP/1.1" else "RTSP/1.0"
+            val cseq = req.headers["CSeq"] ?: "0"
+            output.write("$proto 200 OK\r\nCSeq: $cseq\r\nContent-Length: 0\r\n\r\n"
+                .toByteArray(Charsets.US_ASCII))
+            output.flush()
+        }
+    }
+
     private fun startMirrorKeys(
         aesKey: ByteArray,
         ecdhSecret: ByteArray,
@@ -492,16 +516,48 @@ class AirPlayReceiver(
         mirrorAesIv = aesIv
         val event = ServerSocket(0)
         eventSocket = event
-        // Accept + drain the event connection. We don't act on events yet, but macOS expects
-        // the advertised event port to be connectable, so keep it open and readable.
+        // Accept and *answer* on the event connection.
+        //
+        // This used to just drain the socket. macOS tolerates that — it only needs the advertised
+        // event port to be connectable — but iOS sends requests here after RECORD and waits for
+        // replies before it will send the SETUP carrying `streams`. Silence meant the iPhone sat
+        // for ever on "connecting" with a black screen while a Mac mirrored to the same build
+        // perfectly. We don't act on the contents; answering 200 is what unblocks the sender.
         scope.launch(Dispatchers.IO) {
             try {
                 event.accept().use { s ->
                     eventClientSocket = s
-                    Logger.i("Event channel: macOS connected from ${s.inetAddress.hostAddress}")
-                    val buf = ByteArray(4096)
+                    Logger.i("Event channel: sender connected from ${s.inetAddress.hostAddress}")
                     val input = s.getInputStream()
-                    while (isActive && input.read(buf) != -1) { /* drain */ }
+                    val output = s.getOutputStream()
+                    // The channel is encrypted from the first byte, keyed off the pair-verify
+                    // secret. Reading it as plaintext (what we did before) yields ciphertext that
+                    // never parses, so the replies went nowhere. If we have no secret — a sender
+                    // that skipped pair-verify — fall back to the old plaintext behaviour rather
+                    // than dropping a session that used to work.
+                    val cipher = runCatching { EventCipher(ecdhSecret) }.getOrNull()
+                    if (cipher == null) {
+                        Logger.w("Event channel: no cipher — falling back to plaintext framing")
+                        drainPlaintextEventChannel(input, output)
+                        return@use
+                    }
+                    while (isActive) {
+                        val frame = runCatching { cipher.read(input) }.getOrElse { e ->
+                            Logger.w("Event channel decrypt failed (${e.message}) — closing")
+                            null
+                        } ?: break
+                        val req = RtspRequestReader(EVENT_MAX_BYTES, EVENT_MAX_BYTES)
+                            .read(frame.inputStream())
+                        if (req == null) {
+                            Logger.i("Event channel: ${frame.size}B frame that is not an RTSP request")
+                            continue
+                        }
+                        Logger.i("Event channel ${req.method} ${req.uri}")
+                        val proto = if (req.protocol.startsWith("HTTP")) "HTTP/1.1" else "RTSP/1.0"
+                        val cseq = req.headers["CSeq"] ?: "0"
+                        val reply = "$proto 200 OK\r\nCSeq: $cseq\r\nContent-Length: 0\r\n\r\n"
+                        runCatching { cipher.write(output, reply.toByteArray(Charsets.US_ASCII)) }
+                    }
                 }
             } catch (e: Exception) {
                 if (eventSocket != null) Logger.d("Event channel closed")
@@ -513,6 +569,10 @@ class AirPlayReceiver(
         val ntp = AirPlayNtpClient(remoteAddress, senderTimingPort).also { ntpClient = it; it.start(scope) }
         onSenderNameChanged("AirPlay")
         emitState(ProtocolState.CONNECTED)
+        // NOTE: do not wait for the video Surface here. It cannot exist yet — the Surface belongs to
+        // a SurfaceView the Activity only makes visible in response to the CONNECTED state emitted
+        // on the line above, so a wait at this point always runs its full timeout and then adds that
+        // delay to the sender's SETUP round trip. MirrorStreamServer already handles a late Surface.
         Logger.i("Mirror keys set; eventPort=${event.localPort} timingPort=${ntp.localPort}")
         return event.localPort to ntp.localPort
     }
@@ -571,7 +631,17 @@ class AirPlayReceiver(
         mirrorServer = null
         videoPlaying = false
         emitNowPlaying()   // audio may still be playing → now-playing card can take over
-        Logger.i("Mirror video stream stopped (audio playback continues)")
+        // Nothing left playing: drop back to advertising so the overlay actually leaves the screen.
+        // emitNowPlaying alone does not do it — with no metadata it emits null, and the service
+        // reads "null while CONNECTED" as "a video session is running", so stopping mirroring on
+        // the phone left the TV sitting on a frozen last frame. The RTSP session itself stays up,
+        // so an iOS renegotiation re-emits CONNECTED and the picture comes straight back.
+        if (!audioPlaying) {
+            Logger.i("Mirror video stopped and nothing else is playing — session idle")
+            emitState(ProtocolState.ADVERTISING)
+        } else {
+            Logger.i("Mirror video stream stopped (audio playback continues)")
+        }
     }
 
     /**
@@ -735,6 +805,10 @@ class AirPlayReceiver(
     }
 
     companion object {
+
+        /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
+        private const val EVENT_MAX_BYTES = 256 * 1024
+
         /** How often position is re-read from the audio clock. Fast enough to look continuous. */
         private const val POSITION_TICK_MS = 250L
 

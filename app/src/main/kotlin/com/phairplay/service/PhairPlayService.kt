@@ -223,6 +223,20 @@ class PhairPlayService : Service() {
     }
 
     /**
+     * Asks the bound Activity to put its video Surface on screen before a session exists.
+     *
+     * A SurfaceView only has a Surface once it is visible, and the overlay is normally made visible
+     * in response to CONNECTED — by which point the sender has already sent the single IDR it will
+     * emit for the next several seconds. Missing that IDR is what left a cold first mirroring
+     * attempt black until the user disconnected and reconnected.
+     */
+    @Volatile private var onPrepareSurface: (() -> Unit)? = null
+
+    fun setSurfacePreparer(prepare: () -> Unit) {
+        onPrepareSurface = prepare
+    }
+
+    /**
      * Sends a DACP transport command (TV remote → AirPlay sender), e.g. play/pause or skip what the
      * Mac/iPhone is streaming. Bound Activities call this from media-key events. No-op if no AirPlay
      * sender has advertised a DACP identity.
@@ -478,6 +492,18 @@ class PhairPlayService : Service() {
             videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
+            },
+            // Wake the screen and start the Activity the moment a sender opens the socket, so the
+            // Surface is already there when video arrives ~half a second later. Safe to fire on a
+            // connection that turns out to be a probe: no state changes here, and the Activity
+            // shows its normal Home screen until a session actually starts.
+            onSenderApproaching = {
+                wakeDisplay()
+                bringAppToFront()
+                // Runs on an RTSP socket thread; view work has to hop to the main looper.
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    runCatching { onPrepareSurface?.invoke() }
+                }
             },
             onPhotoReceived = { bytes, imageType ->
                 _photoFrame.value = PhotoFrame(

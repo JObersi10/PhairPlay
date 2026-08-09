@@ -10,6 +10,8 @@ import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.os.IBinder
 import android.util.Rational
 import androidx.core.app.ActivityCompat
@@ -112,6 +114,10 @@ class MainActivity : AppCompatActivity() {
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { getVideoSurface() }
+            // Put the SurfaceView on screen as soon as a sender opens the socket, before we know
+            // what kind of session it is. A SurfaceView has no Surface until it is visible, and by
+            // the time CONNECTED arrives the sender has already sent its opening IDR.
+            service?.setSurfacePreparer { prepareVideoSurface() }
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
@@ -351,10 +357,66 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.addView(pinScreen)
         // Added last so it draws over the video surface rather than under it.
         streamingContainer.addView(mirrorControls)
+        // Touch, alongside the remote — same actions, same session split. A ViewGroup only reaches
+        // its own touch listener when no child consumed the event, so the Now Playing transport
+        // buttons and the mirror control bar keep taking their own taps; we get the empty space.
+        streamingContainer.setOnTouchListener { _, event -> handleOverlayTouch(event) }
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE
     }
+
+    /**
+     * Touch equivalent of the remote mapping in [onKeyDown], routed by the same [sessionMode] latch
+     * so the two input methods never disagree about what a gesture means.
+     *
+     * Video: a tap reveals the control bar, exactly as a D-pad press does.
+     * Audio: a tap is play/pause and a horizontal fling changes track. No scrubbing — the D-pad
+     * gets that on a remote, and a swipe-to-seek would fight the skip gesture for the same motion.
+     */
+    private fun handleOverlayTouch(event: android.view.MotionEvent): Boolean {
+        // A PiP window is a thumbnail: taps there belong to the system's own controls, and acting
+        // on them would fire transport commands the user never aimed at.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode) return false
+        if (sessionMode == Mode.NONE) return false
+        return overlayGestures.onTouchEvent(event)
+    }
+
+    private val overlayGestures: android.view.GestureDetector by lazy {
+        android.view.GestureDetector(this, object : android.view.GestureDetector.SimpleOnGestureListener() {
+            // Consuming DOWN is what keeps the rest of the gesture coming; without it a fling never
+            // reaches onFling because MOVE/UP go elsewhere.
+            override fun onDown(e: android.view.MotionEvent) = true
+
+            override fun onSingleTapUp(e: android.view.MotionEvent): Boolean = when (sessionMode) {
+                Mode.VIDEO -> { mirrorControls.reveal(); true }
+                Mode.AUDIO -> { nowPlayingScreen.togglePause(); true }
+                Mode.NONE -> false
+            }
+
+            override fun onFling(
+                down: android.view.MotionEvent?,
+                up: android.view.MotionEvent,
+                velocityX: Float,
+                velocityY: Float
+            ): Boolean {
+                if (sessionMode != Mode.AUDIO || down == null) return false
+                val dx = up.x - down.x
+                val dy = up.y - down.y
+                // Three guards, because a sloppy tap is a tiny fling and would skip a track: enough
+                // distance, enough speed, and clearly more horizontal than vertical.
+                if (kotlin.math.abs(dx) < dp(FLING_MIN_DP)) return false
+                if (kotlin.math.abs(velocityX) < dp(FLING_MIN_VELOCITY_DP)) return false
+                if (kotlin.math.abs(dx) < kotlin.math.abs(dy) * 2) return false
+                val command = if (dx < 0) DacpClient.CMD_NEXT else DacpClient.CMD_PREV
+                Timber.d("Overlay fling ${if (dx < 0) "left" else "right"} — $command")
+                service?.sendAirPlayRemoteCommand(command)
+                return true
+            }
+        })
+    }
+
+    private fun dp(value: Int): Float = value * resources.displayMetrics.density
 
     /**
      * Stops the app's own UI from taking input while a session owns the screen.
@@ -434,6 +496,21 @@ class MainActivity : AppCompatActivity() {
      *
      * Hides the nav panel and content area to give the stream the full screen.
      */
+    /**
+     * Shows the (black) video surface ahead of a session so its Surface exists when the first
+     * frame lands. Harmless if the session turns out to be audio or a photo: the state observers
+     * swap in the right screen a moment later.
+     */
+    fun prepareVideoSurface() {
+        if (sessionMode != Mode.NONE) return          // a session already owns the screen
+        if (streamingContainer.visibility == View.VISIBLE) return
+        streamingScreen.visibility = View.VISIBLE
+        streamingContainer.visibility = View.VISIBLE
+        streamingContainer.bringToFront()
+        setOverlayOwnsInput(true)
+        Timber.d("Surface prepared ahead of session")
+    }
+
     fun showStreamingScreen() {
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
@@ -733,6 +810,19 @@ class MainActivity : AppCompatActivity() {
 
         private const val PERMISSION_REQUEST_NOTIFICATIONS = 1001
 
+        /**
+         * How long to stay on screen after a session ends before handing the TV back. Long enough
+         * to cover a sender switching between mirroring and video, short enough that a real
+         * disconnect doesn't leave the user staring at PhairPlay.
+         */
+        private const val SESSION_HANDOVER_GRACE_MS = 4_000L
+
+        /** Minimum horizontal travel for a swipe to count as a track skip rather than a tap. */
+        private const val FLING_MIN_DP = 80
+
+        /** Minimum horizontal speed, dp/s — filters the slow drag of a finger resting on glass. */
+        private const val FLING_MIN_VELOCITY_DP = 200
+
         /** Keys that reveal (and then drive) the on-screen controls during a video session. */
         private val NAVIGATION_KEYS = setOf(
             android.view.KeyEvent.KEYCODE_DPAD_CENTER,
@@ -860,11 +950,25 @@ class MainActivity : AppCompatActivity() {
     private fun trackSessionEnd(sessionActive: Boolean) {
         if (sessionActive) {
             hadActiveSession = true
+            // A session started (or restarted) — cancel any pending exit.
+            sessionEndHandler.removeCallbacks(returnToPreviousApp)
             return
         }
         if (!hadActiveSession) return
         hadActiveSession = false
         if (!openedBySender) return
+        // Don't leave immediately. Switching from screen mirroring to AirPlay video tears the first
+        // session down and opens a second one a beat later, and leaving on the gap made PhairPlay
+        // look like it had quit by itself mid-handover. Wait out the gap; if a new session arrives
+        // the callback above cancels this.
+        sessionEndHandler.removeCallbacks(returnToPreviousApp)
+        sessionEndHandler.postDelayed(returnToPreviousApp, SESSION_HANDOVER_GRACE_MS)
+    }
+
+    private val sessionEndHandler = Handler(Looper.getMainLooper())
+
+    private val returnToPreviousApp = Runnable {
+        if (hadActiveSession) return@Runnable   // a new session took over in the meantime
         openedBySender = false
         Timber.d("Session ended — returning to the previous app")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && isInPictureInPictureMode) {

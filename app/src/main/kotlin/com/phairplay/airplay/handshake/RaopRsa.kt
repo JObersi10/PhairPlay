@@ -48,6 +48,31 @@ object RaopRsa {
         null
     }
 
+    /**
+     * Signs an `Apple-Challenge` for the RTSP `Apple-Response` header.
+     *
+     * Legacy RAOP senders (TikTok's audio AirPlay among them) put a random challenge on OPTIONS and
+     * hang up when the reply carries no signature — which looked from the outside like the receiver
+     * crashing the moment you picked it. The signed blob is `challenge || receiver IP || receiver
+     * MAC`, zero-padded to 32 bytes, RSA-signed with PKCS#1 v1.5 *without* hashing — the sender
+     * verifies by raw-decrypting, so a normal SHA-based signature would not match.
+     */
+    fun signChallenge(challenge: ByteArray, ipAddress: ByteArray, macAddress: ByteArray): ByteArray? = try {
+        val payload = ByteArray(32)
+        var o = 0
+        challenge.copyInto(payload, o); o += challenge.size
+        ipAddress.copyInto(payload, o); o += ipAddress.size
+        macAddress.copyInto(payload, o)
+        // "NoPadding" would leave the sender's RSA-verify seeing raw bytes; PKCS1Padding is what the
+        // AirPort Express did and what every sender checks for.
+        val cipher = Cipher.getInstance("RSA/ECB/PKCS1Padding")
+        cipher.init(Cipher.ENCRYPT_MODE, privateKey)
+        cipher.doFinal(payload)
+    } catch (e: Exception) {
+        Logger.w("Apple-Challenge signing failed: ${e.message}")
+        null
+    }
+
     /** The public half of the embedded key — used only by tests to round-trip the decrypt path. */
     internal fun publicKeyForTest(): PublicKey {
         val crt = privateKey as RSAPrivateCrtKey

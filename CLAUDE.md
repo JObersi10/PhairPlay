@@ -6,11 +6,25 @@ Fire TV receiver for AirPlay 2, Miracast and DLNA. Views are plain Android
 ## Build
 
 ```bash
-JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-/Volumes/SABRENT/PhairPlay/gradlew -p /Volumes/SABRENT/PhairPlay app:assembleFiretvDebug
+cd /Volumes/SABRENT/PhairPlay && \
+JAVA_HOME="/Volumes/SABRENT/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+ANDROID_HOME="/Volumes/SABRENT/Applications/AndroidSDK" \
+./gradlew :app:assembleFiretvDebug
 ```
 
-**Always the `firetv` flavor. Never `googletv`.**
+There is **no system JDK and no system Android SDK** — both live on the SABRENT
+drive, along with `adb` (`$ANDROID_HOME/platform-tools/adb`). Without those two
+environment variables the wrapper fails with "JAVA_HOME is set to an invalid
+directory".
+
+**`firetv` for the Fire TV** (minSdk 25). Use `googletv` (minSdk 29) *only* for a
+phone or tablet — installing it on the Fire TV fails with `INSTALL_FAILED_OLDER_SDK`,
+and the reverse leaves a TV build on a tablet. They are separate application IDs
+(`com.phairplay.firetv` / `com.phairplay.googletv`) and can coexist.
+
+Never pipe a Gradle run through `tail`: it buffers everything until exit, so a
+build that is working looks identically dead to one that is hung. Redirect to a
+file instead.
 
 APK: `app/build/outputs/apk/firetv/debug/app-firetv-debug.apk`
 
@@ -80,24 +94,112 @@ Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it
 | Protocol | Port | Status |
 |----------|------|--------|
 | AirPlay RTSP + audio | 7000 | Working — ALAC and AAC |
-| AirPlay screen mirror | — | **Freezes:** see below |
+| AirPlay screen mirror | — | Working (iPhone + macOS) — see "cold first connect" below |
 | Miracast | 7236 | Advertising; needs `ACCESS_FINE_LOCATION` granted at runtime on API < 33 |
 | DLNA/UPnP MediaRenderer | 8200 | Working, including GENA eventing |
 
-## Open bug — mirroring freeze (iOS 26.1)
+## Open bugs
 
-The only substantive bug left. One frame decodes, then every subsequent payload
-arrives as **type 5** (~372 B P-frames and ~25 KB I-frames), gets dropped, and the
-sender resets after ~38 s: `in=300 dropped=0 (0%) 0fps`. The SPS also parses as
-garbage (`32x66912`, `profile=0`).
+### Cold first connect shows nothing (mirroring)
 
-`MirrorStreamServer` logs the first 12 unknown payloads as hex. To capture: mirror
-**first**, then `curl -s http://192.168.1.246:8001/ | grep UNHANDLED`.
+Mirroring works, but the **first** attempt after the app has been cold-started
+often stays black until the user disconnects and reconnects. Chain:
 
-Do **not** feed an unknown payload type through `cipher.update()` to "see what
-happens" — that advances the AES-CTR keystream and corrupts every later frame.
+1. A `SurfaceView` has no `Surface` until it is visible.
+2. The overlay is made visible in response to `CONNECTED`.
+3. By then the sender has already sent the single IDR it will emit for the next
+   several seconds, so `MirrorStreamServer` parks on `awaitingKeyframe`.
+4. The reconnect works because the Activity is warm and the Surface already exists.
+
+Two attempts so far. Blocking the mirror `SETUP` reply until the Surface appeared
+**did not work and was reverted** — the Surface cannot exist at that point by
+construction, so the wait always ran its full timeout and added that delay to the
+sender's round trip (`Connect timing: RECORD +3380ms`). The current attempt is
+`PhairPlayService.setSurfacePreparer` → `MainActivity.prepareVideoSurface()`,
+called from `onSenderApproaching` when the control socket opens, which puts the
+black SurfaceView up before anyone knows the session type. **Unverified.**
+
+If that is still not early enough, the next honest option is asking the sender for
+a keyframe rather than racing it.
+
+### The event channel is encrypted and we treat it as plaintext
+
+`AirPlay Documentation.html` (project folder, not the repo) is explicit: after SETUP the sender
+connects to the event port and **enables encryption**. Keys come from the pair-verify secret —
+salt `Events-Salt`, info `Events-Write-Encryption-Key` (output) and `Events-Read-Encryption-Key`
+(input), with the two reversed on the sender side. The channel is logically *receiver → sender*
+even though the sender opens the socket.
+
+Our handler reads raw bytes off that socket and replies in cleartext RTSP, so it has never parsed
+anything real. The doc also says the receiver is expected to `POST /command` with a
+`updateInfo` plist over this channel once RECORD completes, which we never send.
+
+### Remote skip/next does nothing on modern senders
+
+Not a regression in the key mapping — that is intact. Recent iOS senders never
+advertise a DACP identity at all, so `sendAirPlayRemoteCommand` has nothing to talk
+to: a whole session logs zero `DACP` lines while logging
+`POST /command type=updateMRSupportedCommands`. DACP still works for the legacy RAOP senders that do advertise it (a TikTok session
+logged `DACP configured: id=…`), which is why this used to work. Both the unofficial
+AirPlay spec and pyatv's notes agree: remote control *is* DACP, and it requires the
+sender to send `DACP-ID` + `Active-Remote` so the receiver can find its `_dacp._tcp`
+service. AirPlay 2 senders send neither.
+
+**Settled by measurement, 2026-08-08.** Dumping the sender's own `POST /command`
+payload ends the speculation:
+
+```
+keys=[type, params]
+{type=updateMRSupportedCommands,
+ params={mrSupportedCommandsFromSender=[<104B>, <226B>, <765B>, <503B>, … 36 blobs]}}
+```
+
+36 opaque binary blobs, 103–765 bytes each — serialized **MediaRemote protobuf**
+messages (`mrSupportedCommandsFromSender`; MR = MediaRemote) inside a plist wrapper.
+Not a plist command vocabulary. An earlier revision of this file claimed the opposite,
+based on extrapolating from the one documented `updateInfo` example; that was wrong.
+
+Making skip/next work for AirPlay 2 senders therefore means implementing MRP message
+encoding (pyatv ships the `.proto` files). Tractable, but a subsystem, not a tweak.
+
+The event channel is encrypted and now decrypts correctly (`Event channel cipher
+ready`, no tag failures), but the sender writes nothing to it — it is the receiver's
+to write to. Encryption was a prerequisite worth having; it is not the blocker.
+
+### macOS audio backlog churn
+
+`Audio: backlog resync — dropped N frames` fires ~12 times in 3 seconds on Mac
+system audio. The Mac delivers faster than realtime and the queue is trimmed
+repeatedly. Audible as the "laggy and weird" playback.
+
+### FairPlay v2 (RAOP audio) key derivation
+
+`ALACDecoder.Decode failed: -50`, "decoded only 4/24 frames" — silence from the
+macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
 
 ## Hard-won details
+
+- **`setText(resId)` does not format.** `protocol_detail_connected` is
+  `"Streaming from %1$s"`; passed to `setText(resId)` the card literally displayed
+  the placeholder. Use `getString(resId, arg)`. Anything with a `%` needs an arg
+  and a no-arg fallback for when the name is not known yet.
+- **iOS needs `pk` in the mDNS TXT record.** Without the Ed25519 public key,
+  iPhones and iPads leave the receiver out of the AirPlay picker entirely while
+  macOS connects happily — which reads as a network problem and is not one.
+  Verify what is actually on the wire with `dns-sd -Z _airplay._tcp`, and force-stop
+  the app first: an `adb install -r` restarts the process but the old record can
+  still be cached.
+- **A bodyless 200 is not the same as an empty plist.** Answering
+  `POST /command` with `PlistCodec.encode(emptyMap())` made iOS abandon mirroring
+  silently after `RECORD`; replying with no body at all, the way an Apple TV does,
+  is what finally made the `streams` SETUP arrive.
+- **`leanback` marked `required="true"` filters the app off every non-TV device**,
+  even after a successful `adb install`. It is declared `required="false"` with both
+  `LEANBACK_LAUNCHER` and `LAUNCHER` categories so tablets get an icon too.
+- **A wedged Gradle daemon looks exactly like a slow build.** One sat at 230–312%
+  CPU for three hours and silently blocked every later invocation; `pkill -f
+  GradleDaemon` did not take, `kill -9 <pid>` did. Check `ps aux | grep GradleDaemon`
+  and its accumulated CPU time before believing a build is merely slow.
 
 - **Pause = empty packets, not absent ones.** A paused iOS sender keeps transmitting at the full
   ~128 packets/sec with its RTP clock still advancing in real time; the packets are just 44 bytes

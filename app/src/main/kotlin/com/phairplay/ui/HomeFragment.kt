@@ -251,6 +251,14 @@ class HomeFragment : Fragment() {
             detail.text = getString(
                 R.string.protocol_detail_last_sender, sender.name, relativeTime(sender.atMs)
             )
+        } else if (detailRes == R.string.protocol_detail_connected) {
+            // This string carries a %1$s for the sender's name. setText(resId) does no formatting,
+            // so the card literally read "Streaming from %1$s" for the whole session. During
+            // pairing there is no name yet, so fall back to a phrasing that doesn't need one.
+            val name = sender?.name
+            detail.text =
+                if (name.isNullOrBlank()) getString(R.string.protocol_detail_connected_unknown)
+                else getString(detailRes, name)
         } else {
             detail.setText(detailRes)
         }

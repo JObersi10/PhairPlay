@@ -5,7 +5,10 @@ import com.phairplay.airplay.handshake.InfoResponder
 import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.airplay.handshake.PairingSession
 import com.phairplay.airplay.handshake.PlistCodec
+import com.phairplay.util.Base64Util
 import com.phairplay.util.Logger
+import com.phairplay.util.NetworkUtils
+import com.phairplay.airplay.handshake.RaopRsa
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
@@ -88,7 +91,18 @@ open class RtspHandler(
      */
     private val onPlaybackAnchor: (startTs: Long, endTs: Long) -> Unit = { _, _ -> },
     /** Sender name + device type resolved from mirror SETUP plist (called when mirror audio starts). */
-    private val onSenderInfoChanged: (name: String, type: SenderDeviceType) -> Unit = { _, _ -> }
+    private val onSenderInfoChanged: (name: String, type: SenderDeviceType) -> Unit = { _, _ -> },
+    /**
+     * Fired the instant a sender opens the control socket — before pairing, before any decision
+     * about what kind of session this is.
+     *
+     * The point is purely to start the Activity early. A cold Activity launch plus SurfaceView
+     * creation costs more than the ~450 ms between the mirror key exchange and the first video
+     * packet, so the decoder had no Surface for the opening IDR and then had to wait for the
+     * sender's next one — seconds of black screen, which is why the first connect "didn't grab"
+     * and a reconnect (warm Activity) did.
+     */
+    private val onSenderApproaching: () -> Unit = {}
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -125,6 +139,9 @@ open class RtspHandler(
     /** Remote (sender) address of the active control connection — needed for AirPlay 2 NTP. */
     @Volatile
     private var currentRemoteAddress: java.net.InetAddress? = null
+
+    /** Our own address on the socket the sender is talking to — goes into the Apple-Response blob. */
+    private var currentLocalAddress: java.net.InetAddress? = null
 
     /** True once an AirPlay 2 mirroring SETUP has run on this connection (no ANNOUNCE/SDP). */
     @Volatile
@@ -231,6 +248,7 @@ open class RtspHandler(
                 val clientSocket = serverSocket!!.accept()
                 connectStartMs = System.currentTimeMillis()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
+                runCatching { onSenderApproaching() }
 
                 if (activeClient != null && !activeClient!!.isClosed) {
                     Logger.w("Rejecting second client — already streaming")
@@ -263,6 +281,7 @@ open class RtspHandler(
         // PIN/verifier and the "paired" flag must survive a reconnect. They live for the receiver's
         // lifetime — replaced by the next /pair-pin-start, set on a successful pairing.
         currentRemoteAddress = socket.inetAddress
+        currentLocalAddress = socket.localAddress
 
         try {
             while (running && !socket.isClosed) {
@@ -278,8 +297,12 @@ open class RtspHandler(
                 // keep handling (switching to interleaved mode would skip them → no metadata).
                 if (request.method == "RECORD" && response.statusCode == 200 && !isMirrorSession &&
                     currentSession?.hasVideo == true) {
-                    Logger.d("RTSP handshake complete — switching to interleaved RTP (video)")
+                    Logger.i("RTSP handshake complete — switching to interleaved RTP (video)")
                     break
+                }
+                if (response.statusCode !in 200..299 && response.statusCode != 101) {
+                    Logger.w("RTSP ${request.method} ${request.uri} → ${response.statusCode} " +
+                             "${response.statusMessage} (sender may abandon the session)")
                 }
             }
 
@@ -296,7 +319,14 @@ open class RtspHandler(
                 )
             }
         } catch (e: Exception) {
-            if (running) Logger.e("Error handling RTSP client", e)
+            // "Socket closed" is how a deliberate teardown surfaces on the blocked read — we closed
+            // the socket ourselves. Logging it as an error with a stack trace made every normal
+            // disconnect look like a crash.
+            when {
+                !running -> Unit
+                e is java.net.SocketException && socket.isClosed -> Logger.i("RTSP client closed")
+                else -> Logger.e("Error handling RTSP client", e)
+            }
         } finally {
             Logger.i("Client disconnected")
             socket.close()
@@ -315,7 +345,10 @@ open class RtspHandler(
         // Senders POST /feedback every ~2s as a keepalive. It carries nothing useful and drowns the
         // diagnostic buffer, so it is the one request we don't trace.
         if (!request.uri.endsWith("/feedback")) {
-            Logger.d("RTSP ${request.method} ${request.uri}")
+            // INFO, not DEBUG: Fire OS drops DEBUG-level logs for this package even in a debug
+            // build, so this trace — the one thing that shows what a sender actually sent — was
+            // invisible on the only device it matters on.
+            Logger.i("RTSP ${request.method} ${request.uri}")
         }
         // Senders attach their DACP reverse-control identity to most requests — capture it so the TV
         // remote can drive playback (DacpClient dedups, so this is cheap to call repeatedly).
@@ -364,6 +397,7 @@ open class RtspHandler(
         "/feedback"    -> handleFeedback(request)
         "/audioMode"   -> RtspResponse(200, "OK", protocol = request.responseProtocol())
         "/reverse"     -> handleReverse(request)
+        "/command"     -> handleCommand(request)
         // AirPlay video URL mode (non-mirroring): play a URL + drive transport.
         "/play"        -> handleVideoPlay(request)
         "/rate"        -> handleVideoRate(request)
@@ -428,6 +462,57 @@ open class RtspHandler(
         val info = onPlaybackInfo()
         val body = "duration: %.6f\r\nposition: %.6f\r\n".format(info?.durationSec ?: 0.0, info?.positionSec ?: 0.0)
         return RtspResponse(200, "OK", body = body, contentType = "text/parameters", protocol = request.responseProtocol())
+    }
+
+    /**
+     * POST /command — the AirPlay 2 media-remote control channel.
+     *
+     * iOS (not macOS) sends this immediately after RECORD, carrying a binary plist whose `type` is
+     * usually `updateMRSupportedCommands` — the sender telling the receiver which transport commands
+     * it will honour. It expects a 200 with a plist body.
+     *
+     * We do not act on the contents; the DACP reverse channel already gives the TV remote its
+     * control path. What matters is answering at all: this used to fall through to 501, and iOS
+     * treats that as a receiver that cannot hold up its end and abandons the session — it completed
+     * RECORD and then never sent the SETUP carrying `streams`, so no data server started and the
+     * screen stayed black. macOS never sends /command, which is why mirroring from a Mac worked
+     * throughout and only iPhone mirroring was broken.
+     */
+    /** One dump per session — the list does not change while a sender is connected. */
+    private var loggedSupportedCommands = false
+
+    /**
+     * Renders a decoded plist value as readable text. Deliberately structural rather than a raw
+     * hex dump: what matters is the command identifiers and their nesting, not the bytes.
+     */
+    private fun describe(value: Any?): String = when (value) {
+        null -> "null"
+        is Map<*, *> -> value.entries.joinToString(", ", "{", "}") { "${it.key}=${describe(it.value)}" }
+        is List<*> -> value.joinToString(", ", "[", "]") { describe(it) }
+        is ByteArray -> "<${value.size}B>"
+        else -> value.toString()
+    }
+
+    private fun handleCommand(request: RtspRequest): RtspResponse {
+        val plist = runCatching { PlistCodec.decode(request.bodyBytes) }.getOrNull()
+        val type = plist?.get("type") as? String ?: "unknown"
+        Logger.i("POST /command type=$type (${request.bodyBytes.size}B) — acknowledged")
+        // Dump the payload for updateMRSupportedCommands. The sender is listing the transport
+        // commands it will accept, which is the only authoritative source for the vocabulary a
+        // receiver may send back — the public protocol notes document controller→Apple TV control
+        // (DACP ctrl-int, MRP, _hidC) and nothing in this direction. Logged once per session at
+        // INFO because DEBUG is dropped on Fire OS, and truncated so a 7 KB plist stays readable.
+        // Dump the whole plist structure once, not a guessed key. An earlier version assumed a
+        // "value" entry and logged null for every message because no such key exists — the point of
+        // this trace is to discover the shape, so it must not presuppose one.
+        if (!loggedSupportedCommands && request.bodyBytes.size > COMMAND_DUMP_MIN_BYTES && plist != null) {
+            loggedSupportedCommands = true
+            Logger.i("POST /command keys=${plist.keys} body=${describe(plist).take(SUPPORTED_COMMANDS_LOG_CHARS)}")
+        }
+        // Bodyless 200, the way a real Apple TV answers. An empty *plist* is not the same thing as
+        // no body: the sender parses what it is given, and a zero-key plist where it expects either
+        // nothing or a populated ack is a parse it can reject silently.
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
 
     /**
@@ -496,9 +581,9 @@ open class RtspHandler(
         val info = mapOf(
             "deviceid" to com.phairplay.util.NetworkUtils.getMacAddress(),
             "features" to 0x1E5A7FFFF7L,
-            "model" to "AppleTV5,3",
+            "model" to "AppleTV6,2",
             "protovers" to "1.1",
-            "srcvers" to "220.68",
+            "srcvers" to "377.40.00",
         )
         return RtspResponse(
             200, "OK",
@@ -834,13 +919,29 @@ open class RtspHandler(
 
     /** Handles OPTIONS — macOS asks what RTSP methods are supported. */
     open fun handleOptionsInternal(request: RtspRequest): RtspResponse {
-        return RtspResponse(
-            statusCode = 200,
-            statusMessage = "OK",
-            headers = mapOf(
-                "Public" to "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER"
-            )
+        val headers = mutableMapOf(
+            "Public" to "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER"
         )
+        request.headers["Apple-Challenge"]?.let { challenge ->
+            appleChallengeResponse(challenge)?.let { headers["Apple-Response"] = it }
+        }
+        return RtspResponse(statusCode = 200, statusMessage = "OK", headers = headers)
+    }
+
+    /**
+     * Answers a legacy RAOP `Apple-Challenge`. Senders that send one treat a missing `Apple-Response`
+     * as an unauthenticated receiver and drop the connection right after OPTIONS.
+     */
+    private fun appleChallengeResponse(challengeB64: String): String? {
+        val challenge = runCatching { Base64Util.decode(challengeB64.trim()) }.getOrNull() ?: return null
+        val local = currentLocalAddress ?: return null
+        val mac = NetworkUtils.getMacAddress().split(":")
+            .mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
+        if (mac.size != 6) return null
+        val signed = RaopRsa.signChallenge(challenge, local.address, mac) ?: return null
+        // The sender expects the Base64 without padding — the AirPort Express omitted it and some
+        // senders compare the string, not the decoded bytes.
+        return Base64Util.encode(signed).trimEnd('=')
     }
 
     /** Handles ANNOUNCE — macOS/iOS sends SDP describing codecs, ports, and encryption. */
@@ -1181,6 +1282,12 @@ open class RtspHandler(
     }
 
     companion object {
+        /** Enough to see the command identifiers without flooding the log with one plist. */
+        private const val SUPPORTED_COMMANDS_LOG_CHARS = 4000
+
+        /** Skip the small placeholder message the sender leads with; dump the real list. */
+        private const val COMMAND_DUMP_MIN_BYTES = 1000
+
         private const val RTSP_PORT = 7000
 
         // SRP PIN access control. macOS's AirPlay code-entry field is exactly 4 digits, so the PIN
