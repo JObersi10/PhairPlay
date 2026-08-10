@@ -148,9 +148,22 @@ class HapPairing(
         }
 
         val sub = HapTlv.decode(plain)
-        val controllerId = sub[HapTlv.IDENTIFIER] ?: return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
-        val controllerLtpk = sub[HapTlv.PUBLIC_KEY] ?: return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
-        val signature = sub[HapTlv.PROOF] ?: return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        // Each of these used to return in silence, which is indistinguishable in a log from the
+        // request never arriving. Naming the missing field is the difference between one grep and
+        // another round trip to the device.
+        val controllerId = sub[HapTlv.IDENTIFIER] ?: run {
+            Logger.w("HAP M5 sub-TLV has no IDENTIFIER (types: ${sub.keys})")
+            return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        }
+        val controllerLtpk = sub[HapTlv.PUBLIC_KEY] ?: run {
+            Logger.w("HAP M5 sub-TLV has no PUBLIC_KEY (types: ${sub.keys})")
+            return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        }
+        val signature = sub[HapTlv.PROOF] ?: run {
+            Logger.w("HAP M5 sub-TLV has no PROOF (types: ${sub.keys})")
+            return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        }
+        Logger.i("HAP M5 decrypted: id=${controllerId.size}B ltpk=${controllerLtpk.size}B sig=${signature.size}B")
 
         // The controller signs (deviceX | pairingId | ltpk) with the very key it is registering.
         // Verifying that is what stops someone registering a public key they do not hold.

@@ -219,7 +219,21 @@ class MdnsService(
 
             setAttribute("cn", "0,1,2,3")        // Cipher numbers (encryption types)
             setAttribute("da", "true")             // Digest authentication capable
-            setAttribute("et", "0,3,5")            // Encryption types supported
+            // Encryption types: 0 = none, 1 = RSA, 3 = FairPlay, 4/5 = FairPlay SAPv2.5.
+            //
+            // Deliberately 0,1 and NOT 0,3,5. A sender picks the strongest type we advertise, so
+            // offering 3 and 5 forced macOS Music down FairPlay v2 -- a path that needs four
+            // captured 142-byte phase-1 reply tables, of which exactly one is publicly available.
+            // Modes 0, 1 and 3 therefore got mode 2's cryptographic material, the wrapped key
+            // unwrapped to a plausible but wrong 16 bytes, and ALAC rejected 20 frames in every 24.
+            // The symptom was silence with no error, which is why it read as a decoder bug.
+            //
+            // RSA (`rsaaeskey`) is fully implemented here and needs no captured constants at all.
+            // Every open-source receiver advertises 0,1 for exactly this reason.
+            //
+            // This does NOT affect mirroring: iOS screen mirroring negotiates FairPlay v3 over
+            // _airplay._tcp, where all four reply tables ARE published and already present.
+            setAttribute("et", "0,1")              // Encryption types supported
             setAttribute("md", "0,1,2")            // Metadata types supported
             setAttribute("sv", "false")            // Software volume control
             setAttribute("tp", "UDP")              // Transport for audio RTP

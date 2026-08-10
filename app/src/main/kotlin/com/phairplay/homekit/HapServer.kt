@@ -110,7 +110,14 @@ class HapServer(
             output = socket.getOutputStream()
             while (running && !socket.isClosed) {
                 val request = readRequest() ?: break
-                handle(request)
+                // Per-request, with the stack trace. The connection-level catch above logs only
+                // `it.message`, which for the exceptions that actually occur here (a null cast, an
+                // array bound) is null -- so a throw mid-pair-setup produced a log line saying
+                // nothing, or none at all, and looked exactly like the request having been dropped.
+                runCatching { handle(request) }.onFailure {
+                    Logger.e("HAP request ${request.method} ${request.target} failed", it)
+                    throw it
+                }
             }
         }
 
