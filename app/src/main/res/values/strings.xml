@@ -108,6 +108,9 @@
     <string name="hk_step_enter_code">Enter the code below, or scan it</string>
     <string name="hk_code_label">Setup code</string>
     <string name="hk_code_scan_hint">Point your camera at the square to enter it automatically.</string>
+    <string name="hk_code_starting">Starting HomeKit — the code will appear in a moment…</string>
+    <string name="hk_pending_title">Not paired yet</string>
+    <string name="hk_pending_body">HomeKit is on and this TV is visible to the Home app. You can finish adding it whenever you like — the code stays the same. To see these instructions again, go to Settings and choose HomeKit setup.</string>
     <string name="hk_code_unavailable">No code yet — HomeKit is still starting. Go back and try again in a moment.</string>
     <string name="hk_uncertified_note">iOS will warn that this is an uncertified accessory. That is expected: PhairPlay is not an Apple-licensed product. Choose Add Anyway.</string>
     <string name="hk_code_done">Done</string>
@@ -233,7 +236,11 @@
     <string name="onboarding_grant">Grant</string>
     <string name="onboarding_granted">Granted</string>
     <string name="onboarding_open_settings">Open settings</string>
-    <string name="onboarding_overlay_no_settings">This Fire TV has no settings screen for the overlay permission. Grant it from a computer with: adb shell appops set com.phairplay.firetv SYSTEM_ALERT_WINDOW allow</string>
+    <string name="onboarding_overlay_no_settings">Fire TV has no screen for this permission — Amazon does not ship one. PhairPlay still works; it just cannot open itself when a sender connects.
+
+To grant it, run this from a computer with adb:
+
+adb shell appops set %1$s SYSTEM_ALERT_WINDOW allow</string>
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>

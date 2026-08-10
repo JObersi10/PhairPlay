@@ -208,6 +208,7 @@ class AirPlayReceiver(
             try {
                 startTimingHandler()
                 startControlHandler()
+                startAudioUdpReceiver()
                 startMdnsService()
                 startRtspHandler()
             } catch (e: Exception) {
@@ -251,6 +252,8 @@ class AirPlayReceiver(
             rtspHandler?.stop()
             timingHandler?.stop()
             controlHandler?.stop()
+            runCatching { audioSocket?.close() }
+            audioSocket = null
             mdnsService?.stop()
             dacpClient.stop()
             releaseMediaComponents()
@@ -555,8 +558,7 @@ class AirPlayReceiver(
         }
         Logger.i("AudioPlayer started (${session.sampleRate}Hz × ${session.channels}ch, " +
                  "codec=${session.audioCodec}, encrypted=${session.isAudioEncrypted})")
-
-        startAudioUdpReceiver()
+        // The audio socket is NOT opened here -- it is already listening. See startAudioUdpReceiver.
     }
 
     /**
@@ -567,9 +569,19 @@ class AirPlayReceiver(
      * than guaranteed delivery. A missing packet produces a brief audio glitch,
      * which is far less disruptive than the buffering delays that TCP would introduce.
      *
-     * The socket is closed in [releaseMediaComponents] when streaming ends.
+     * WHY IT BINDS AT STARTUP AND NEVER CLOSES BETWEEN SESSIONS: this used to be opened lazily when
+     * the AudioPlayer started, which put a coroutine hop and ~110ms between RECORD and a bound
+     * socket. macOS Music begins sending audio the instant it has sent RECORD, so for that window
+     * every packet drew an ICMP port-unreachable, and Music concluded the receiver was dead and sent
+     * TEARDOWN — 8ms before the socket finished binding. The device log showed the bind line AFTER
+     * the teardown line, which is what finally gave it away. An advertised port must be listening
+     * before it is advertised, not after it is used.
+     *
+     * Packets arriving with no active player are simply dropped: cheap, and far better than the
+     * alternative of the port going away again between sessions.
      */
     private fun startAudioUdpReceiver() {
+        if (audioSocket != null) return
         scope.launch(Dispatchers.IO) {
             try {
                 val socket = DatagramSocket(AUDIO_RTP_PORT)
@@ -853,8 +865,9 @@ class AirPlayReceiver(
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
     private fun releaseMediaComponents() {
         rtspHandler?.onVideoNalUnit = null
-        try { audioSocket?.close() } catch (e: Exception) { /* non-fatal */ }
-        audioSocket = null
+        // Deliberately NOT closing audioSocket here. It belongs to the receiver, not the session --
+        // closing it between sessions reopens the very race that made Music unusable. The player it
+        // feeds is still released below, so packets arriving between sessions are simply dropped.
         mirrorServer?.stop()
         mirrorServer = null
         positionTicker?.cancel(); positionTicker = null

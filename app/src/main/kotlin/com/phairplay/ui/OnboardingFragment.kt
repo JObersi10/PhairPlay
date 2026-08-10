@@ -558,39 +558,58 @@ class OnboardingFragment : Fragment() {
     }
 
     /**
-     * Fire TV has no in-app path to the overlay grant, so this hands off to system settings.
+     * Hands off to the system screen for the overlay grant — where one exists.
      *
-     * Launching this is fiddlier than it looks. `startActivity` only throws when NOTHING resolves;
-     * several Fire OS builds resolve ACTION_MANAGE_OVERLAY_PERMISSION to a stub that finishes
-     * immediately, so the old catch-and-fall-back never fired and the button did nothing at all.
-     * Two changes fix that: ask the package manager whether each candidate really resolves before
-     * launching it, and offer more candidates — the per-app screen, the system-wide overlay LIST
-     * (which is what Fire OS actually ships), then app details, then the Settings root.
+     * On Fire OS it does not. `ACTION_MANAGE_OVERLAY_PERMISSION` resolves to
+     * `com.amazon.tv.settings.v2/.compliance.CTSDummyIntentHandler`, a stub Amazon ships so the
+     * device passes Android's compatibility suite. It resolves, it launches, it finishes
+     * immediately, and nothing appears. That is why this button "did nothing" through two rounds of
+     * fixes: both a plain try/catch and a resolveActivity() check are satisfied by a dummy.
      *
-     * If every one of them fails there is no UI path on this build, and the honest thing is to say
-     * so rather than leave a dead button.
+     * So the resolved COMPONENT is inspected, not merely its existence, and known stubs are skipped.
+     * When nothing real is left the honest answer is that this device cannot grant the permission
+     * from its own UI, and the user is given the one command that works.
      */
     private fun openOverlaySettings() {
         val ctx = requireContext()
         val pkg = ctx.packageName
         val attempts = listOf(
             Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$pkg")),
-            // No data URI: the "Apps that can appear on top" list. Fire OS exposes this one far more
-            // reliably than the per-app variant.
             Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")),
-            Intent(Settings.ACTION_SETTINGS),
         )
         for (intent in attempts) {
-            if (intent.resolveActivity(ctx.packageManager) == null) continue
-            val launched = runCatching { startActivity(intent); true }.getOrDefault(false)
-            if (launched) {
-                Logger.i("Overlay settings opened via ${intent.action} (data=${intent.data})")
+            val target = intent.resolveActivity(ctx.packageManager) ?: continue
+            if (isStubHandler(target.className)) {
+                Logger.i("Skipping stub settings handler ${target.flattenToShortString()}")
+                continue
+            }
+            if (runCatching { startActivity(intent); true }.getOrDefault(false)) {
+                Logger.i("Overlay settings opened via ${intent.action} → ${target.flattenToShortString()}")
                 return
             }
         }
-        Logger.w("No settings screen resolves for the overlay permission on this build")
-        Toast.makeText(ctx, R.string.onboarding_overlay_no_settings, Toast.LENGTH_LONG).show()
+        Logger.w("No real settings screen for the overlay permission on this build — showing the adb path")
+        showOverlayFallbackDialog()
+    }
+
+    /**
+     * Recognises activities that exist only to satisfy a compatibility test.
+     *
+     * Matched on the class name because there is no flag or capability that marks them. Amazon's is
+     * `CTSDummyIntentHandler`; the `compliance` package it lives in catches its siblings.
+     */
+    private fun isStubHandler(className: String): Boolean =
+        className.contains("CTSDummy", ignoreCase = true) ||
+            className.contains(".compliance.", ignoreCase = true)
+
+    /** Explains why the button cannot work here, and gives the command that does. */
+    private fun showOverlayFallbackDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle(R.string.onboarding_perm_overlay)
+            .setMessage(getString(R.string.onboarding_overlay_no_settings, requireContext().packageName))
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     // ─── Small helpers ───────────────────────────────────────────────────────

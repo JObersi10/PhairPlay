@@ -169,6 +169,15 @@ class HomeFragment : Fragment() {
      */
     private fun observeServiceState() {
         val svc = service ?: return
+        // The binding is asynchronous and outlives the view. When onboarding finished it restarted
+        // the service and immediately replaced this fragment, so onServiceConnected landed after
+        // onDestroyView and viewLifecycleOwner threw — taking the whole app down right at the end of
+        // first-run setup. There is nothing to update if the view is gone; the next onViewCreated
+        // will observe again.
+        if (view == null) {
+            Logger.i("HomeFragment: service connected after the view was destroyed — skipping observers")
+            return
+        }
 
         viewLifecycleOwner.lifecycleScope.launch {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }

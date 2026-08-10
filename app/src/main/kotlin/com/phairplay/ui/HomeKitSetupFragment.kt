@@ -61,6 +61,7 @@ class HomeKitSetupFragment : Fragment() {
     private var page = PAGE_ASK
     private var renderedPage = -1
     private var pollingStarted = false
+    private var codeWaitStarted = false
 
     private val service get() = (activity as? MainActivity)?.boundService
 
@@ -129,6 +130,7 @@ class HomeKitSetupFragment : Fragment() {
 
     private fun render() {
         itemsContainer.removeAllViews()
+        codeWaitStarted = false
         secondaryButton.visibility = View.VISIBLE
 
         when (page) {
@@ -156,9 +158,18 @@ class HomeKitSetupFragment : Fragment() {
                 startPollingForPairing()
             }
             PAGE_DONE -> {
-                titleView.setText(R.string.hk_done_title)
-                bodyView.setText(R.string.hk_done_body)
-                renderCapabilityList()
+                // Reached two ways -- pairing actually completed, or the user pressed Done to move
+                // on. Claiming "Paired" in the second case was a plain lie, and the one thing this
+                // screen must not do is tell someone their accessory is set up when it is not.
+                val paired = service?.isHomeKitPaired() == true
+                if (paired) {
+                    titleView.setText(R.string.hk_done_title)
+                    bodyView.setText(R.string.hk_done_body)
+                    renderCapabilityList()
+                } else {
+                    titleView.setText(R.string.hk_pending_title)
+                    bodyView.setText(R.string.hk_pending_body)
+                }
                 primaryButton.setText(R.string.hk_finish)
                 secondaryButton.visibility = View.GONE
             }
@@ -187,9 +198,11 @@ class HomeKitSetupFragment : Fragment() {
         val ctx = requireContext()
         val code = service?.homeKitSetupCode()
         if (code == null) {
-            // HomeKit is off, or the service is not bound yet. Say which rather than showing an
-            // empty space where a code should be.
-            addNote(getString(R.string.hk_code_unavailable))
+            // The HAP server takes a second or two to come up after the service restart that
+            // enabling HomeKit triggers. A single delayed retry was not enough and left "no code
+            // yet" on screen as if it were the final answer, so keep looking until it appears.
+            addNote(getString(R.string.hk_code_starting))
+            waitForCode()
             return
         }
 
@@ -259,6 +272,32 @@ class HomeKitSetupFragment : Fragment() {
     // ─── Pairing watch ───────────────────────────────────────────────────────
 
     /**
+     * Re-renders once the HAP server has minted a setup code.
+     *
+     * Bounded: if the code never appears, something is actually wrong and looping forever would
+     * just hide it behind a spinner that never resolves.
+     */
+    private fun waitForCode() {
+        if (codeWaitStarted) return
+        codeWaitStarted = true
+        viewLifecycleOwner.lifecycleScope.launch {
+            repeat(CODE_WAIT_ATTEMPTS) {
+                delay(POLL_MS)
+                if (!isAdded || page != PAGE_CODE) return@launch
+                if (service?.homeKitSetupCode() != null) {
+                    codeWaitStarted = false
+                    render()
+                    return@launch
+                }
+            }
+            if (isAdded && page == PAGE_CODE) {
+                Logger.w("HomeKit setup code never appeared — HAP server did not start")
+                addNote(getString(R.string.hk_code_unavailable))
+            }
+        }
+    }
+
+    /**
      * Advances to the confirmation page as soon as the controller finishes pairing.
      *
      * Guarded by [pollingStarted] because [render] runs on every repaint; without it each repaint
@@ -287,12 +326,6 @@ class HomeKitSetupFragment : Fragment() {
             PAGE_ASK -> {
                 onSetEnabled?.invoke(true)
                 page = PAGE_CODE
-                // The service needs a moment to bring the HAP server up and mint a code; rendering
-                // straight away shows "unavailable" for a second and reads like a failure.
-                viewLifecycleOwner.lifecycleScope.launch {
-                    delay(START_GRACE_MS)
-                    if (isAdded && page == PAGE_CODE) render()
-                }
                 render()
             }
             // Skipping ahead by hand is allowed: someone may pair later, or from another phone.
@@ -358,7 +391,9 @@ class HomeKitSetupFragment : Fragment() {
         const val PAGE_DONE = 2
 
         const val POLL_MS = 1_000L
-        const val START_GRACE_MS = 1_200L
+
+        /** ~20s. Longer than any observed service restart, short enough to admit failure. */
+        const val CODE_WAIT_ATTEMPTS = 20
 
         val FOCUS_BLUE = Color.rgb(26, 115, 232)
     }
