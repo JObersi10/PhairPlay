@@ -1071,7 +1071,12 @@ open class RtspHandler(
             "Public" to "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER"
         )
         request.headers["Apple-Challenge"]?.let { challenge ->
-            appleChallengeResponse(challenge)?.let { headers["Apple-Response"] = it }
+            val response = appleChallengeResponse(challenge)
+            if (response != null) {
+                headers["Apple-Response"] = response
+            } else {
+                Logger.e("OPTIONS carried an Apple-Challenge we could not answer — the sender will hang up")
+            }
         }
         return RtspResponse(statusCode = 200, statusMessage = "OK", headers = headers)
     }
@@ -1081,12 +1086,29 @@ open class RtspHandler(
      * as an unauthenticated receiver and drop the connection right after OPTIONS.
      */
     private fun appleChallengeResponse(challengeB64: String): String? {
-        val challenge = runCatching { Base64Util.decode(challengeB64.trim()) }.getOrNull() ?: return null
-        val local = currentLocalAddress ?: return null
+        // Every branch here logs. A missing Apple-Response is not a soft failure: macOS Music sends
+        // OPTIONS with a challenge, and on a reply without the header it closes the connection
+        // immediately and never sends ANNOUNCE. In the log that reads as "RTSP OPTIONS *" followed
+        // by "Client disconnected" with no explanation whatsoever, which is exactly how it looked.
+        val challenge = runCatching { Base64Util.decode(challengeB64.trim()) }.getOrNull() ?: run {
+            Logger.w("Apple-Challenge: not valid base64 ('$challengeB64')")
+            return null
+        }
+        val local = currentLocalAddress ?: run {
+            Logger.w("Apple-Challenge: local address unknown — cannot sign")
+            return null
+        }
         val mac = NetworkUtils.getMacAddress().split(":")
             .mapNotNull { it.toIntOrNull(16)?.toByte() }.toByteArray()
-        if (mac.size != 6) return null
-        val signed = RaopRsa.signChallenge(challenge, local.address, mac) ?: return null
+        if (mac.size != 6) {
+            Logger.w("Apple-Challenge: MAC unusable (${NetworkUtils.getMacAddress()}) — cannot sign")
+            return null
+        }
+        val signed = RaopRsa.signChallenge(challenge, local.address, mac) ?: run {
+            Logger.w("Apple-Challenge: RSA signing failed")
+            return null
+        }
+        Logger.i("Apple-Challenge answered (${challenge.size}B challenge → ${signed.size}B signature)")
         // The sender expects the Base64 without padding — the AirPort Express omitted it and some
         // senders compare the string, not the decoded bytes.
         return Base64Util.encode(signed).trimEnd('=')

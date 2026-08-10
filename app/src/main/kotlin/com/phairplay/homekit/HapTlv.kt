@@ -25,6 +25,16 @@ object HapTlv {
     const val SALT = 0x02
     const val PUBLIC_KEY = 0x03
     const val PROOF = 0x04
+
+    /**
+     * kTLVType_Signature. NOT [PROOF].
+     *
+     * The two are easy to conflate and the spec uses both: PROOF (4) carries SRP proofs in M3/M4,
+     * while SIGNATURE (10) carries the Ed25519 signature inside the encrypted sub-TLVs of M5/M6 and
+     * pair-verify. Reading a signature out of PROOF finds nothing, and the pairing simply stops --
+     * the controller sits waiting and iOS eventually reports that the accessory cannot be used.
+     */
+    const val SIGNATURE = 0x0A
     const val ENCRYPTED_DATA = 0x05
     const val STATE = 0x06
     const val ERROR = 0x07

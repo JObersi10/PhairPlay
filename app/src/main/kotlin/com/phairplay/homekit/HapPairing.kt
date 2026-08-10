@@ -159,8 +159,8 @@ class HapPairing(
             Logger.w("HAP M5 sub-TLV has no PUBLIC_KEY (types: ${sub.keys})")
             return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
         }
-        val signature = sub[HapTlv.PROOF] ?: run {
-            Logger.w("HAP M5 sub-TLV has no PROOF (types: ${sub.keys})")
+        val signature = sub[HapTlv.SIGNATURE] ?: run {
+            Logger.w("HAP M5 sub-TLV has no SIGNATURE (types: ${sub.keys})")
             return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
         }
         Logger.i("HAP M5 decrypted: id=${controllerId.size}B ltpk=${controllerLtpk.size}B sig=${signature.size}B")
@@ -198,7 +198,7 @@ class HapPairing(
         val subOut = HapTlv.encode(
             HapTlv.IDENTIFIER to idBytes,
             HapTlv.PUBLIC_KEY to ltpk,
-            HapTlv.PROOF to accessorySig,
+            HapTlv.SIGNATURE to accessorySig,
         )
         val sealed = HapCrypto.seal(encKey, HapCrypto.pairingNonce("PS-Msg06"), subOut)
 
@@ -244,7 +244,7 @@ class HapPairing(
         val sessionKey = HapCrypto.hkdf(shared, VERIFY_ENCRYPT_SALT, VERIFY_ENCRYPT_INFO)
         verifySessionKey = sessionKey
 
-        val sub = HapTlv.encode(HapTlv.IDENTIFIER to idBytes, HapTlv.PROOF to sig)
+        val sub = HapTlv.encode(HapTlv.IDENTIFIER to idBytes, HapTlv.SIGNATURE to sig)
         val sealed = HapCrypto.seal(sessionKey, HapCrypto.pairingNonce("PV-Msg02"), sub)
 
         verifyState = 2
@@ -272,7 +272,7 @@ class HapPairing(
         val sub = HapTlv.decode(plain)
         val controllerId = sub[HapTlv.IDENTIFIER]?.toString(Charsets.UTF_8)
             ?: return HapTlv.error(4, HapTlv.ERROR_AUTHENTICATION)
-        val signature = sub[HapTlv.PROOF] ?: return HapTlv.error(4, HapTlv.ERROR_AUTHENTICATION)
+        val signature = sub[HapTlv.SIGNATURE] ?: return HapTlv.error(4, HapTlv.ERROR_AUTHENTICATION)
 
         // The actual access check: only a controller we already paired with may proceed.
         val ltpk = store.pairedKey(controllerId) ?: run {
