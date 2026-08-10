@@ -156,6 +156,23 @@
             </intent-filter>
         </receiver>
 
+        <!--
+          Optional, and never activated automatically. HomeKit's "off" uses lockNow() to blank the
+          display, which needs an active device-admin component; the policy file requests force-lock
+          only. If the user declines, HomeKit "off" just ends the session.
+        -->
+        <receiver
+            android:name=".service.PhairPlayDeviceAdmin"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

@@ -117,6 +117,9 @@ class PhairPlayService : Service() {
     val lastSender: StateFlow<LastSender?> = _lastSender.asStateFlow()
 
     private val deviceVolume by lazy { DeviceVolumeController(applicationContext) }
+
+    /** HomeKit accessory. Null unless the user enabled it — pairing joins their Home, so it is opt-in. */
+    private var homeKit: com.phairplay.homekit.HomeKitReceiver? = null
     @Volatile private var senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF
 
     private val _pairingPin = MutableStateFlow<String?>(null)
@@ -447,7 +450,52 @@ class PhairPlayService : Service() {
         // flavour constant is the authority on whether the hardware can finish a WFD session.
         if (settings.miracastEnabled && DeviceFeatures.MIRACAST_SUPPORTED) startMiracast()
         if (settings.dlnaEnabled)      startDlna()
+        if (settings.homeKitEnabled)   startHomeKit(settings)
     }
+
+    /**
+     * Starts the HomeKit accessory.
+     *
+     * Separate from the streaming receivers on purpose: it advertises a different service, holds a
+     * persistent identity, and its failure must not take AirPlay down with it — a HomeKit problem
+     * should cost HomeKit, not the thing the user actually bought this for.
+     */
+    private fun startHomeKit(settings: com.phairplay.settings.AppSettings) {
+        if (homeKit != null) {
+            Logger.i("HomeKit already running — skipping duplicate start")
+            return
+        }
+        val bridge = HomeKitBridge(
+            context = applicationContext,
+            onEndSession = { endCurrentSession() },
+            onBringToFront = { bringAppToFront() },
+            onWakeDisplay = { wakeDisplay() },
+            onSendRemoteCommand = { cmd -> airPlayReceiver?.sendRemoteCommand(cmd) },
+        )
+        runCatching {
+            com.phairplay.homekit.HomeKitReceiver(
+                context = applicationContext,
+                actions = bridge,
+                deviceName = { settings.displayName.ifBlank { android.os.Build.MODEL } },
+            ).also { it.start(); homeKit = it }
+        }.onFailure { Logger.e("HomeKit failed to start (streaming is unaffected)", it) }
+    }
+
+    private fun stopHomeKit() {
+        homeKit?.let { runCatching { it.stop() } }
+        homeKit = null
+    }
+
+    /** Clears HomeKit pairings so the accessory can be added to a different Home. */
+    fun resetHomeKitPairings() {
+        homeKit?.resetPairings()
+    }
+
+    /** The pairing code to show the user, or null when HomeKit is off. */
+    fun homeKitSetupCode(): String? = homeKit?.setupCode
+
+    /** True once a controller has completed pair-setup; the code is no longer useful then. */
+    fun isHomeKitPaired(): Boolean = homeKit?.isPaired == true
 
     /**
      * Stops all active receivers and updates the service state to Stopped.
@@ -588,6 +636,9 @@ class PhairPlayService : Service() {
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
                         bringAppToFront()
+                        // Keep the Home app tile honest: a session started from the phone should
+                        // show the TV as on, not leave HomeKit reporting whatever it last set.
+                        homeKit?.reportActive(true)
                     }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
@@ -597,6 +648,7 @@ class PhairPlayService : Service() {
                         // showStreamingScreen() forever — a black SurfaceView with nothing decoding.
                         releaseStreamLocks()
                         _videoPlaying.value = false
+                        homeKit?.reportActive(false)
                         _nowPlaying.value = null
                         _photoFrame.value = null
                         _activeConnection.value = null
@@ -696,6 +748,7 @@ class PhairPlayService : Service() {
         airPlayReceiver = null
         miracastReceiver = null
         dlnaServer = null
+        stopHomeKit()
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED

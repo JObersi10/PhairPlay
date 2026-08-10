@@ -52,6 +52,15 @@ data class AppSettings(
      */
     val dlnaEnabled: Boolean = true,
 
+    /**
+     * Whether the HomeKit accessory is advertised.
+     *
+     * Off by default: pairing publishes a long-lived accessory identity onto the network and adds
+     * PhairPlay to the user's Home, which is a bigger step than turning on a streaming receiver
+     * and should be a deliberate one.
+     */
+    val homeKitEnabled: Boolean = false,
+
     // ─── AirPlay specific ──────────────────────────────────────────────────
     /**
      * Whether AirPlay connections require PIN authentication.

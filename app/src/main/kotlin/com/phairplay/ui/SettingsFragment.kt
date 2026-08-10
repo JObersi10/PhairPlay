@@ -1,6 +1,7 @@
 package com.phairplay.ui
 
 import android.app.AlertDialog
+import com.phairplay.MainActivity
 import android.os.Bundle
 import com.phairplay.service.ServiceController
 import android.text.InputFilter
@@ -56,6 +57,8 @@ class SettingsFragment : Fragment() {
     private lateinit var rowAirPlay: View
     private lateinit var rowMiracast: View
     private lateinit var rowDlna: View
+    private lateinit var rowHomeKit: View
+    private lateinit var rowHomeKitReset: View
     private lateinit var rowMirrorAudio: View
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
@@ -112,6 +115,8 @@ class SettingsFragment : Fragment() {
         rowAirPlay          = view.findViewById(R.id.row_airplay)
         rowMiracast         = view.findViewById(R.id.row_miracast)
         rowDlna             = view.findViewById(R.id.row_dlna)
+        rowHomeKit          = view.findViewById(R.id.row_homekit)
+        rowHomeKitReset     = view.findViewById(R.id.row_homekit_reset)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
@@ -160,6 +165,11 @@ class SettingsFragment : Fragment() {
             rowMiracast.visibility = View.GONE
         }
         configureToggleRow(rowDlna,         R.string.setting_dlna_enabled,       R.string.setting_dlna_subtitle)
+        configureToggleRow(rowHomeKit,      R.string.setting_homekit_enabled,    R.string.setting_homekit_subtitle)
+        configureToggleRow(rowHomeKitReset, R.string.setting_homekit_reset,      R.string.setting_homekit_reset_subtitle)
+        // The reset row is an action, not a toggle; leaving its switch visible would imply HomeKit
+        // has two independent on/off states.
+        rowHomeKitReset.findViewById<SwitchCompat>(R.id.switch_setting)?.visibility = View.GONE
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
@@ -231,6 +241,8 @@ class SettingsFragment : Fragment() {
         setToggle(rowAirPlay,      settings.airPlayEnabled)
         setToggle(rowMiracast,     settings.miracastEnabled)
         setToggle(rowDlna,         settings.dlnaEnabled)
+        setToggle(rowHomeKit,      settings.homeKitEnabled)
+        renderHomeKitStatus(settings.homeKitEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
@@ -307,6 +319,11 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowAirPlay)      { enabled -> save { it.copy(airPlayEnabled = enabled) } }
         setToggleListener(rowMiracast)     { enabled -> save { it.copy(miracastEnabled = enabled) } }
         setToggleListener(rowDlna)         { enabled -> save { it.copy(dlnaEnabled = enabled) } }
+        setToggleListener(rowHomeKit)      { enabled ->
+            save { it.copy(homeKitEnabled = enabled) }
+            renderHomeKitStatus(enabled)
+        }
+        rowHomeKitReset.setOnClickListener { confirmResetHomeKit() }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
@@ -602,5 +619,40 @@ class SettingsFragment : Fragment() {
         /** A/V sync trim options, in milliseconds added to the sender's requested latency. */
         val AUDIO_DELAY_CHOICES = listOf(0, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 3000)
         val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 400, 500, 750, 1000)
+    }
+
+    /**
+     * Shows the pairing code under the HomeKit row, or why there isn't one.
+     *
+     * The code comes from the running service rather than from settings: it is generated once and
+     * stored with the accessory identity, and showing a code the accessory is not currently
+     * advertising would send the user to type digits that cannot work.
+     */
+    private fun renderHomeKitStatus(enabled: Boolean) {
+        val subtitle = rowHomeKit.findViewById<TextView>(R.id.text_setting_subtitle) ?: return
+        rowHomeKitReset.visibility = if (enabled) View.VISIBLE else View.GONE
+        if (!enabled) {
+            subtitle.setText(R.string.setting_homekit_subtitle)
+            return
+        }
+        val service = (activity as? MainActivity)?.boundService
+        val code = service?.homeKitSetupCode()
+        subtitle.text = when {
+            code == null -> getString(R.string.setting_homekit_subtitle)
+            service.isHomeKitPaired() -> getString(R.string.setting_homekit_paired)
+            else -> getString(R.string.setting_homekit_code, code)
+        }
+    }
+
+    private fun confirmResetHomeKit() {
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_homekit_reset)
+            .setMessage(R.string.setting_homekit_reset_subtitle)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                (activity as? MainActivity)?.boundService?.resetHomeKitPairings()
+                renderHomeKitStatus(enabled = true)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
     }
 }

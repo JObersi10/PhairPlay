@@ -102,6 +102,18 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_homekit"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
+        <!-- Shown only while HomeKit is on: the pairing code is useless otherwise, and a stale
+             code left on screen after switching HomeKit off would be actively misleading. -->
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_homekit_reset"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
         <!-- ── Section: AirPlay ───────────────────────────────── -->
         <include layout="@layout/settings_section_header"
             android:id="@+id/header_airplay"

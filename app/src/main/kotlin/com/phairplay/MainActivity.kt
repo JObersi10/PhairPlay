@@ -80,6 +80,9 @@ class MainActivity : AppCompatActivity() {
 
     // Service binding — gives access to state flows for showing/hiding the streaming overlay
     private var service: PhairPlayService? = null
+
+    /** Read-only access for fragments that need to ask the service something (HomeKit status). */
+    val boundService: PhairPlayService? get() = service
     private var isBound = false
     private var currentAirPlayState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null

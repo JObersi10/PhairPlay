@@ -83,6 +83,13 @@
     <string name="setting_airplay_subtitle">Accept connections from macOS</string>
     <string name="setting_miracast_enabled">Miracast Receiver</string>
     <string name="setting_miracast_subtitle">Accept connections from Windows and Android</string>
+    <string name="setting_homekit_enabled">HomeKit</string>
+    <string name="setting_homekit_subtitle">Add PhairPlay to the Home app as a TV. Lets you use the iPhone remote and Siri.</string>
+    <string name="setting_homekit_code">Pairing code: %1$s</string>
+    <string name="setting_homekit_paired">Paired with your Home</string>
+    <string name="setting_homekit_off">Turn HomeKit on to see the pairing code</string>
+    <string name="setting_homekit_reset">Reset HomeKit pairing</string>
+    <string name="setting_homekit_reset_subtitle">Removes PhairPlay from your Home so it can be added again.</string>
     <string name="setting_dlna_enabled">DLNA Renderer</string>
     <string name="setting_dlna_subtitle">Accept connections from VLC, Plex, BubbleUPnP</string>
     <string name="setting_mirror_audio">Mirror audio</string>
