@@ -48,6 +48,23 @@ import java.net.InetAddress
  * `System.currentTimeMillis()` per sample. A wall-clock adjustment mid-session (NTP on the TV, a
  * DST change) would otherwise appear as an instant multi-second offset jump and poison the window.
  *
+ * ## What the sender's clock actually is (measured 2026-08-09)
+ *
+ * The offset against an iPhone comes out around **-56 years**, which is not a clock that is wrong —
+ * it is a clock on a different timeline. Working back, the sender's timestamps sit near
+ * 2208988800 s, i.e. approximately zero on the Unix epoch: a session- or boot-relative monotonic
+ * clock, not wall time. That is normal for AirPlay, where media timestamps live on the sender's own
+ * timeline, and it means **the absolute offset is meaningless and only its stability matters.**
+ *
+ * Its stability is good: successive best samples drifted about 1.2 ms over 30 s, roughly 40 ppm,
+ * which is ordinary crystal drift between two devices and precisely what multi-room has to correct
+ * for. Round trip was 5.5 ms at best with excursions past 130 ms — the best-of-window filter earns
+ * its place, holding 5.5 ms while instantaneous samples spiked twenty-fold.
+ *
+ * Anything built on this must therefore track *rate* as well as offset. Treating the offset as a
+ * fixed correction will drift about a millisecond every half minute, which is audible as two
+ * speakers slowly separating.
+ *
  * Reference: RFC 5905 §8 for the arithmetic; RPiPlay `lib/raop_ntp.c` for the AirPlay framing.
  */
 class AirPlayNtpClient(

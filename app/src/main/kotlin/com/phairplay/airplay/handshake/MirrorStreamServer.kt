@@ -193,6 +193,11 @@ class MirrorStreamServer(
     /** Bounded enqueue — if the decoder is behind, drop the oldest item to keep latency bounded. */
     private fun enqueue(item: Item) {
         framesIn++
+        // Start the clock on the first frame, not on the first *report*. Leaving it unset meant the
+        // opening window had no elapsed time to divide by, so it printed 0fps regardless of what
+        // the decoder was doing — and "in=300 dropped=0 0fps" reads exactly like a stall. It cost a
+        // wrong diagnosis of the cold-start bug: the surface was live and frames were rendering.
+        if (framesIn == 1) lastStatMs = System.currentTimeMillis()
         if (!queue.offer(item)) {
             queue.poll()
             queue.offer(item)
@@ -202,7 +207,7 @@ class MirrorStreamServer(
         StreamStats.videoQueue = queue.size
         if (framesIn % 300 == 0) {
             val now = System.currentTimeMillis()
-            if (lastStatMs != 0L) StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
+            StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
             lastStatMs = now
             StreamStats.videoDropPct = framesDropped * 100 / framesIn
             Logger.i("Video stats: in=$framesIn dropped=$framesDropped " +
