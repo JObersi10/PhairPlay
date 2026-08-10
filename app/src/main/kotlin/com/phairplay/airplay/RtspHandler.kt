@@ -1147,13 +1147,31 @@ open class RtspHandler(
         val transport = if (isVideoSetup) {
             "RTP/AVP/TCP;unicast;interleaved=0-1"
         } else {
-            "RTP/AVP/UDP;unicast;" +
-            "client_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1};" +
-            "server_port=$AUDIO_RTP_PORT-${AUDIO_RTP_PORT + 1};" +
-            "timing-port=${TimingHandler.TIMING_PORT}"
+            // Three ports, three underscored names. Every part of this line used to be wrong and it
+            // cost us macOS Music entirely:
+            //
+            //  - `timing-port` with a HYPHEN is not a token Music parses. It looked plausible in a
+            //    log and was silently discarded.
+            //  - `control_port` was absent, so Music addressed its first sync packet to the port it
+            //    had asked for rather than one we bound. The kernel replied ICMP port-unreachable
+            //    and Music tore the session down ~40ms after RECORD, before sending any audio. The
+            //    symptom was silence, so this was mistaken for a FairPlay key failure for weeks.
+            //  - `client_port` echoed OUR port back at the sender instead of the one it requested.
+            //
+            // The client's own ports come from its Transport header; falling back to ours is only
+            // to keep the response well-formed if a sender omits them.
+            val req = parseTransport(request.headers["Transport"])
+            "RTP/AVP/UDP;unicast;mode=record;" +
+                "client_port=${req.clientPort ?: AUDIO_RTP_PORT};" +
+                "server_port=$AUDIO_RTP_PORT;" +
+                "control_port=${RaopControlHandler.CONTROL_PORT};" +
+                "timing_port=${TimingHandler.TIMING_PORT}"
         }
 
-        Logger.d("SETUP #$setupCount — transport: $transport")
+        // Logger.i, not d: Fire OS drops debug for this package, and this line is the first thing
+        // worth seeing when a sender hangs up straight after RECORD.
+        Logger.i("SETUP #$setupCount — request transport: ${request.headers["Transport"]}")
+        Logger.i("SETUP #$setupCount — reply transport: $transport")
         return RtspResponse(
             statusCode = 200,
             statusMessage = "OK",
@@ -1461,6 +1479,42 @@ open class RtspHandler(
         private const val TIMING_PORT = 6002   // matches TimingHandler's UDP NTP port
         private const val SESSION_ID = "PhairPlaySession"
         private const val AUDIO_RTP_PORT = 6001
+
+    /** The sender's own ports, as named in its SETUP Transport header. */
+    data class ClientTransport(
+        val clientPort: Int? = null,
+        val controlPort: Int? = null,
+        val timingPort: Int? = null,
+    )
+
+    /**
+     * Parses an RTSP Transport header into the sender's three ports.
+     *
+     * Values may be a single port or a `n-m` range; only the first number is meaningful to us.
+     * Anything unparseable becomes null rather than throwing — a malformed Transport is a reason to
+     * fall back to defaults, not to fail the SETUP that the whole session depends on.
+     */
+    internal fun parseTransport(header: String?): ClientTransport {
+        if (header.isNullOrBlank()) return ClientTransport()
+        var client: Int? = null
+        var control: Int? = null
+        var timing: Int? = null
+        for (part in header.split(';')) {
+            val eq = part.indexOf('=')
+            if (eq <= 0) continue
+            val key = part.substring(0, eq).trim().lowercase()
+            val port = part.substring(eq + 1).trim().substringBefore('-').toIntOrNull() ?: continue
+            when (key) {
+                "client_port" -> client = port
+                // Senders are inconsistent about the separator here, so accept both spellings
+                // rather than losing the port to punctuation.
+                "control_port", "control-port" -> control = port
+                "timing_port", "timing-port" -> timing = port
+            }
+        }
+        return ClientTransport(client, control, timing)
+    }
+
         private const val DEFAULT_SENDER_NAME = "AirPlay Sender"
 
         /** Fallback presentation latency (samples @44.1kHz = 250ms) when SETUP omits latencyMin. */

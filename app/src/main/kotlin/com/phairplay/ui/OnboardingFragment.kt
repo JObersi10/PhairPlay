@@ -22,6 +22,7 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -557,19 +558,39 @@ class OnboardingFragment : Fragment() {
     }
 
     /**
-     * Fire TV has no in-app path to the overlay grant, so this hands off to system settings. Some
-     * Fire OS builds don't expose the per-app screen; fall back to the app details page.
+     * Fire TV has no in-app path to the overlay grant, so this hands off to system settings.
+     *
+     * Launching this is fiddlier than it looks. `startActivity` only throws when NOTHING resolves;
+     * several Fire OS builds resolve ACTION_MANAGE_OVERLAY_PERMISSION to a stub that finishes
+     * immediately, so the old catch-and-fall-back never fired and the button did nothing at all.
+     * Two changes fix that: ask the package manager whether each candidate really resolves before
+     * launching it, and offer more candidates — the per-app screen, the system-wide overlay LIST
+     * (which is what Fire OS actually ships), then app details, then the Settings root.
+     *
+     * If every one of them fails there is no UI path on this build, and the honest thing is to say
+     * so rather than leave a dead button.
      */
     private fun openOverlaySettings() {
-        val pkg = requireContext().packageName
+        val ctx = requireContext()
+        val pkg = ctx.packageName
         val attempts = listOf(
             Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$pkg")),
+            // No data URI: the "Apps that can appear on top" list. Fire OS exposes this one far more
+            // reliably than the per-app variant.
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
             Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")),
+            Intent(Settings.ACTION_SETTINGS),
         )
         for (intent in attempts) {
-            if (runCatching { startActivity(intent); true }.getOrDefault(false)) return
+            if (intent.resolveActivity(ctx.packageManager) == null) continue
+            val launched = runCatching { startActivity(intent); true }.getOrDefault(false)
+            if (launched) {
+                Logger.i("Overlay settings opened via ${intent.action} (data=${intent.data})")
+                return
+            }
         }
-        Logger.w("No settings screen available for the overlay permission on this build")
+        Logger.w("No settings screen resolves for the overlay permission on this build")
+        Toast.makeText(ctx, R.string.onboarding_overlay_no_settings, Toast.LENGTH_LONG).show()
     }
 
     // ─── Small helpers ───────────────────────────────────────────────────────

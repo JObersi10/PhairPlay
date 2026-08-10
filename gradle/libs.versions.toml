@@ -29,6 +29,7 @@ timber = "5.0.1"
 # Cryptography — Bouncy Castle provides AES-128-CTR and SRP-6a
 # (Android's built-in javax.crypto lacks full SRP support)
 bouncycastle = "1.78.1"
+zxing = "3.5.3"
 play-services-cast-tv = "20.0.0"
 
 # Binary property lists — Apple's bplist format used across the AirPlay 2 handshake
@@ -76,6 +77,7 @@ desugar-jdk-libs = { group = "com.android.tools", name = "desugar_jdk_libs", ver
 
 # Cryptography
 bouncycastle = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
+zxing = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 play-services-cast-tv = { group = "com.google.android.gms", name = "play-services-cast-tv", version.ref = "play-services-cast-tv" }
 
 # Binary property list parser/writer (pure Java)

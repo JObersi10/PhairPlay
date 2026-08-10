@@ -16,14 +16,27 @@ import java.security.SecureRandom
  * Username is the fixed string "Pair-Setup"; the password is the 8-digit setup code shown on the
  * TV, formatted `XXX-XX-XXX`.
  */
-class HapSrp(private val setupCode: String, random: SecureRandom = SecureRandom()) {
+class HapSrp(setupCode: String, random: SecureRandom = SecureRandom()) {
+
+    /**
+     * The SRP password.
+     *
+     * MUST be the dashed form, `123-45-678`. The controller derives its verifier from exactly the
+     * string the user typed into the Home app, dashes included — so feeding the raw eight digits
+     * here produces a different x, a different verifier, and a proof that can never match. It fails
+     * as "incorrect setup code" with no other symptom, which is precisely how it hid: the code on
+     * screen was right, the code typed in was right, and pairing still failed every time.
+     *
+     * Normalised here rather than at the call site so no future caller can reintroduce it.
+     */
+    private val password: String = formatCode(setupCode)
 
     /** Random 16-byte salt, sent to the controller in M2. */
     val salt: ByteArray = ByteArray(16).also { random.nextBytes(it) }
 
     private val x: BigInteger = run {
         // x = H(s | H(I | ":" | P))
-        val inner = HapCrypto.sha512("$USERNAME:$setupCode".toByteArray(Charsets.UTF_8))
+        val inner = HapCrypto.sha512("$USERNAME:$password".toByteArray(Charsets.UTF_8))
         BigInteger(1, HapCrypto.sha512(salt, inner))
     }
 
@@ -37,6 +50,15 @@ class HapSrp(private val setupCode: String, random: SecureRandom = SecureRandom(
         val k = BigInteger(1, HapCrypto.sha512(pad(N), pad(G)))
         (k.multiply(verifier).add(G.modPow(b, N))).mod(N)
     }
+
+    /**
+     * B exactly as it goes on the wire — and therefore exactly as the controller will hash it.
+     *
+     * The proof covers B, so the bytes we send and the bytes we hash have to be the same object,
+     * not two independent serialisations of the same number. Callers should send THIS rather than
+     * re-encoding [serverPublic] themselves.
+     */
+    val publicBytes: ByteArray = toBytes(serverPublic)
 
     /** Set once [verify] succeeds: K = H(S), the input to every pair-setup key derivation. */
     var sessionKey: ByteArray? = null
@@ -61,16 +83,19 @@ class HapSrp(private val setupCode: String, random: SecureRandom = SecureRandom(
         val hn = HapCrypto.sha512(toBytes(N))
         val hg = HapCrypto.sha512(toBytes(G))
         val hx = ByteArray(hn.size) { (hn[it].toInt() xor hg[it].toInt()).toByte() }
+        // A is hashed as the controller SENT it, not as a re-serialised BigInteger. Round-tripping
+        // through BigInteger silently drops a leading zero byte, so roughly one pairing in 256 would
+        // fail for no discoverable reason.
         val expected = HapCrypto.sha512(
             hx,
             HapCrypto.sha512(USERNAME.toByteArray(Charsets.UTF_8)),
-            salt, toBytes(a), toBytes(serverPublic), k,
+            salt, aBytes, publicBytes, k,
         )
         if (!java.security.MessageDigest.isEqual(expected, clientProof)) return null
 
         sessionKey = k
         // M2 = H(A | M1 | K)
-        return HapCrypto.sha512(toBytes(a), clientProof, k)
+        return HapCrypto.sha512(aBytes, clientProof, k)
     }
 
     /** Big-endian magnitude with no sign byte — SRP values are unsigned on the wire. */
@@ -89,6 +114,19 @@ class HapSrp(private val setupCode: String, random: SecureRandom = SecureRandom(
 
     companion object {
         const val USERNAME = "Pair-Setup"
+
+        /**
+         * Normalises a setup code to the dashed `123-45-678` form the controller hashes.
+         *
+         * Accepts an already-dashed code unchanged, and leaves anything that is not eight digits
+         * alone — a caller with a non-standard code is better served by its own string than by a
+         * substring() that would throw.
+         */
+        fun formatCode(code: String): String {
+            val digits = code.filter { it.isDigit() }
+            if (digits.length != 8) return code
+            return "${digits.substring(0, 3)}-${digits.substring(3, 5)}-${digits.substring(5, 8)}"
+        }
 
         private val G = BigInteger.valueOf(5)
 

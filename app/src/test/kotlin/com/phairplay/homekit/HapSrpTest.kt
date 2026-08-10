@@ -1,6 +1,7 @@
 package com.phairplay.homekit
 
 import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -54,15 +55,41 @@ class HapSrpTest {
         assert(!a.contentEquals(b)) { "salt must be random per pairing attempt" }
     }
 
-    /** Minimal SRP-6a client, written from the RFC rather than from [HapSrp]. */
+    @Test
+    fun `the password is the DASHED setup code`() {
+        // The bug this pins down: HapSrp was fed the stored eight digits while the controller
+        // hashed the dashed string the user actually typed, so every real pairing failed with
+        // "incorrect setup code" while every self-consistent test passed. Asserting the two spellings
+        // agree is what makes a shared misunderstanding impossible to hide.
+        val server = HapSrp("31415926")
+        val dashed = Client("314-15-926", server.salt, server.serverPublic)
+
+        assertNotNull("dashed and undashed forms must derive the same verifier", server.verify(dashed.aBytes, dashed.proof()))
+    }
+
+    @Test
+    fun `formatCode normalises both spellings and leaves odd input alone`() {
+        assertEquals("314-15-926", HapSrp.formatCode("31415926"))
+        assertEquals("314-15-926", HapSrp.formatCode("314-15-926"))
+        // Not eight digits: returning it untouched beats a substring() that throws mid-pairing.
+        assertEquals("123", HapSrp.formatCode("123"))
+    }
+
+    /**
+     * Minimal SRP-6a client, written from the RFC rather than from [HapSrp].
+     *
+     * Hashes the DASHED code deliberately — that is what iOS does, and a client that mirrored the
+     * accessory's own normalisation would be worthless as an oracle.
+     */
     private class Client(code: String, private val salt: ByteArray, private val b: BigInteger) {
+        private val password = dash(code)
         private val a = BigInteger(256, SecureRandom()).mod(N)
         private val aPub: BigInteger = G.modPow(a, N)
         val aBytes: ByteArray = unsigned(aPub)
 
         private val x = BigInteger(
             1,
-            HapCrypto.sha512(salt, HapCrypto.sha512("$USERNAME:$code".toByteArray(Charsets.UTF_8))),
+            HapCrypto.sha512(salt, HapCrypto.sha512("$USERNAME:$password".toByteArray(Charsets.UTF_8))),
         )
 
         val sessionKey: ByteArray = run {
@@ -96,6 +123,12 @@ class HapSrpTest {
 
         companion object {
             const val USERNAME = "Pair-Setup"
+
+            /** Written out longhand so this file never shares HapSrp's idea of the format. */
+            fun dash(code: String): String {
+                if (code.contains('-')) return code
+                return code.substring(0, 3) + "-" + code.substring(3, 5) + "-" + code.substring(5, 8)
+            }
             val G: BigInteger = BigInteger.valueOf(5)
             val N: BigInteger = BigInteger(
                 "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74" +

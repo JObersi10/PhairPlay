@@ -651,8 +651,17 @@ class SettingsFragment : Fragment() {
             .setPositiveButton(android.R.string.ok) { _, _ ->
                 (activity as? MainActivity)?.boundService?.resetHomeKitPairings()
                 renderHomeKitStatus(enabled = true)
+                // Resetting leaves the accessory unpaired and discoverable again, which is exactly
+                // the state the setup flow exists for. Dropping the user back on a settings list
+                // with a silently-changed subtitle made the reset look like it had done nothing.
+                openHomeKitSetup()
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    /** Opens the guided pairing flow, straight to the code page — the question is already answered. */
+    private fun openHomeKitSetup() {
+        (activity as? MainActivity)?.showHomeKitSetup(startAtCode = true)
     }
 }

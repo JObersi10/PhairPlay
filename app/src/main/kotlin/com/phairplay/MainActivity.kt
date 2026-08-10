@@ -33,6 +33,7 @@ import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.MirrorControls
+import com.phairplay.ui.HomeKitSetupFragment
 import com.phairplay.ui.OnboardingFragment
 import com.phairplay.ui.NowPlayingScreen
 import com.phairplay.ui.PhotoScreen
@@ -171,10 +172,22 @@ class MainActivity : AppCompatActivity() {
      * Shows the first-run flow over the whole content area, hiding the nav panel so there is no way
      * to wander off mid-setup.
      */
+    /**
+     * True while the onboarding fragment owns the screen.
+     *
+     * [onKeyDown] consults this before any of its remote mappings. Without it, a sender that
+     * happened to be connected during first-run setup made `overlayActive` true, and every D-pad
+     * Center press was swallowed and turned into a DACP play/pause — so the preference rows on the
+     * onboarding pages could be focused but never selected, and looked simply broken.
+     */
+    private var onboardingVisible = false
+
     private fun showOnboarding() {
+        onboardingVisible = true
         navPanelVisible(false)
         val fragment = OnboardingFragment().also { f ->
             f.onFinished = {
+                onboardingVisible = false
                 navPanelVisible(true)
                 navigateTo(HomeFragment(), navItemHome)
                 requestNotificationPermission()
@@ -185,6 +198,50 @@ class MainActivity : AppCompatActivity() {
                 // launch. Same for the screensaver and high-resolution settings.
                 Timber.i("Onboarding finished — restarting receivers to pick up chosen settings")
                 ServiceController.restart(this)
+                // HomeKit setup runs as its own flow at the end rather than as another onboarding
+                // page: it asks the user to pick up a second device, so it does not belong in the
+                // middle of a sequence they are trying to get through.
+                showHomeKitSetup(startAtCode = false) {
+                    navPanelVisible(true)
+                    navigateTo(HomeFragment(), navItemHome)
+                }
+            }
+        }
+        supportFragmentManager.beginTransaction()
+            .replace(R.id.content_container, fragment)
+            .commit()
+    }
+
+    /**
+     * Opens the guided HomeKit pairing flow.
+     *
+     * Reachable from two places on purpose — the tail of first-run onboarding, and Settings after a
+     * pairing reset. HomeKit is the one feature whose setup lives mostly on ANOTHER device, so
+     * "show me those instructions again" is a normal request rather than an error path.
+     *
+     * @param startAtCode skip the yes/no question. True when the user has already opted in and is
+     *   coming back only for the code.
+     */
+    fun showHomeKitSetup(startAtCode: Boolean, onDone: (() -> Unit)? = null) {
+        onboardingVisible = true
+        navPanelVisible(false)
+        val fragment = HomeKitSetupFragment().also { f ->
+            f.startAtCode = startAtCode
+            f.onSetEnabled = { enabled ->
+                lifecycleScope.launch {
+                    SettingsRepository(this@MainActivity).update { it.copy(homeKitEnabled = enabled) }
+                    Timber.i("HomeKit ${if (enabled) "enabled" else "declined"} in setup — restarting receivers")
+                    ServiceController.restart(this@MainActivity)
+                }
+            }
+            f.onFinished = {
+                onboardingVisible = false
+                if (onDone != null) {
+                    onDone()
+                } else {
+                    navPanelVisible(true)
+                    navigateTo(HomeFragment(), navItemHome)
+                }
             }
         }
         supportFragmentManager.beginTransaction()
@@ -609,6 +666,10 @@ class MainActivity : AppCompatActivity() {
         // Handle Back here rather than relying on onBackPressed(). That path goes through
         // OnBackPressedDispatcher, where a fragment or the overlay can swallow the event before the
         // Activity sees it — which is why both Back settings appeared to do nothing.
+        // Onboarding owns the remote outright. Its pages are ordinary focusable views and need
+        // Center and the D-pad to reach them untouched.
+        if (onboardingVisible) return super.onKeyDown(keyCode, event)
+
         if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
             // Back closes the controls before it means anything else, matching how it already
             // closes the now-playing info panel first.

@@ -62,6 +62,19 @@ class HomeKitReceiver(
 
     val isPaired: Boolean get() = store.isPaired()
 
+    /**
+     * The name the Home app will list under "Add Accessory".
+     *
+     * Worth showing on the setup screen verbatim: it is whatever the device advertises, not the
+     * display name the user chose for AirPlay, so on a Fire TV it reads as something like `AFTKM`
+     * and looks like a stranger's device unless we say so up front.
+     */
+    val accessoryName: String get() = deviceName()
+
+    /** The `X-HM://` URI for the setup QR code, or null if the stored code is malformed. */
+    val pairingUri: String?
+        get() = runCatching { HomeKitSetupPayload.uri(store.setupCode, store.setupId) }.getOrNull()
+
     // ─── Accessory definition ────────────────────────────────────────────────
 
     private val activeChar = HapCharacteristic(

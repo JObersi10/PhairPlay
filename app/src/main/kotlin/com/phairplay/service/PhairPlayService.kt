@@ -497,6 +497,12 @@ class PhairPlayService : Service() {
     /** True once a controller has completed pair-setup; the code is no longer useful then. */
     fun isHomeKitPaired(): Boolean = homeKit?.isPaired == true
 
+    /** The `X-HM://` URI behind the setup QR code, or null while HomeKit is off. */
+    fun homeKitPairingUri(): String? = homeKit?.pairingUri
+
+    /** The name the Home app lists this accessory under, which is not the AirPlay display name. */
+    fun homeKitAccessoryName(): String? = homeKit?.accessoryName
+
     /**
      * Stops all active receivers and updates the service state to Stopped.
      * Does NOT call stopSelf() — use [ACTION_STOP] for that.

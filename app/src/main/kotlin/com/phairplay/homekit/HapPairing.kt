@@ -99,7 +99,9 @@ class HapPairing(
         Logger.i("HAP pair-setup M1 → M2 (SRP challenge issued)")
         return HapTlv.encode(
             HapTlv.STATE to HapTlv.byte(2),
-            HapTlv.PUBLIC_KEY to unsigned(s.serverPublic),
+            // s.publicBytes, not a fresh encoding of s.serverPublic: the proof covers these exact
+            // bytes, so the two must not be serialised independently.
+            HapTlv.PUBLIC_KEY to s.publicBytes,
             HapTlv.SALT to s.salt,
         )
     }

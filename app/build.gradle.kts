@@ -226,6 +226,10 @@ dependencies {
     // Cryptography — AES-128-CTR for audio decryption, future SRP-6a pairing
     implementation(libs.bouncycastle)
 
+    // QR encoding for the HomeKit setup payload. Core only -- the android artifact drags in a
+    // camera/scanner stack we have no use for on a receiver that only ever DISPLAYS a code.
+    implementation(libs.zxing)
+
     // Binary property lists — AirPlay 2 handshake payloads (GET /info, SETUP)
     implementation(libs.ddplist)
 

@@ -128,6 +128,7 @@ class AirPlayReceiver(
     private var mdnsService: MdnsService? = null
     private var rtspHandler: RtspHandler? = null
     private var timingHandler: TimingHandler? = null
+    private var controlHandler: RaopControlHandler? = null
     private var videoDecoder: VideoDecoder? = null
     private var audioPlayer: AudioPlayer? = null
 
@@ -206,6 +207,7 @@ class AirPlayReceiver(
         scope.launch {
             try {
                 startTimingHandler()
+                startControlHandler()
                 startMdnsService()
                 startRtspHandler()
             } catch (e: Exception) {
@@ -248,6 +250,7 @@ class AirPlayReceiver(
         try {
             rtspHandler?.stop()
             timingHandler?.stop()
+            controlHandler?.stop()
             mdnsService?.stop()
             dacpClient.stop()
             releaseMediaComponents()
@@ -344,6 +347,18 @@ class AirPlayReceiver(
     private fun startTimingHandler() {
         timingHandler = TimingHandler().also { it.start(scope) }
         Logger.d("Timing handler started on UDP port ${TimingHandler.TIMING_PORT}")
+    }
+
+    /**
+     * Binds the RAOP control port.
+     *
+     * Started alongside the timing handler and kept up for the receiver's whole life, NOT per
+     * session: macOS Music sends its first sync packet within milliseconds of RECORD, and a port
+     * that is bound lazily is still closed when that packet lands. An ICMP port-unreachable there
+     * makes Music abandon the session immediately.
+     */
+    private fun startControlHandler() {
+        controlHandler = RaopControlHandler().also { it.start(scope) }
     }
 
     private fun startMdnsService() {

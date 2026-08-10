@@ -90,6 +90,39 @@
     <string name="setting_homekit_off">Turn HomeKit on to see the pairing code</string>
     <string name="setting_homekit_reset">Reset HomeKit pairing</string>
     <string name="setting_homekit_reset_subtitle">Removes PhairPlay from your Home so it can be added again.</string>
+
+    <!-- HomeKit setup flow -->
+    <string name="hk_ask_title">Add to Apple Home?</string>
+    <string name="hk_ask_body">HomeKit lets you turn this TV on and off from the Home app, control it with the remote on your iPhone\'s Control Center, and use Siri. Everything works over your local network — no account and no internet needed.</string>
+    <string name="hk_ask_yes">Yes, set it up</string>
+    <string name="hk_ask_no">Not now</string>
+
+    <string name="hk_code_title">Add it in the Home app</string>
+    <string name="hk_code_body">On your iPhone or iPad, follow these steps. Scan the code with the camera to skip the typing.</string>
+    <string name="hk_code_body_named">On your iPhone or iPad, follow these steps. This TV appears as \"%1$s\" — that is its hardware name, not the AirPlay name. Scan the code with the camera to skip the typing.</string>
+    <string name="hk_step_open_home">Open the Home app</string>
+    <string name="hk_step_add">Tap + then Add Accessory</string>
+    <string name="hk_step_more_options">Tap More options…</string>
+    <string name="hk_step_pick">Pick this TV from the list</string>
+    <string name="hk_step_pick_named">Pick \"%1$s\" from the list</string>
+    <string name="hk_step_enter_code">Enter the code below, or scan it</string>
+    <string name="hk_code_label">Setup code</string>
+    <string name="hk_code_scan_hint">Point your camera at the square to enter it automatically.</string>
+    <string name="hk_code_unavailable">No code yet — HomeKit is still starting. Go back and try again in a moment.</string>
+    <string name="hk_uncertified_note">iOS will warn that this is an uncertified accessory. That is expected: PhairPlay is not an Apple-licensed product. Choose Add Anyway.</string>
+    <string name="hk_code_done">Done</string>
+    <string name="hk_later">Finish later</string>
+
+    <string name="hk_done_title">Paired</string>
+    <string name="hk_done_body">PhairPlay is in your Home. You can now:</string>
+    <string name="hk_cap_power">Turn the TV on and off from the Home app</string>
+    <string name="hk_cap_remote">Use the remote in Control Center on your iPhone</string>
+    <string name="hk_cap_volume">Change the volume from your phone</string>
+    <string name="hk_cap_siri">Ask Siri to turn the TV on or off</string>
+    <string name="hk_finish">Finish</string>
+
+    <string name="setting_homekit_setup">HomeKit setup</string>
+    <string name="setting_homekit_setup_subtitle">Show the pairing code and step-by-step instructions again.</string>
     <string name="setting_dlna_enabled">DLNA Renderer</string>
     <string name="setting_dlna_subtitle">Accept connections from VLC, Plex, BubbleUPnP</string>
     <string name="setting_mirror_audio">Mirror audio</string>
@@ -200,6 +233,7 @@
     <string name="onboarding_grant">Grant</string>
     <string name="onboarding_granted">Granted</string>
     <string name="onboarding_open_settings">Open settings</string>
+    <string name="onboarding_overlay_no_settings">This Fire TV has no settings screen for the overlay permission. Grant it from a computer with: adb shell appops set com.phairplay.firetv SYSTEM_ALERT_WINDOW allow</string>
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>
