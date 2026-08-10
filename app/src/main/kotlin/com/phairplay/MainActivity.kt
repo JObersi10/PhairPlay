@@ -69,7 +69,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var navItemHome: TextView
     private lateinit var navItemSettings: TextView
     private lateinit var contentContainer: FrameLayout
-    private lateinit var streamingContainer: FrameLayout
+    private lateinit var streamingContainer: com.phairplay.ui.TouchOverlayFrameLayout
 
     // The SurfaceView for full-screen video output
     private lateinit var streamingScreen: StreamingScreen
@@ -360,7 +360,15 @@ class MainActivity : AppCompatActivity() {
         // Touch, alongside the remote — same actions, same session split. A ViewGroup only reaches
         // its own touch listener when no child consumed the event, so the Now Playing transport
         // buttons and the mirror control bar keep taking their own taps; we get the empty space.
-        streamingContainer.setOnTouchListener { _, event -> handleOverlayTouch(event) }
+        streamingContainer.setOnTouchListener { v, event ->
+            val handled = handleOverlayTouch(event)
+            // Route a finished tap through performClick so accessibility services announce and can
+            // trigger it. Without this the gesture is invisible to TalkBack — and lint is right to
+            // insist: a touch surface that only ever reports raw MotionEvents cannot be driven by
+            // anyone who is not physically touching the panel.
+            if (handled && event.actionMasked == android.view.MotionEvent.ACTION_UP) v.performClick()
+            handled
+        }
         photoScreen.visibility = View.GONE
         nowPlayingScreen.visibility = View.GONE
         pinScreen.visibility = View.GONE

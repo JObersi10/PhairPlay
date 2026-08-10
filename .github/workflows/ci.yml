@@ -1,10 +1,18 @@
 name: CI
 
 on:
+  # Every branch, not just main. Work happens on feature branches for weeks at a time, and a
+  # workflow that only watches main reports nothing at all during exactly the period when a
+  # regression is cheapest to fix — CI last ran here in June while a dozen commits landed.
   push:
-    branches: [ "main" ]
   pull_request:
     branches: [ "main" ]
+
+# A branch under active development gets several pushes in a row; only the newest is worth
+# building. In-progress runs for the same ref are cancelled rather than queued.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   jvm-tests:

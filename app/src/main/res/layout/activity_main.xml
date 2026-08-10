@@ -104,7 +104,7 @@
         app:layout_constraintEnd_toEndOf="parent" />
 
     <!-- ── Full-screen streaming overlay (GONE when idle) ─────────────── -->
-    <FrameLayout
+    <com.phairplay.ui.TouchOverlayFrameLayout
         android:id="@+id/streaming_container"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
