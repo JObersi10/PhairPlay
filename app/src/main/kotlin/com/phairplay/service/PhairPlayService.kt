@@ -232,8 +232,23 @@ class PhairPlayService : Service() {
      */
     @Volatile private var onPrepareSurface: (() -> Unit)? = null
 
+    /**
+     * A sender opened the socket before the Activity had finished binding, so there was nobody to
+     * ask for a Surface. Remembered rather than dropped — see [setSurfacePreparer].
+     */
+    @Volatile private var surfacePrepareMissed = false
+
     fun setSurfacePreparer(prepare: () -> Unit) {
         onPrepareSurface = prepare
+        // Binding is asynchronous and a sender can beat it. On a fresh launch the user often opens
+        // the app and connects within a few seconds, and until now that meant onSenderApproaching
+        // fired against a null preparer and the pre-warm was silently lost: no visible SurfaceView,
+        // no Surface, and the opening IDR decoded off-screen. Replay the missed request instead.
+        if (surfacePrepareMissed) {
+            surfacePrepareMissed = false
+            Logger.i("Surface preparer registered after the sender arrived — preparing now")
+            android.os.Handler(android.os.Looper.getMainLooper()).post { runCatching { prepare() } }
+        }
     }
 
     /**
@@ -502,7 +517,13 @@ class PhairPlayService : Service() {
                 bringAppToFront()
                 // Runs on an RTSP socket thread; view work has to hop to the main looper.
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    runCatching { onPrepareSurface?.invoke() }
+                    val prepare = onPrepareSurface
+                    if (prepare == null) {
+                        surfacePrepareMissed = true
+                        Logger.i("Sender arrived before the Activity bound — surface prep deferred")
+                    } else {
+                        runCatching { prepare() }
+                    }
                 }
             },
             onPhotoReceived = { bytes, imageType ->
