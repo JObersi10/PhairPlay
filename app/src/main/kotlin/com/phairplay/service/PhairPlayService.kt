@@ -116,13 +116,22 @@ class PhairPlayService : Service() {
     val remoteKeys = _remoteKeys.asSharedFlow()
 
     private fun emitRemoteKey(keyCode: Int) {
-        // Bring the app forward first: a key aimed at our own window is useless if another app owns
-        // the screen, and the user pressing an arrow plainly means they expect to see PhairPlay.
+        // System-wide first. With the accessibility service enabled the remote drives whatever is
+        // actually on screen -- the launcher, Netflix, anything -- which is the point of having it.
+        // Crucially we must NOT bring PhairPlay forward in that case: yanking the app to the front
+        // on every arrow press would make the remote useless for controlling anything else.
+        if (PhairPlayAccessibilityService.sendKey(keyCode)) return
+
+        // Otherwise the honest scope is our own window, and the app has to be visible for a key
+        // aimed at it to mean anything.
         bringAppToFront()
         if (!_remoteKeys.tryEmit(keyCode)) {
             Logger.w("Remote key $keyCode dropped — no collector and the buffer is full")
         }
     }
+
+    /** True when the remote can drive the whole device rather than just PhairPlay's own window. */
+    fun isSystemWideRemoteEnabled(): Boolean = PhairPlayAccessibilityService.isConnected
 
     private val _audioEnergy = MutableStateFlow(0f)
     val audioEnergy: StateFlow<Float> = _audioEnergy.asStateFlow()

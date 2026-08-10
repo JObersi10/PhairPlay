@@ -161,6 +161,22 @@
           display, which needs an active device-admin component; the policy file requests force-lock
           only. If the user declines, HomeKit "off" just ends the session.
         -->
+        <!--
+            System-wide remote control for the HomeKit D-pad. Off until the user (or adb) enables
+            it; PhairPlay works without it, just confined to its own window.
+        -->
+        <service
+            android:name=".service.PhairPlayAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service" />
+        </service>
+
         <receiver
             android:name=".service.PhairPlayDeviceAdmin"
             android:exported="true"

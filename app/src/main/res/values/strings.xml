@@ -124,6 +124,7 @@
     <string name="hk_cap_siri">Ask Siri to turn the TV on or off</string>
     <string name="hk_finish">Finish</string>
 
+    <string name="accessibility_service_description">Lets the remote in your iPhone\'s Control Center control the whole Fire TV, not just PhairPlay. PhairPlay does not read anything on your screen — this is only used to move the selection and press buttons when you ask it to.</string>
     <string name="setting_homekit_setup">HomeKit setup</string>
     <string name="setting_homekit_setup_subtitle">Show the pairing code and step-by-step instructions again.</string>
     <string name="setting_dlna_enabled">DLNA Renderer</string>

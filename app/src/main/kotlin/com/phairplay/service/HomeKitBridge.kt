@@ -133,9 +133,10 @@ class HomeKitBridge(
         RemoteKey.ARROW_RIGHT -> KeyEvent.KEYCODE_DPAD_RIGHT
         RemoteKey.SELECT -> KeyEvent.KEYCODE_DPAD_CENTER
         RemoteKey.BACK -> KeyEvent.KEYCODE_BACK
-        // EXIT is the Home app's "leave this app" key; on a TV that is the same gesture as Back
-        // rather than HOME, which would drop the user out of PhairPlay entirely.
-        RemoteKey.EXIT -> KeyEvent.KEYCODE_BACK
+        // EXIT means "leave whatever this is". With the accessibility service on that is genuinely
+        // Home; without it the key reaches only our own window, where HOME does nothing -- an
+        // acceptable no-op, since BACK is already on its own button right next to it.
+        RemoteKey.EXIT -> KeyEvent.KEYCODE_HOME
         // Info flips the now-playing card to its credits side, matching the Menu/Info mapping the
         // physical Fire TV remote already has.
         RemoteKey.INFORMATION -> KeyEvent.KEYCODE_INFO
