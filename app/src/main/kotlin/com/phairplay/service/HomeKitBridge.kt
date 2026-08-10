@@ -54,7 +54,12 @@ class HomeKitBridge(
         Logger.i("HomeKit: turning off — ending session")
         onEndSession()
         if (!sleepDisplay()) {
-            Logger.i("HomeKit off: no device-admin grant, so the session ended but the TV stays awake")
+            // Names the exact command, because this is the single most common reason "power off"
+            // looks broken and there is no in-app way to grant it on Fire TV.
+            Logger.w(
+                "HomeKit off: the TV stays awake because device admin is not granted. Enable it with: " +
+                    "adb shell dpm set-active-admin com.phairplay.firetv/.service.PhairPlayDeviceAdmin",
+            )
         }
     }
 
@@ -150,15 +155,41 @@ class HomeKitBridge(
         }.onFailure { Logger.w("HomeKit volume step failed: ${it.message}") }
     }
 
+    /**
+     * Mutes or unmutes TV audio.
+     *
+     * `adjustStreamVolume(ADJUST_MUTE)` alone is not enough here. It mutes the STREAM, and on a
+     * Fire TV whose output is routed to Bluetooth the stream mute is not always what the speaker
+     * obeys — the device log shows `route=Bluetooth` on this hardware. Setting the level to zero
+     * and restoring the previous level is coarser but actually silences the output, so both are
+     * applied: the stream mute for anything that honours it, the level for everything else.
+     *
+     * The previous level has to be remembered, because unmuting from zero has nothing to restore
+     * and would leave the TV silent with the Home app insisting it is not muted.
+     */
     override fun setMute(muted: Boolean) {
+        Logger.i("HomeKit mute → $muted")
         runCatching {
-            audioManager.adjustStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                if (muted) AudioManager.ADJUST_MUTE else AudioManager.ADJUST_UNMUTE,
-                0,
-            )
+            val stream = AudioManager.STREAM_MUSIC
+            if (muted) {
+                val current = audioManager.getStreamVolume(stream)
+                if (current > 0) volumeBeforeMute = current
+                audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_MUTE, 0)
+                audioManager.setStreamVolume(stream, 0, 0)
+            } else {
+                audioManager.adjustStreamVolume(stream, AudioManager.ADJUST_UNMUTE, 0)
+                // Fall back to half scale rather than 0 if we never saw a pre-mute level: an
+                // unmute that restores silence is indistinguishable from a broken button.
+                val restore = volumeBeforeMute
+                    ?: (audioManager.getStreamMaxVolume(stream) / 2).coerceAtLeast(1)
+                audioManager.setStreamVolume(stream, restore, 0)
+            }
+            Logger.i("Stream volume now ${audioManager.getStreamVolume(stream)}")
         }.onFailure { Logger.w("HomeKit mute failed: ${it.message}") }
     }
+
+    /** Level to come back to on unmute; null until the first mute. */
+    private var volumeBeforeMute: Int? = null
 
     override fun selectInput(identifier: Int) {
         // Inputs are advertised so the Home app renders a real TV tile rather than a bare switch.
