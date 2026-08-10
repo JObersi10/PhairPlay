@@ -93,17 +93,63 @@ class PhairPlayAccessibilityService : AccessibilityService() {
             return false
         }
         // FOCUS_INPUT is the real focus a remote moves. FOCUS_ACCESSIBILITY is the green box a
-        // screen reader draws, and is often absent; falling back to the root keeps a first press
-        // working on a screen where nothing is focused yet.
+        // screen reader draws, and is often absent.
         val from = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
             ?: root.findFocus(AccessibilityNodeInfo.FOCUS_ACCESSIBILITY)
-            ?: root
-        val next = from.focusSearch(direction) ?: run {
-            // A real outcome, not a failure: focus is already at the edge in that direction.
-            Logger.i("Focus already at the edge (direction $direction)")
-            return true
+        if (from == null) {
+            // Nothing is focused yet. Grabbing the first focusable descendant gives the next press
+            // something to move FROM. Using the root itself does not work: `root.focusSearch` has
+            // no position in the focus graph and always returns null, which is what made every
+            // direction report "already at the edge".
+            val first = firstFocusable(root) ?: run {
+                Logger.i("No focusable node in the active window — cannot move focus")
+                return false
+            }
+            return first.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
         }
-        return next.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+
+        from.focusSearch(direction)?.let { return it.performAction(AccessibilityNodeInfo.ACTION_FOCUS) }
+
+        // No sibling in that direction. On a TV launcher that usually means the row or grid needs
+        // to scroll to reveal the next item rather than that we are genuinely at the end, so ask
+        // the nearest scrollable ancestor to page.
+        if (scrollNearest(from, direction)) return true
+        Logger.i("Focus is at the edge and nothing scrolls (direction $direction)")
+        return true
+    }
+
+    /** Depth-first hunt for something that can hold input focus. */
+    private fun firstFocusable(node: AccessibilityNodeInfo, depth: Int = 0): AccessibilityNodeInfo? {
+        if (depth > MAX_TREE_DEPTH) return null
+        if (node.isFocusable && node.isVisibleToUser) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            firstFocusable(child, depth + 1)?.let { return it }
+        }
+        return null
+    }
+
+    /**
+     * Scrolls the nearest scrollable ancestor of [node] in [direction].
+     *
+     * Forward/backward is all the pre-API-33 scroll actions offer, so down and right both page
+     * forward and up and left both page backward. That is the correct mapping for the vertical
+     * row-of-rows layout every TV launcher uses.
+     */
+    private fun scrollNearest(node: AccessibilityNodeInfo, direction: Int): Boolean {
+        val action = if (direction == View.FOCUS_DOWN || direction == View.FOCUS_RIGHT) {
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        } else {
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        }
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (current != null && depth < MAX_ANCESTOR_WALK) {
+            if (current.isScrollable && current.performAction(action)) return true
+            current = current.parent
+            depth++
+        }
+        return false
     }
 
     /** Activates whatever currently has focus. */
@@ -142,6 +188,9 @@ class PhairPlayAccessibilityService : AccessibilityService() {
 
         /** Ancestor hops allowed when hunting for a clickable parent. */
         private const val MAX_ANCESTOR_WALK = 5
+
+        /** Depth cap on the focusable hunt, so a pathological window can't stall a key press. */
+        private const val MAX_TREE_DEPTH = 25
 
         // Named here rather than referenced directly so the file still compiles against an SDK
         // below 34, where these constants do not exist.

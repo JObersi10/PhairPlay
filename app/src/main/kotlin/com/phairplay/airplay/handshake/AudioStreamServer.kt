@@ -102,8 +102,18 @@ class AudioStreamServer(
      * the delay the sender expects. Capped at half the queue so there is still headroom to absorb
      * jitter before the overflow eviction kicks in.
      */
-    private val targetDepthFrames: Int =
-        (latencyMinSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
+    private val targetDepthFrames: Int = run {
+        // latencyMin is the sender's budget for the WHOLE path, not for this one stage. AudioTrack
+        // is written with WRITE_BLOCKING, so its buffer runs essentially full the entire time and
+        // its capacity is real, audible delay on top of whatever the queue holds. Priming the queue
+        // to the full latencyMin therefore paid the same 250ms twice, and on a Bluetooth output —
+        // which adds its own ~150ms — the total landed near a second.
+        //
+        // Charge the AudioTrack buffer against the budget and prime the queue with the remainder.
+        val trackSamples = sampleRate * TARGET_BUFFER_MS / 1000
+        val queueSamples = (latencyMinSamples - trackSamples).coerceAtLeast(0)
+        (queueSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
+    }
 
     // RTP duplicate suppression. macOS sends each realtime-audio packet 2–3× for redundancy
     // (same 16-bit sequence number). Decoding every copy feeds the AAC decoder duplicate frames
@@ -137,6 +147,19 @@ class AudioStreamServer(
 
     /** Consecutive payload-free packets seen; resets on the first real audio frame. */
     private var keepaliveRun = 0
+
+    /**
+     * When the last datagram of ANY kind arrived on the data socket.
+     *
+     * A *paused* sender keeps sending payload-free keepalives, so this is the one signal that
+     * separates "user hit pause" from "the sender is gone". Some senders — an iPhone that stops
+     * playback without tearing down — leave the RTSP socket open forever, so socket closure alone
+     * never ends the session; this is what does.
+     */
+    @Volatile private var lastPacketAtMs = System.currentTimeMillis()
+
+    /** How long since anything at all arrived, in milliseconds. */
+    val silentForMs: Long get() = System.currentTimeMillis() - lastPacketAtMs
 
     // Beat detection state (playback thread only).
     private var lowPass = 0.0
@@ -225,6 +248,7 @@ class AudioStreamServer(
                     continue
                 }
                 if (audioIdle) { audioIdle = false; onAudioIdle(false) }
+                lastPacketAtMs = System.currentTimeMillis()
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")

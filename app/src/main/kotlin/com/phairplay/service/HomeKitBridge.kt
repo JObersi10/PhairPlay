@@ -46,6 +46,18 @@ class HomeKitBridge(
 
     override fun setActive(on: Boolean) {
         if (on) {
+            // The Home app sets Active=1 alongside EVERY remote key press, not just when the user
+            // taps power. Launching PhairPlay here yanked the user off whatever they were
+            // navigating on every single press — the remote was fighting itself.
+            //
+            // So: wake the screen always, but only take over the foreground when we have no other
+            // way to reach the system. With the accessibility service connected the keys land
+            // wherever the user actually is, which is the whole point of it.
+            if (PhairPlayAccessibilityService.isConnected) {
+                Logger.i("HomeKit: turning on — waking display (leaving foreground alone)")
+                onWakeDisplay()
+                return
+            }
             Logger.i("HomeKit: turning on — waking display and showing PhairPlay")
             onWakeDisplay()
             onBringToFront()

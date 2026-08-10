@@ -755,11 +755,35 @@ class AirPlayReceiver(
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.
             onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
-            .also { audioServer = it; it.start(scope); startPositionTicker() }
+            .also { audioServer = it; it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it) }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
         return server.dataPort to server.controlPort
+    }
+
+    /**
+     * Ends the session when the sender goes completely quiet.
+     *
+     * Not every sender says goodbye. An iPhone that stops playback often sends no TEARDOWN and
+     * leaves the RTSP socket open indefinitely, so the receiver sat "streaming" forever, holding
+     * the screen and refusing the next connection. A *paused* sender still sends keepalive
+     * datagrams, so total silence is unambiguous: it is gone.
+     *
+     * The window is deliberately generous — a few seconds of Wi-Fi trouble must not look like a
+     * disconnect.
+     */
+    private fun startAudioSilenceWatchdog(server: AudioStreamServer) {
+        scope.launch {
+            while (audioServer === server) {
+                delay(AUDIO_SILENCE_POLL_MS)
+                if (audioServer !== server) return@launch
+                if (server.silentForMs < AUDIO_SILENCE_TIMEOUT_MS) continue
+                Logger.i("Sender silent for ${server.silentForMs}ms with no TEARDOWN — ending session")
+                endSession()
+                return@launch
+            }
+        }
     }
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
@@ -1009,6 +1033,12 @@ class AirPlayReceiver(
          * short enough that a real disconnect does not leave the TV waiting.
          */
         private const val MIRROR_RESUME_GRACE_MS = 8_000L
+
+        /** How often the silence watchdog looks. Cheap — it reads one volatile long. */
+        private const val AUDIO_SILENCE_POLL_MS = 2_000L
+
+        /** Total silence for this long means the sender is gone, not paused or briefly stalled. */
+        private const val AUDIO_SILENCE_TIMEOUT_MS = 15_000L
 
         /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
         private const val EVENT_MAX_BYTES = 256 * 1024
