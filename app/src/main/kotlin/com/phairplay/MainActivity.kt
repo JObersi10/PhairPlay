@@ -904,6 +904,25 @@ class MainActivity : AppCompatActivity() {
         val photoFrame = currentPhotoFrame
         val nowPlaying = currentNowPlaying
         val pin = currentPin
+
+        // Latch the mode BEFORE rendering, not after.
+        //
+        // This block used to run below the `when`, which meant the update that first reported video
+        // playing was rendered against a mode still set to NONE — so it took the `else` branch and
+        // *hid* the overlay, then set the mode to VIDEO on its way out with nothing left to redraw.
+        // If that was the last emission, the screen stayed blank for the whole session while the
+        // decoder happily rendered 33fps into a live Surface nobody could see. Disconnecting and
+        // reconnecting worked only because it produced further emissions, one update too late.
+        if (nowPlaying != null) lastNowPlaying = nowPlaying
+        val connected = currentAirPlayState == ProtocolState.CONNECTED
+        if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
+        else if (sessionMode == Mode.NONE) {
+            sessionMode = if (nowPlaying != null) Mode.AUDIO
+                          else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
+        } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
+            sessionMode = Mode.AUDIO
+        }
+
         when {
             // PIN pairing (access control) happens before streaming — show the code over everything.
             pin != null -> showPinScreen(pin)
@@ -913,16 +932,6 @@ class MainActivity : AppCompatActivity() {
             sessionMode == Mode.AUDIO -> showNowPlayingScreen(nowPlaying ?: lastNowPlaying!!)
             photoFrame != null -> showPhotoScreen(photoFrame)
             else -> hideStreamingScreen()
-        }
-        // Latch the mode on the first frame of evidence, clear it when the session ends.
-        if (nowPlaying != null) lastNowPlaying = nowPlaying
-        val connected = currentAirPlayState == ProtocolState.CONNECTED
-        if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
-        else if (sessionMode == Mode.NONE) {
-            sessionMode = if (nowPlaying != null) Mode.AUDIO
-                          else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
-        } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
-            sessionMode = Mode.AUDIO
         }
 
         val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
