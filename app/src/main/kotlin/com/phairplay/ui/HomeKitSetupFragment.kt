@@ -2,7 +2,9 @@ package com.phairplay.ui
 
 import android.graphics.Color
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.StateListDrawable
 import android.os.Bundle
 import android.util.TypedValue
 import android.view.Gravity
@@ -100,12 +102,14 @@ class HomeKitSetupFragment : Fragment() {
             setPadding(0, dp(24), 0, 0)
         }
         primaryButton = Button(ctx).apply {
+            isAllCaps = false
             setTextColor(Color.WHITE)
             background = buttonBackground(primary = true)
             setPadding(dp(28), dp(12), dp(28), dp(12))
             setOnClickListener { advance() }
         }
         secondaryButton = Button(ctx).apply {
+            isAllCaps = false
             setTextColor(Color.argb(200, 255, 255, 255))
             background = buttonBackground(primary = false)
             setPadding(dp(28), dp(12), dp(28), dp(12))
@@ -115,6 +119,9 @@ class HomeKitSetupFragment : Fragment() {
         buttonRow.addView(secondaryButton, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT,
         ).also { it.leftMargin = dp(12) })
+
+        trackFocusColour(primaryButton, Color.WHITE)
+        trackFocusColour(secondaryButton, Color.argb(200, 255, 255, 255))
 
         column.addView(titleView)
         column.addView(bodyView)
@@ -378,9 +385,34 @@ class HomeKitSetupFragment : Fragment() {
         })
     }
 
-    private fun buttonBackground(primary: Boolean) = GradientDrawable().apply {
-        cornerRadius = dp(10).toFloat()
-        setColor(if (primary) FOCUS_BLUE else Color.argb(40, 255, 255, 255))
+    /**
+     * Button background that visibly changes on focus.
+     *
+     * A flat colour was unusable on a TV: with two buttons side by side and no pointer, a static
+     * fill gives no indication of which one Center will press. The focused state gets a white fill
+     * and a border so it reads from across a room, which is the only distance that matters here.
+     */
+    private fun buttonBackground(primary: Boolean): Drawable {
+        val resting = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(if (primary) FOCUS_BLUE else Color.argb(40, 255, 255, 255))
+        }
+        val focused = GradientDrawable().apply {
+            cornerRadius = dp(10).toFloat()
+            setColor(Color.WHITE)
+            setStroke(dp(3), FOCUS_BLUE)
+        }
+        return StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), focused)
+            addState(intArrayOf(), resting)
+        }
+    }
+
+    /** Keeps the label readable against whichever fill the button currently has. */
+    private fun trackFocusColour(button: Button, restingColor: Int) {
+        button.setOnFocusChangeListener { v, hasFocus ->
+            (v as Button).setTextColor(if (hasFocus) Color.BLACK else restingColor)
+        }
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()

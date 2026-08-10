@@ -126,8 +126,18 @@ class HapPairing(
 
     private fun setupM5(tlv: Map<Int, ByteArray>): ByteArray {
         val k = srp?.sessionKey
-        if (k == null || srpState != 4) return HapTlv.error(6, HapTlv.ERROR_UNKNOWN)
-        val encrypted = tlv[HapTlv.ENCRYPTED_DATA] ?: return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        // Logged rather than silently refused: an M5 that is dropped here leaves the controller
+        // waiting on a reply that never comes, and a silent branch makes that indistinguishable from
+        // the request never arriving at all.
+        if (k == null || srpState != 4) {
+            Logger.w("HAP pair-setup M5 out of order (state=$srpState, key=${k != null})")
+            return HapTlv.error(6, HapTlv.ERROR_UNKNOWN)
+        }
+        Logger.i("HAP pair-setup M5 received (${tlv.size} TLV types)")
+        val encrypted = tlv[HapTlv.ENCRYPTED_DATA] ?: run {
+            Logger.w("HAP pair-setup M5 carried no encrypted data")
+            return HapTlv.error(6, HapTlv.ERROR_AUTHENTICATION)
+        }
 
         val encKey = HapCrypto.hkdf(k, SETUP_ENCRYPT_SALT, SETUP_ENCRYPT_INFO)
         val plain = runCatching {

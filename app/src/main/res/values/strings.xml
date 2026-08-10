@@ -236,11 +236,7 @@
     <string name="onboarding_grant">Grant</string>
     <string name="onboarding_granted">Granted</string>
     <string name="onboarding_open_settings">Open settings</string>
-    <string name="onboarding_overlay_no_settings">Fire TV has no screen for this permission — Amazon does not ship one. PhairPlay still works; it just cannot open itself when a sender connects.
-
-To grant it, run this from a computer with adb:
-
-adb shell appops set %1$s SYSTEM_ALERT_WINDOW allow</string>
+    <string name="onboarding_overlay_adb_hint">Fire TV has no screen for this permission — Amazon does not ship one. Without it PhairPlay cannot open itself when a sender connects; you tap the notification instead. To grant it, run from a computer:  adb shell appops set com.phairplay.firetv SYSTEM_ALERT_WINDOW allow</string>
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>

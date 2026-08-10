@@ -22,7 +22,6 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
@@ -241,12 +240,25 @@ class OnboardingFragment : Fragment() {
                 titleView.setText(R.string.onboarding_optional_title)
                 bodyView.setText(R.string.onboarding_optional_body)
                 primaryButton.setText(R.string.onboarding_next)
-                addPermissionRow(
-                    R.string.onboarding_perm_overlay,
-                    R.string.onboarding_perm_overlay_why,
-                    granted = canDrawOverlays(),
-                    actionLabelRes = R.string.onboarding_open_settings,
-                ) { openOverlaySettings() }
+                // No "Open settings" button here any more. Fire OS resolves
+                // ACTION_MANAGE_OVERLAY_PERMISSION to CTSDummyIntentHandler -- a stub that exists to
+                // pass Android's compatibility suite and does nothing at all. There is no screen to
+                // send the user to, so offering a button that cannot work is worse than saying so.
+                // When the permission IS somehow granted the row reports it; otherwise it explains
+                // what is lost and how to grant it from a computer.
+                if (canDrawOverlays()) {
+                    addPermissionRow(
+                        R.string.onboarding_perm_overlay,
+                        R.string.onboarding_perm_overlay_why,
+                        granted = true,
+                    ) { }
+                } else {
+                    addPermissionRow(
+                        R.string.onboarding_perm_overlay,
+                        R.string.onboarding_overlay_adb_hint,
+                        granted = false,
+                    ) { }
+                }
             }
             PAGE_PREFS -> {
                 titleView.setText(R.string.onboarding_prefs_title)
@@ -555,61 +567,6 @@ class OnboardingFragment : Fragment() {
             )
         }
         return mode == android.app.AppOpsManager.MODE_ALLOWED
-    }
-
-    /**
-     * Hands off to the system screen for the overlay grant — where one exists.
-     *
-     * On Fire OS it does not. `ACTION_MANAGE_OVERLAY_PERMISSION` resolves to
-     * `com.amazon.tv.settings.v2/.compliance.CTSDummyIntentHandler`, a stub Amazon ships so the
-     * device passes Android's compatibility suite. It resolves, it launches, it finishes
-     * immediately, and nothing appears. That is why this button "did nothing" through two rounds of
-     * fixes: both a plain try/catch and a resolveActivity() check are satisfied by a dummy.
-     *
-     * So the resolved COMPONENT is inspected, not merely its existence, and known stubs are skipped.
-     * When nothing real is left the honest answer is that this device cannot grant the permission
-     * from its own UI, and the user is given the one command that works.
-     */
-    private fun openOverlaySettings() {
-        val ctx = requireContext()
-        val pkg = ctx.packageName
-        val attempts = listOf(
-            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$pkg")),
-            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION),
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")),
-        )
-        for (intent in attempts) {
-            val target = intent.resolveActivity(ctx.packageManager) ?: continue
-            if (isStubHandler(target.className)) {
-                Logger.i("Skipping stub settings handler ${target.flattenToShortString()}")
-                continue
-            }
-            if (runCatching { startActivity(intent); true }.getOrDefault(false)) {
-                Logger.i("Overlay settings opened via ${intent.action} → ${target.flattenToShortString()}")
-                return
-            }
-        }
-        Logger.w("No real settings screen for the overlay permission on this build — showing the adb path")
-        showOverlayFallbackDialog()
-    }
-
-    /**
-     * Recognises activities that exist only to satisfy a compatibility test.
-     *
-     * Matched on the class name because there is no flag or capability that marks them. Amazon's is
-     * `CTSDummyIntentHandler`; the `compliance` package it lives in catches its siblings.
-     */
-    private fun isStubHandler(className: String): Boolean =
-        className.contains("CTSDummy", ignoreCase = true) ||
-            className.contains(".compliance.", ignoreCase = true)
-
-    /** Explains why the button cannot work here, and gives the command that does. */
-    private fun showOverlayFallbackDialog() {
-        androidx.appcompat.app.AlertDialog.Builder(requireContext())
-            .setTitle(R.string.onboarding_perm_overlay)
-            .setMessage(getString(R.string.onboarding_overlay_no_settings, requireContext().packageName))
-            .setPositiveButton(android.R.string.ok, null)
-            .show()
     }
 
     // ─── Small helpers ───────────────────────────────────────────────────────

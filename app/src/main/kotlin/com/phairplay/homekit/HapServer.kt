@@ -115,6 +115,18 @@ class HapServer(
         }
 
         /**
+         * Bytes received but not yet consumed by a parsed request.
+         *
+         * PERSISTS ACROSS REQUESTS, and that is the whole point. This used to be a fresh buffer per
+         * call, so anything a single read() pulled in beyond the first complete request was silently
+         * dropped. iOS pipelines pair-setup M5 straight down the same connection behind M3, so M5
+         * routinely arrived in the same TCP segment as M3 and was thrown away: the accessory sent
+         * M4, went quiet, and the phone eventually gave up with "this accessory cannot be used with
+         * HomeKit" -- a message that says nothing about a discarded buffer.
+         */
+        private var pending = ByteArray(0)
+
+        /**
          * Reads one HTTP request, transparently decrypting when the session is up.
          *
          * Encrypted mode has to reassemble: a single request may span several 1024-byte records,
@@ -123,18 +135,22 @@ class HapServer(
          * arrived, rather than trying to size the read up front.
          */
         private fun readRequest(): Request? {
-            val buffer = ByteArrayOutputStream()
             while (true) {
+                // Parse BEFORE reading: the previous call may already have left a whole request
+                // behind, and blocking on read() first would deadlock waiting for bytes the
+                // controller has no reason to send.
+                parseRequest(pending)?.let { (request, consumed) ->
+                    pending = pending.copyOfRange(consumed, pending.size)
+                    return request
+                }
                 if (session == null) {
                     val chunk = ByteArray(4096)
                     val n = input.read(chunk)
                     if (n <= 0) return null
-                    buffer.write(chunk, 0, n)
+                    pending += chunk.copyOfRange(0, n)
                 } else {
-                    val plain = readEncryptedRecord() ?: return null
-                    buffer.write(plain)
+                    pending += (readEncryptedRecord() ?: return null)
                 }
-                parseRequest(buffer.toByteArray())?.let { return it }
             }
         }
 
@@ -162,8 +178,13 @@ class HapServer(
             return buf
         }
 
-        /** Returns null when the buffer does not yet hold a complete request. */
-        private fun parseRequest(data: ByteArray): Request? {
+        /**
+         * Returns the request AND how many bytes it consumed, or null when the buffer does not yet
+         * hold a complete request.
+         *
+         * The byte count is what lets the caller keep the remainder instead of discarding it.
+         */
+        private fun parseRequest(data: ByteArray): Pair<Request, Int>? {
             val headerEnd = indexOfDoubleCrlf(data) ?: return null
             val headerText = String(data, 0, headerEnd, Charsets.UTF_8)
             val lines = headerText.split("\r\n")
@@ -177,11 +198,12 @@ class HapServer(
             val bodyStart = headerEnd + 4
             if (data.size < bodyStart + contentLength) return null    // body still arriving
 
-            return Request(
+            val request = Request(
                 method = requestLine[0],
                 target = requestLine[1],
                 body = data.copyOfRange(bodyStart, bodyStart + contentLength),
             )
+            return request to (bodyStart + contentLength)
         }
 
         private fun indexOfDoubleCrlf(data: ByteArray): Int? {
