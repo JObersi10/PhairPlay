@@ -3,6 +3,7 @@ package com.phairplay.service
 import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
+import android.view.KeyEvent
 import android.media.AudioManager
 import com.phairplay.homekit.HomeKitActions
 import com.phairplay.homekit.RemoteKey
@@ -35,6 +36,8 @@ class HomeKitBridge(
     private val onBringToFront: () -> Unit,
     private val onWakeDisplay: () -> Unit,
     private val onSendRemoteCommand: (String) -> Unit,
+    /** Delivers a D-pad/Back/Info press into PhairPlay's own Activity. */
+    private val onNavKey: (Int) -> Unit,
 ) : HomeKitActions {
 
     private val audioManager by lazy {
@@ -80,7 +83,32 @@ class HomeKitBridge(
      * the system, so they are deliberately dropped with a log rather than silently swallowed —
      * otherwise a user pressing arrows in the Home app has no way to tell whether the key arrived.
      */
+    /**
+     * Handles a press on the iPhone's Control Center remote.
+     *
+     * The keys split into two groups that go to genuinely different places, and conflating them is
+     * why most of the remote did nothing:
+     *
+     *  - **Transport** (play/pause, skip, scrub) belongs to whatever is PLAYING, which is the
+     *    sender. These go out over DACP/MediaRemote to the phone or Mac.
+     *
+     *  - **Navigation** (arrows, select, back, exit, info) belongs to whatever is ON SCREEN, which
+     *    is PhairPlay itself. There is no sender equivalent — an iPhone mirroring its display has
+     *    no notion of "up" — so these were logged as unmappable and dropped, leaving two thirds of
+     *    the remote inert.
+     *
+     * Navigation is delivered into our own Activity rather than injected system-wide: INJECT_EVENTS
+     * is a signature permission no sideloaded app can hold, so the honest scope is our own window.
+     * Pressing Up while the Fire TV launcher is in front does nothing, and that is a real limit
+     * rather than a bug.
+     */
     override fun remoteKey(key: Int) {
+        navKeyFor(key)?.let { keyCode ->
+            Logger.i("HomeKit remote key $key → local key ${KeyEvent.keyCodeToString(keyCode)}")
+            onNavKey(keyCode)
+            return
+        }
+
         val command = when (key) {
             RemoteKey.PLAY_PAUSE -> "playpause"
             RemoteKey.NEXT_TRACK -> "nextitem"
@@ -90,11 +118,28 @@ class HomeKitBridge(
             else -> null
         }
         if (command == null) {
-            Logger.i("HomeKit remote key $key has no sender equivalent — ignored")
+            Logger.i("HomeKit remote key $key is not one we map — ignored")
             return
         }
         Logger.i("HomeKit remote key $key → DACP $command")
         onSendRemoteCommand(command)
+    }
+
+    /** The D-pad half of the remote, as Android key codes. Null for anything transport-related. */
+    private fun navKeyFor(key: Int): Int? = when (key) {
+        RemoteKey.ARROW_UP -> KeyEvent.KEYCODE_DPAD_UP
+        RemoteKey.ARROW_DOWN -> KeyEvent.KEYCODE_DPAD_DOWN
+        RemoteKey.ARROW_LEFT -> KeyEvent.KEYCODE_DPAD_LEFT
+        RemoteKey.ARROW_RIGHT -> KeyEvent.KEYCODE_DPAD_RIGHT
+        RemoteKey.SELECT -> KeyEvent.KEYCODE_DPAD_CENTER
+        RemoteKey.BACK -> KeyEvent.KEYCODE_BACK
+        // EXIT is the Home app's "leave this app" key; on a TV that is the same gesture as Back
+        // rather than HOME, which would drop the user out of PhairPlay entirely.
+        RemoteKey.EXIT -> KeyEvent.KEYCODE_BACK
+        // Info flips the now-playing card to its credits side, matching the Menu/Info mapping the
+        // physical Fire TV remote already has.
+        RemoteKey.INFORMATION -> KeyEvent.KEYCODE_INFO
+        else -> null
     }
 
     override fun volumeStep(up: Boolean) {

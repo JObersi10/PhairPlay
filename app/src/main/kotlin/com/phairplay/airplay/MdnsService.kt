@@ -221,19 +221,19 @@ class MdnsService(
             setAttribute("da", "true")             // Digest authentication capable
             // Encryption types: 0 = none, 1 = RSA, 3 = FairPlay, 4/5 = FairPlay SAPv2.5.
             //
-            // Deliberately 0,1 and NOT 0,3,5. A sender picks the strongest type we advertise, so
-            // offering 3 and 5 forced macOS Music down FairPlay v2 -- a path that needs four
-            // captured 142-byte phase-1 reply tables, of which exactly one is publicly available.
-            // Modes 0, 1 and 3 therefore got mode 2's cryptographic material, the wrapped key
-            // unwrapped to a plausible but wrong 16 bytes, and ALAC rejected 20 frames in every 24.
-            // The symptom was silence with no error, which is why it read as a decoder bug.
+            // Encryption types: 0 none, 1 RSA, 3 FairPlay, 5 FairPlay SAPv2.5.
             //
-            // RSA (`rsaaeskey`) is fully implemented here and needs no captured constants at all.
-            // Every open-source receiver advertises 0,1 for exactly this reason.
+            // Advertising only "0,1" was an attempt to steer macOS Music onto the RSA path, whose
+            // key handling is fully implemented here and needs no captured constants. It backfired.
+            // Music did not fall back to RSA -- it read the receiver as unusable and hung up right
+            // after OPTIONS, before ANNOUNCE, so audio went from "streams with a wrong key" to "no
+            // session at all". The device logs either side of that change show it plainly.
             //
-            // This does NOT affect mirroring: iOS screen mirroring negotiates FairPlay v3 over
-            // _airplay._tcp, where all four reply tables ARE published and already present.
-            setAttribute("et", "0,1")              // Encryption types supported
+            // So FairPlay is advertised again. The v2 mode problem below is real and unsolved, but
+            // a session that reaches RECORD is strictly better than one that never starts: it keeps
+            // metadata, transport control and the now-playing UI working, and it is the only state
+            // in which the remaining key bug can be observed at all.
+            setAttribute("et", "0,1,3,5")          // Encryption types supported
             setAttribute("md", "0,1,2")            // Metadata types supported
             setAttribute("sv", "false")            // Software volume control
             setAttribute("tp", "UDP")              // Transport for audio RTP

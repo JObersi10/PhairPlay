@@ -662,6 +662,22 @@ class MainActivity : AppCompatActivity() {
      * stream is showing — so the remote can play/pause/skip what the Mac/iPhone is streaming. Returns
      * false for other keys so normal navigation is unaffected.
      */
+    /**
+     * Feeds a key press into this window as if the physical remote had sent it.
+     *
+     * Both halves are required: a lone ACTION_DOWN leaves views that track press state stuck down,
+     * and long-press detection never resolves.
+     */
+    private fun injectKey(keyCode: Int) {
+        val now = android.os.SystemClock.uptimeMillis()
+        window.decorView.dispatchKeyEvent(
+            android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_DOWN, keyCode, 0),
+        )
+        window.decorView.dispatchKeyEvent(
+            android.view.KeyEvent(now, now, android.view.KeyEvent.ACTION_UP, keyCode, 0),
+        )
+    }
+
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         // Handle Back here rather than relying on onBackPressed(). That path goes through
         // OnBackPressedDispatcher, where a fragment or the overlay can swallow the event before the
@@ -954,6 +970,13 @@ class MainActivity : AppCompatActivity() {
                 currentNowPlaying = info
                 updateOverlay()
             }
+        }
+        // The HomeKit remote's D-pad. Delivered as a real KeyEvent pair through the window rather
+        // than by calling onKeyDown directly, so it travels the same path as the physical remote --
+        // focus search, fragment handling, the mirror control bar, all of it -- instead of hitting
+        // only the branches the Activity happens to implement itself.
+        lifecycleScope.launch {
+            svc.remoteKeys.collect { keyCode -> injectKey(keyCode) }
         }
         lifecycleScope.launch {
             svc.videoPlaying.collectLatest { playing ->

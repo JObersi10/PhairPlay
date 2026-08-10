@@ -40,6 +40,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -100,6 +101,28 @@ class PhairPlayService : Service() {
     // Non-null while AirPlay audio is playing WITHOUT video — drives the now-playing overlay.
     private val _nowPlaying = MutableStateFlow<com.phairplay.airplay.NowPlayingInfo?>(null)
     val nowPlaying: StateFlow<com.phairplay.airplay.NowPlayingInfo?> = _nowPlaying.asStateFlow()
+
+    /**
+     * D-pad presses arriving from the HomeKit remote, as Android key codes.
+     *
+     * A SharedFlow rather than a StateFlow: these are events, and two presses of the same arrow
+     * must both arrive. A StateFlow would collapse the second into the first and the remote would
+     * feel like it were dropping every other press.
+     *
+     * `extraBufferCapacity` absorbs a burst of presses while the Activity is starting; without it
+     * `tryEmit` fails on a flow with no room and the press vanishes silently.
+     */
+    private val _remoteKeys = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 16)
+    val remoteKeys = _remoteKeys.asSharedFlow()
+
+    private fun emitRemoteKey(keyCode: Int) {
+        // Bring the app forward first: a key aimed at our own window is useless if another app owns
+        // the screen, and the user pressing an arrow plainly means they expect to see PhairPlay.
+        bringAppToFront()
+        if (!_remoteKeys.tryEmit(keyCode)) {
+            Logger.w("Remote key $keyCode dropped — no collector and the buffer is full")
+        }
+    }
 
     private val _audioEnergy = MutableStateFlow(0f)
     val audioEnergy: StateFlow<Float> = _audioEnergy.asStateFlow()
@@ -471,6 +494,7 @@ class PhairPlayService : Service() {
             onBringToFront = { bringAppToFront() },
             onWakeDisplay = { wakeDisplay() },
             onSendRemoteCommand = { cmd -> airPlayReceiver?.sendRemoteCommand(cmd) },
+            onNavKey = { keyCode -> emitRemoteKey(keyCode) },
         )
         runCatching {
             com.phairplay.homekit.HomeKitReceiver(
