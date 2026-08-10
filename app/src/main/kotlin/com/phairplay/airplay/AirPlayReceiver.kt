@@ -145,6 +145,8 @@ class AirPlayReceiver(
     @Volatile private var ntpClient: AirPlayNtpClient? = null
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
+    /** Deferred end-of-video, pending a possible renegotiation. See [scheduleMirrorVideoStop]. */
+    @Volatile private var pendingVideoStop: kotlinx.coroutines.Job? = null
 
     /**
      * The event channel's encryption state and output stream, held so the TV remote can *send* on
@@ -690,6 +692,9 @@ class AirPlayReceiver(
      * @return the data server's TCP port (macOS connects here to send H.264).
      */
     private fun startMirrorStream(streamConnectionId: Long): Int {
+        // A stream is back: whatever close we were waiting out was a renegotiation, not an ending.
+        pendingVideoStop?.let { it.cancel(); Logger.i("Video stream renegotiated — cancelling pending stop") }
+        pendingVideoStop = null
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         return MirrorStreamServer(
@@ -697,7 +702,7 @@ class AirPlayReceiver(
             // A sender that goes quiet without a TEARDOWN (phone screen off, or an app taking over
             // with its own fullscreen player) used to leave the session "live" with its last frame
             // frozen on the TV. Tear it down ourselves.
-            onConnectionEnded = { stopMirrorVideo() },
+            onConnectionEnded = { scheduleMirrorVideoStop() },
         )
             .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort
@@ -736,7 +741,30 @@ class AirPlayReceiver(
     }
 
     /** Stops ONLY the mirror video stream (macOS dynamic-stream TEARDOWN) — audio keeps playing. */
+    /**
+     * The sender closed the video connection. Wait before believing it is over.
+     *
+     * A close is not the same as an ending. Locking the phone closes the connection while the
+     * session stays alive on the sender — it still says "connected" — and an app switching to its
+     * own player closes one stream and negotiates another a beat later. Acting immediately turned
+     * both into a quit, which is worse than the frozen frame it replaced. Any new mirror stream
+     * within the grace window cancels this.
+     */
+    private fun scheduleMirrorVideoStop() {
+        pendingVideoStop?.cancel()
+        pendingVideoStop = scope.launch {
+            delay(MIRROR_RESUME_GRACE_MS)
+            Logger.i("No video stream returned within ${MIRROR_RESUME_GRACE_MS}ms — ending video")
+            stopMirrorVideo()
+        }
+    }
+
     private fun stopMirrorVideo() {
+        pendingVideoStop?.cancel()
+        pendingVideoStop = null
+        // Both a TEARDOWN and the connection ending can land here for one session; the second call
+        // has nothing to do and must not re-emit state.
+        if (!videoPlaying && mirrorServer == null) return
         mirrorServer?.stop()
         mirrorServer = null
         videoPlaying = false
@@ -941,6 +969,13 @@ class AirPlayReceiver(
             DacpClient.CMD_REW to MediaRemote.BEGIN_REWIND,
             DacpClient.CMD_REW_STOP to MediaRemote.END_REWIND,
         )
+
+        /**
+         * How long a closed video connection is given to come back before the session is ended.
+         * Long enough to cover locking the phone briefly or an app handing over to its own player;
+         * short enough that a real disconnect does not leave the TV waiting.
+         */
+        private const val MIRROR_RESUME_GRACE_MS = 8_000L
 
         /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
         private const val EVENT_MAX_BYTES = 256 * 1024
