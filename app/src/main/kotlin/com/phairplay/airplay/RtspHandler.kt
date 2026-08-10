@@ -129,6 +129,14 @@ open class RtspHandler(
 
     private var currentCSeq: Int = 0
 
+    /**
+     * Group membership and the shared playback anchor, from SETPEERS / SETRATEANCHORTIME.
+     *
+     * Lives for the whole handler rather than per-session: the sender sends peers and an anchor
+     * around SETUP/RECORD, and a per-session object would be rebuilt underneath them.
+     */
+    val group = com.phairplay.airplay.handshake.MultiRoomGroup()
+
     @Volatile
     private var currentSession: SessionDescription? = null
 
@@ -370,8 +378,8 @@ open class RtspHandler(
             "PAUSE"         -> handlePauseInternal(request)
             // AirPlay 2 buffered-audio control verbs. Acknowledge them (a 501 would abort audio-only
             // playback) and log their bodies so the anchor/rate/peer formats can be implemented.
-            "SETRATEANCHORTIME", "SETRATEANCHORTIM" -> handleBufferedControl(request, "SETRATEANCHORTIME")
-            "SETPEERS", "SETPEERSX"                 -> handleBufferedControl(request, "SETPEERS")
+            "SETRATEANCHORTIME", "SETRATEANCHORTIM" -> handleSetRateAnchorTime(request)
+            "SETPEERS", "SETPEERSX"                 -> handleSetPeers(request)
             "FLUSHBUFFERED"                         -> handleBufferedControl(request, "FLUSHBUFFERED")
             "PUT"           -> handlePhotoPutInternal(request)
             "DELETE"        -> handlePhotoDeleteInternal(request)
@@ -711,6 +719,43 @@ open class RtspHandler(
                     "$k=" + when (v) { is ByteArray -> "${v.size}B"; is List<*> -> "list[${v.size}]"; else -> v.toString() }
                 })
             }.onFailure { Logger.d("$label body ($n B, non-plist)") }
+        }
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    }
+
+    /**
+     * SETPEERS / SETPEERSX — the sender's list of every device in the group.
+     *
+     * Recorded rather than merely acknowledged because it is the group's membership: which PTP
+     * grandmaster to follow comes from here, and a receiver following a different master than its
+     * peers has no shared timebase no matter how well its own clock is synchronised.
+     */
+    private fun handleSetPeers(request: RtspRequest): RtspResponse {
+        if (request.bodyBytes.isNotEmpty()) {
+            runCatching {
+                // The body is a bare plist ARRAY, not a dictionary, so the dictionary decoder does
+                // not fit it -- decodeRoot returns whatever the root object actually is.
+                val peers = com.phairplay.airplay.handshake.MultiRoomGroup
+                    .parsePeers(PlistCodec.decodeRoot(request.bodyBytes))
+                group.setPeers(peers)
+            }.onFailure { Logger.w("SETPEERS body could not be parsed: ${it.message}") }
+        }
+        return RtspResponse(200, "OK", protocol = request.responseProtocol())
+    }
+
+    /**
+     * SETRATEANCHORTIME — the shared playback anchor, and the thing that actually synchronises a
+     * group: every receiver maps the same RTP timestamp to the same network time, so agreeing on
+     * the clock is enough to agree on which sample to play.
+     */
+    private fun handleSetRateAnchorTime(request: RtspRequest): RtspResponse {
+        if (request.bodyBytes.isNotEmpty()) {
+            runCatching {
+                val dict = PlistCodec.decode(request.bodyBytes)
+                val anchor = com.phairplay.airplay.handshake.MultiRoomGroup.parseAnchor(dict)
+                if (anchor != null) group.setAnchor(anchor)
+                else Logger.w("SETRATEANCHORTIME without rtpTime/networkTimeSecs — ignoring")
+            }.onFailure { Logger.w("SETRATEANCHORTIME body could not be parsed: ${it.message}") }
         }
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
