@@ -27,6 +27,34 @@
 #include <stdio.h>
 #include "ALACBitUtilities.h"
 
+// LOCAL CHANGE (PhairPlay): bounds-safe reads.
+//
+// Apple shipped the readers below with their bounds checks commented out (see the
+// "//Assert( bits->cur <= bits->end )" lines). On a well-formed frame the decoder's own
+// end-of-stream logic stops first, so it never mattered. On a corrupt frame — in practice a
+// frame decrypted with the wrong key, e.g. an unsupported FairPlay v2 mode — the element
+// headers are garbage, `cur` runs past `end`, and the reader keeps dereferencing until it hits
+// an unmapped page. Observed as SIGSEGV/SEGV_ACCERR in BitBufferRead after ~17KB of over-read,
+// which is far past any fixed read-ahead padding the caller could allocate.
+//
+// So: read zeros past `end` rather than trusting the caller's slack, and never let `cur` walk
+// beyond `end`. The decoder's existing end-of-stream checks then fire and Decode() returns an
+// error the caller reports normally, instead of taking the process down.
+static inline uint32_t BitBufferSafeByte( const BitBuffer * bits, uint32_t offset )
+{
+	const uint8_t * p = bits->cur + offset;
+	return ( p < bits->end ) ? (uint32_t) *p : 0u;
+}
+
+static inline void BitBufferClampToEnd( BitBuffer * bits )
+{
+	if ( bits->cur > bits->end )
+	{
+		bits->cur		= bits->end;
+		bits->bitIndex	= 0;
+	}
+}
+
 // BitBufferInit
 //
 void BitBufferInit( BitBuffer * bits, uint8_t * buffer, uint32_t byteSize )
@@ -45,19 +73,19 @@ uint32_t BitBufferRead( BitBuffer * bits, uint8_t numBits )
 	
 	//Assert( numBits <= 16 );
 
-	returnBits = ((uint32_t)bits->cur[0] << 16) | ((uint32_t)bits->cur[1] << 8) | ((uint32_t)bits->cur[2]);
+	returnBits = (BitBufferSafeByte( bits, 0 ) << 16) | (BitBufferSafeByte( bits, 1 ) << 8) | BitBufferSafeByte( bits, 2 );
 	returnBits = returnBits << bits->bitIndex;
 	returnBits &= 0x00FFFFFF;
-	
+
 	bits->bitIndex += numBits;
-	
+
 	returnBits = returnBits >> (24 - numBits);
-	
+
 	bits->cur		+= (bits->bitIndex >> 3);
 	bits->bitIndex	&= 7;
-	
-	//Assert( bits->cur <= bits->end );
-	
+
+	BitBufferClampToEnd( bits );
+
 	return returnBits;
 }
 
@@ -70,18 +98,18 @@ uint8_t BitBufferReadSmall( BitBuffer * bits, uint8_t numBits )
 	
 	//Assert( numBits <= 8 );
 	
-	returnBits = (bits->cur[0] << 8) | bits->cur[1];
+	returnBits = (uint16_t)((BitBufferSafeByte( bits, 0 ) << 8) | BitBufferSafeByte( bits, 1 ));
 	returnBits = returnBits << bits->bitIndex;
-	
+
 	bits->bitIndex += numBits;
-	
+
 	returnBits = returnBits >> (16 - numBits);
-	
+
 	bits->cur		+= (bits->bitIndex >> 3);
 	bits->bitIndex	&= 7;
-	
-	//Assert( bits->cur <= bits->end );
-	
+
+	BitBufferClampToEnd( bits );
+
 	return (uint8_t)returnBits;
 }
 
@@ -92,15 +120,15 @@ uint8_t BitBufferReadOne( BitBuffer * bits )
 {
 	uint8_t		returnBits;
 
-	returnBits = (bits->cur[0] >> (7 - bits->bitIndex)) & 1;
+	returnBits = (uint8_t)((BitBufferSafeByte( bits, 0 ) >> (7 - bits->bitIndex)) & 1);
 
 	bits->bitIndex++;
-	
+
 	bits->cur		+= (bits->bitIndex >> 3);
 	bits->bitIndex	&= 7;
-	
-	//Assert( bits->cur <= bits->end );
-	
+
+	BitBufferClampToEnd( bits );
+
 	return returnBits;
 }
 
@@ -108,15 +136,15 @@ uint8_t BitBufferReadOne( BitBuffer * bits )
 //
 uint32_t BitBufferPeek( BitBuffer * bits, uint8_t numBits )
 {
-	return ((((((uint32_t) bits->cur[0] << 16) | ((uint32_t) bits->cur[1] << 8) |
-			((uint32_t) bits->cur[2])) << bits->bitIndex) & 0x00FFFFFF) >> (24 - numBits));
+	return (((((BitBufferSafeByte( bits, 0 ) << 16) | (BitBufferSafeByte( bits, 1 ) << 8) |
+			BitBufferSafeByte( bits, 2 )) << bits->bitIndex) & 0x00FFFFFF) >> (24 - numBits));
 }
 
 // BitBufferPeekOne
 //
 uint32_t BitBufferPeekOne( BitBuffer * bits )
 {
-	return ((bits->cur[0] >> (7 - bits->bitIndex)) & 1);
+	return ((BitBufferSafeByte( bits, 0 ) >> (7 - bits->bitIndex)) & 1);
 }
 
 // BitBufferUnpackBERSize
@@ -166,6 +194,7 @@ void BitBufferAdvance( BitBuffer * bits, uint32_t numBits )
 		bits->bitIndex += numBits;
 		bits->cur += (bits->bitIndex >> 3);
 		bits->bitIndex &= 7;
+		BitBufferClampToEnd( bits );
 	}
 }
 

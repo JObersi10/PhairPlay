@@ -146,6 +146,11 @@ class AudioPlayer {
             // Step 3: Decode ALAC to PCM if this is a lossless stream; otherwise the payload is
             // already PCM (LPCM) and passes through. Skip the packet if ALAC decode fails, and mute
             // the stream entirely if the first frames mostly fail (wrong key → noise suppression).
+            // Once the gate has muted the stream we stop decoding entirely rather than decoding
+            // and discarding: the payload is garbage by definition, and every garbage frame is
+            // another chance for the decoder to misparse. Cheapest correct thing is to not look.
+            if (muted) return
+
             val pcm = alac?.let { dec ->
                 val out = dec.decode(decryptedPayload)
                 if (!decodeHealthDecided) updateDecodeHealth(out != null)
