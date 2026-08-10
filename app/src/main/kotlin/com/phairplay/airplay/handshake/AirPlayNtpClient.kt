@@ -91,6 +91,13 @@ class AirPlayNtpClient(
     @Volatile var synchronised = false
         private set
 
+    /**
+     * Offset AND rate. The offset alone is enough for one room; holding two rooms together needs
+     * the rate, because their crystals differ (~40ppm measured here) and that difference
+     * accumulates into audible lip-sync error over minutes. See [SenderClockModel].
+     */
+    val clockModel = SenderClockModel()
+
     private val window = ArrayDeque<Sample>()
 
     private data class Sample(val offsetNanos: Long, val delayNanos: Long)
@@ -179,6 +186,13 @@ class AirPlayNtpClient(
         offsetNanos = best.offsetNanos
         bestDelayNanos = best.delayNanos
 
+        // Feed the rate model only low-delay samples. A sample delayed by network jitter carries
+        // an offset error of up to half that delay, which would tilt the regression far more than
+        // it would move a best-of-window offset.
+        if (delay <= bestDelayNanos * RATE_SAMPLE_DELAY_FACTOR) {
+            clockModel.addSample(t4, t3)
+        }
+
         val wasSynchronised = synchronised
         synchronised = true
         // One line on first sync, then periodically — enough to see drift and jitter without
@@ -187,7 +201,10 @@ class AirPlayNtpClient(
             Logger.i(
                 "NTP sync: offset=${offset / 1000}us rtt=${delay / 1000}us " +
                     "| best offset=${offsetNanos / 1000}us rtt=${bestDelayNanos / 1000}us " +
-                    "(${window.size} samples)"
+                    "(${window.size} samples)" +
+                    // Skew is the number that decides whether multi-room can hold sync: it should
+                    // settle to a small, stable value for a given pair of devices.
+                    if (clockModel.confident) " | skew=%.1fppm".format(clockModel.skewPpm) else ""
             )
         }
         return true
@@ -246,6 +263,9 @@ class AirPlayNtpClient(
 
         /** Samples kept for best-of selection — at a 2 s poll, about a minute of history. */
         private const val WINDOW_SIZE = 32
+
+        /** Only samples within this multiple of the best RTT are clean enough to fit a rate to. */
+        private const val RATE_SAMPLE_DELAY_FACTOR = 2
 
         private const val LOG_EVERY_N_SAMPLES = 8
 
