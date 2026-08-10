@@ -265,6 +265,16 @@ class PhairPlayService : Service() {
      * Restarting the receiver drops the RTSP connection, which tells the sender that mirroring
      * ended, then re-advertises so the device is immediately pickable again.
      */
+    /**
+     * Dismisses the AirPlay pairing code. Clears the flow even when no receiver is around to ask,
+     * so the overlay always goes away — a stuck PIN with no exit is worse than a stale SRP session.
+     */
+    fun cancelPinPairing() {
+        Logger.i("Cancelling PIN pairing on user request")
+        airPlayReceiver?.cancelPinPairing()
+        _pairingPin.value = null
+    }
+
     fun endCurrentSession() {
         Logger.i("Ending current session on user request")
         // Drop just this sender. Restarting every receiver took mDNS down and put it straight back,

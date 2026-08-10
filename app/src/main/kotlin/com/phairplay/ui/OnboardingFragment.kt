@@ -229,6 +229,12 @@ class OnboardingFragment : Fragment() {
                         granted = hasWifiDirectPermission(),
                     ) { requestPermissions(wifiDirectPermissions(), REQ) }
                 }
+                // Both rows above are conditional, and on a Fire TV below API 33 with Miracast off
+                // neither applies — which left the page showing "PhairPlay needs these to receive
+                // streams at all" above nothing at all, reading like the list had failed to load.
+                if (itemsContainer.childCount == 0) {
+                    bodyView.setText(R.string.onboarding_required_none)
+                }
             }
             PAGE_OPTIONAL -> {
                 titleView.setText(R.string.onboarding_optional_title)
@@ -520,8 +526,35 @@ class OnboardingFragment : Fragment() {
 
     private fun hasWifiDirectPermission() = wifiDirectPermissions().any { hasPermission(it) }
 
-    private fun canDrawOverlays(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(requireContext())
+    /**
+     * Whether the overlay appop is explicitly allowed.
+     *
+     * Deliberately NOT `Settings.canDrawOverlays()`. That reports true whenever the appop is
+     * MODE_DEFAULT and the manifest declares SYSTEM_ALERT_WINDOW — which is precisely the state a
+     * fresh install starts in, and precisely the state in which the service's background activity
+     * launch is refused. So onboarding drew the row as already-granted and offered no way to turn
+     * it on, while PhairPlay silently failed to open itself when a sender connected.
+     *
+     * Ask the appop directly and accept only an explicit allow.
+     */
+    private fun canDrawOverlays(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val ctx = requireContext()
+        val ops = ctx.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ops.unsafeCheckOpNoThrow(
+                android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                android.os.Process.myUid(), ctx.packageName,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            ops.checkOpNoThrow(
+                android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                android.os.Process.myUid(), ctx.packageName,
+            )
+        }
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
+    }
 
     /**
      * Fire TV has no in-app path to the overlay grant, so this hands off to system settings. Some

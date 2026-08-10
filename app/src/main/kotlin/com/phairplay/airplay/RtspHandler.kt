@@ -802,6 +802,24 @@ open class RtspHandler(
         return RtspResponse(200, "OK", protocol = request.responseProtocol())
     }
 
+    /**
+     * Abandons an in-progress PIN pairing and takes the code off the screen.
+     *
+     * The PIN otherwise only clears on success, a failed attempt, or the lockout — all of which
+     * require the sender to keep talking to us. A sender that simply walks away (gives up, or
+     * pairs over a different route) leaves the code on screen with nothing left to dismiss it,
+     * and the pairing overlay covers every other screen. This is the user's way out.
+     *
+     * Discards the SRP session too: the next /pair-pin-start mints a new PIN, so a code the user
+     * dismissed can never be used to complete a pairing later.
+     */
+    fun cancelPinPairing() {
+        if (legacyPin == null) return
+        legacyPin = null
+        onShowPin(null)
+        Logger.i("PIN pairing cancelled by user — SRP session discarded")
+    }
+
     /** Generates a fresh 4-digit PIN, shows it on the TV, and primes the legacy SRP session. */
     private fun newSrpSession() {
         val pin = "%0${PIN_DIGITS}d".format(java.security.SecureRandom().nextInt(PIN_SPACE))

@@ -271,6 +271,18 @@ class MainActivity : AppCompatActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        // Back dismisses the pairing code first. The PIN overlay sits on top of everything and only
+        // cleared when the sender finished, failed, or hit the lockout — so a sender that gave up
+        // mid-pairing left the code on screen with no way out of it at all, whatever backAction was
+        // set to. Cancel the pairing and fall back to the waiting screen instead of leaving the app.
+        if (currentPin != null) {
+            Timber.d("Back on PIN screen — cancelling pairing")
+            service?.cancelPinPairing()
+            currentPin = null
+            updateOverlay()
+            return
+        }
+
         // Back closes the track-info panel before it touches the session — otherwise opening the
         // credits and pressing Back would kill the stream instead of just closing the card.
         if (nowPlayingScreen.visibility == View.VISIBLE && nowPlayingScreen.dismissInfoPanel()) return
@@ -921,6 +933,12 @@ class MainActivity : AppCompatActivity() {
                           else if (currentVideoPlaying) Mode.VIDEO else Mode.NONE
         } else if (sessionMode == Mode.VIDEO && nowPlaying != null && !currentVideoPlaying) {
             sessionMode = Mode.AUDIO
+        } else if (sessionMode == Mode.AUDIO && currentVideoPlaying) {
+            // ...and back again. Mirroring TikTok and opening search publishes now-playing metadata
+            // while the mirror keeps running, which flipped the session to AUDIO permanently: there
+            // was no path out of AUDIO short of disconnecting. Live video frames are the stronger
+            // signal — if the decoder is being fed, that is what belongs on screen.
+            sessionMode = Mode.VIDEO
         }
 
         when {

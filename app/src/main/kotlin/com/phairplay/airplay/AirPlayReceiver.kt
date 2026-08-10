@@ -228,6 +228,11 @@ class AirPlayReceiver(
      * connection. Used by Back during a stream — a full receiver restart re-advertised over mDNS
      * fast enough for the sender to reconnect on its own, so the stream never appeared to stop.
      */
+    /** Abandons an in-progress PIN pairing and clears the code from the screen. */
+    fun cancelPinPairing() {
+        rtspHandler?.cancelPinPairing()
+    }
+
     fun endSession() {
         Logger.i("Ending AirPlay session on user request")
         rtspHandler?.disconnectActiveClient()

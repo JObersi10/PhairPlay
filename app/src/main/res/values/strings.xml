@@ -132,6 +132,7 @@
     <!-- ── Pairing PIN (access control) ─────────────────────────── -->
     <string name="pairing_pin_title">AirPlay pairing code</string>
     <string name="pairing_pin_hint">Enter this code on your device to connect</string>
+    <string name="pairing_pin_cancel_hint">Press Back to cancel</string>
 
     <!-- On-screen controls shown over screen mirroring and AirPlay video -->
     <string name="mirror_control_stop">Stop streaming</string>
@@ -178,6 +179,7 @@
     <string name="onboarding_welcome_body">Turn this TV into an AirPlay and DLNA receiver. Send audio, video and photos from an iPhone, iPad or Mac — no cables, no account.\n\nThis takes about a minute to set up.</string>
     <string name="onboarding_required_title">Required permissions</string>
     <string name="onboarding_required_body">PhairPlay needs these to receive streams at all.</string>
+    <string name="onboarding_required_none">Nothing to grant — this device gives PhairPlay everything it needs at install time.</string>
     <string name="onboarding_optional_title">Recommended</string>
     <string name="onboarding_optional_body">Optional, but PhairPlay works noticeably better with them.</string>
     <string name="onboarding_ready_title">You\'re set</string>

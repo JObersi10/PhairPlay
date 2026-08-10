@@ -65,6 +65,9 @@ class MirrorStreamServer(
     @Volatile private var client: Socket? = null
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
+
+    /** Last time ANY payload arrived — the sender-is-alive signal, distinct from video arriving. */
+    @Volatile private var lastDataMs = 0L
     private var configAtMs = 0L
     private var firstVideoAtMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
@@ -118,12 +121,17 @@ class MirrorStreamServer(
             val input = socket.getInputStream()
             val header = ByteArray(128)
             lastVideoMs = System.currentTimeMillis()
+            lastDataMs = lastVideoMs
             while (running && !socket.isClosed) {
                 // A sender that wedges mid-mirror (iPad glitch) keeps the socket open but sends
                 // nothing, leaving the app on a frozen frame with no way to end it from the remote.
+                // Liveness is "sent us anything", not "sent us video". A phone parked on a static
+                // screen keeps the connection healthy with type-5 payloads while producing no new
+                // frames at all, so keying this on video alone would end a live session after 30s
+                // of someone reading their search results.
                 if (firstVideoAtMs != 0L &&
-                    System.currentTimeMillis() - lastVideoMs > DEAD_SENDER_MS) {
-                    Logger.w("Mirror: no video for ${DEAD_SENDER_MS}ms — sender is gone, ending")
+                    System.currentTimeMillis() - lastDataMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: nothing from the sender for ${DEAD_SENDER_MS}ms — ending")
                     break
                 }
                 if (!readFully(input, header, 128)) break
@@ -135,6 +143,7 @@ class MirrorStreamServer(
                 }
                 val payload = ByteArray(payloadSize)
                 if (!readFully(input, payload, payloadSize)) break
+                lastDataMs = System.currentTimeMillis()
                 when (payloadType) {
                     0 -> {
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
@@ -391,10 +400,30 @@ class MirrorStreamServer(
 
     private fun readFully(input: InputStream, buf: ByteArray, len: Int): Boolean {
         var read = 0
+        var quietSinceMs = System.currentTimeMillis()
         while (read < len) {
-            val n = input.read(buf, read, len - read)
+            val n = try {
+                input.read(buf, read, len - read)
+            } catch (e: java.net.SocketTimeoutException) {
+                // soTimeout fires whenever the sender is merely quiet, and a phone parked on a
+                // static screen is quiet for a long time — mirroring TikTok and opening search
+                // produced no frames for over 3s, so the reader bailed, the session was declared
+                // dropped, and the TV fell back to the audio card with no route back to video
+                // even though the phone was still mirroring the whole time.
+                //
+                // Keep waiting instead. Retrying is safe mid-frame: `read` holds our place in the
+                // buffer, so the stream stays aligned. DEAD_SENDER_MS is the only thing that gives
+                // up, which is what it was there for.
+                if (!running) return false
+                if (System.currentTimeMillis() - quietSinceMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: no data for ${DEAD_SENDER_MS}ms — sender is gone")
+                    return false
+                }
+                continue
+            }
             if (n == -1) return false
             read += n
+            quietSinceMs = System.currentTimeMillis()
         }
         return true
     }
