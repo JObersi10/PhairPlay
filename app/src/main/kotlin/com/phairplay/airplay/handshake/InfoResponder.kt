@@ -36,6 +36,42 @@ object InfoResponder {
             "protovers" to "1.1",
             "keepAliveLowPower" to true,
             "keepAliveSendStatsAsBody" to true,
+
+            // ── Keys a real Apple TV returns that we were omitting ──────────────────────────
+            //
+            // An absent key is not neutral: the sender treats it as "not supported" and silently
+            // withholds the corresponding behaviour, which looks like a receiver bug much further
+            // down the session. These are the ones with observable consequences.
+
+            // Tells the sender the receiver has a UI worth showing for audio-only content. Without
+            // it iOS treats an audio session as headless and does not offer the now-playing screen
+            // it would give an Apple TV.
+            "playbackCapabilities" to mapOf(
+                "supportsFPSSecureStop" to true,
+                "supportsUIForAudioOnlyContent" to true,
+                "supportsInterstitials" to true,
+            ),
+
+            // 1 = relative (up/down steps). Absent, senders assume absolute and send levels that
+            // Android's stream volume cannot honour without fighting the system volume UI.
+            "volumeControlType" to 1L,
+            // dB, not percent: 0 is full scale and -144 is muted. Reported so the sender's slider
+            // starts somewhere sane instead of snapping on first adjustment.
+            "initialVolume" to -20.0,
+
+            // Screen recording is a sender-side capability we genuinely do not have; saying so
+            // stops senders offering it and then failing.
+            "canRecordScreenStream" to false,
+
+            // Pairing capabilities, stated explicitly. Transient pairing is NOT implemented, and
+            // claiming it would make a sender skip the pairing we do support and then fail.
+            "supportsSystemPairing" to true,
+            "supportsTransientPairing" to false,
+            "supportsHKPairingAndAccessControl" to true,
+
+            // Name provenance: true would tell the sender our name is a factory placeholder and
+            // invite it to rename us.
+            "nameIsFactoryDefault" to false,
             // NOTE: macOS IGNORES this for system-audio AirPlay — it sends ALAC (ct=2) regardless of
             // what we advertise (verified: advertising AAC-only still got ALAC). So we keep the broad
             // set (mirroring negotiates AAC-ELD from it, which works). Audio-only would need a

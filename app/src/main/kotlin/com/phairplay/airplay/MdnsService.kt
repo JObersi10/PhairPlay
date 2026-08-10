@@ -170,7 +170,9 @@ class MdnsService(
             setAttribute("deviceid", NetworkUtils.getMacAddress())
             setAttribute("features", AIRPLAY_FEATURES)
             setAttribute("model", AIRPLAY_MODEL)
-            setAttribute("srcvers", AIRPLAY_SERVER_VERSION)
+            // The _airplay service claims the modern generation; _raop below stays old so iOS keeps
+            // granting DACP. See AirPlayVersion for why the two are allowed to disagree.
+            setAttribute("srcvers", AIRPLAY_MIRRORING_VERSION)
             setAttribute("vv", "2")                             // AirPlay protocol version 2
             setAttribute("pi", NetworkUtils.getPersistentUuid(context))
             setAttribute("flags", "0x4")                        // Screen-mirroring receiver
@@ -336,5 +338,9 @@ class MdnsService(
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
         private const val AIRPLAY_SERVER_VERSION = com.phairplay.airplay.handshake.AirPlayVersion.ADVERTISED
+
+        /** Advertised on _airplay._tcp only — the service where feature generation is negotiated. */
+        private const val AIRPLAY_MIRRORING_VERSION =
+            com.phairplay.airplay.handshake.AirPlayVersion.ADVERTISED_AIRPLAY
     }
 }

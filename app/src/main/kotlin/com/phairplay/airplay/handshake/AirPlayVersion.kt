@@ -31,6 +31,32 @@ object AirPlayVersion {
     /** Below the threshold, where iOS still grants DACP reverse control. */
     const val DACP_CAPABLE = "350.0"
 
-    /** What we actually advertise. */
+    /**
+     * What `_raop._tcp` and the RTSP layer advertise.
+     *
+     * Stays low, because this is the service that carries audio and it is the RTSP session where
+     * iOS decides whether to send `DACP-ID`/`Active-Remote`. Remote control is the thing the user
+     * touches; losing it to gain a feature we cannot yet test would be a bad trade.
+     */
     const val ADVERTISED = DACP_CAPABLE
+
+    /**
+     * What `_airplay._tcp` advertises.
+     *
+     * The two services carry SEPARATE TXT records, so they are not obliged to agree — and the
+     * question each answers is different. `_raop` is where the DACP decision is made; `_airplay` is
+     * where the sender decides which generation of features to offer, including whether to offer
+     * multi-room grouping at all. Pinning both to 350.0 to protect remote control also, silently,
+     * declined every AirPlay 2 feature gated on being the newer generation.
+     *
+     * Splitting them is the experiment: claim the modern generation where capability is negotiated,
+     * keep the older one where reverse control is granted. It may simply not work — a sender that
+     * cross-checks the two will see an inconsistency, and the honest expectation is that this
+     * either unlocks grouping or changes nothing. It cannot cost DACP, which is decided on the
+     * other service.
+     *
+     * If grouping still is not offered, the next thing to suspect is the feature bits rather than
+     * this number.
+     */
+    const val ADVERTISED_AIRPLAY = APPLE_TV_CURRENT
 }
