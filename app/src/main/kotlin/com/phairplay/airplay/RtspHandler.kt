@@ -1145,8 +1145,10 @@ open class RtspHandler(
                 .onFailure { Logger.w("RAOP FairPlay audio-key decrypt failed (${fpKey.size}B): ${it.message}") }
                 .getOrNull()
             if (realKey != null) {
-                Logger.i("RAOP FairPlay (v0x%02x) audio key decrypted → ${realKey.size}B AES key, iv=${session.aesIv?.size ?: 0}B"
-                    .format(fairPlay?.negotiatedVersion ?: 0))
+                // The phase-1 mode is in here because on v2 it decides whether this key is correct:
+                // we answer every mode with the mode-2 reply, so anything else yields a wrong key.
+                Logger.i("RAOP FairPlay (v0x%02x mode=%d) audio key decrypted → ${realKey.size}B AES key, iv=${session.aesIv?.size ?: 0}B"
+                    .format(fairPlay?.negotiatedVersion ?: 0, fairPlay?.negotiatedMode ?: -1))
                 session = session.copy(aesKey = realKey)
                 currentSession = session
             }

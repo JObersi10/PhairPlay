@@ -28,6 +28,14 @@ class FairPlay {
 
     /** The fp-setup version negotiated in phase 1 (0x02 or 0x03); for logging/diagnostics. */
     var negotiatedVersion: Int = 0
+
+    /**
+     * The phase-1 mode the sender asked for (req[14], 0..3).
+     *
+     * Worth surfacing because v2 currently answers every mode with the same captured reply, so this
+     * is the variable that decides whether the unwrapped audio key is right — see [REPLY_V2].
+     */
+    var negotiatedMode: Int = -1
         private set
 
     /** fp-setup phase 1 (16-byte request) → fixed 142-byte reply (version- and mode-specific). */
@@ -37,6 +45,7 @@ class FairPlay {
         val mode = req[14].toInt() and 0xFF
         require(mode in 0..3) { "invalid fp-setup mode $mode" }
         negotiatedVersion = version
+        negotiatedMode = mode
         return when (version) {
             // v3 (mirroring / Safari): one captured reply per mode, used verbatim.
             0x03 -> REPLIES_V3[mode].copyOf()
@@ -94,6 +103,17 @@ class FairPlay {
 
         // v2 phase-1 reply (Apple Music / iTunes audio). Single 142-byte capture; offset 13 is the
         // mode indicator, patched per request. Source: joerg-krause/shairplay @ fairplay_v2.
+        //
+        // KNOWN INCOMPLETE, and the likely cause of silent macOS Music audio. Byte 13 of this
+        // capture is 0x02, so this is the mode-2 reply. Compare REPLIES_V3 above: the four
+        // mode-specific replies differ across their whole 128-byte body, not just at offset 13.
+        // Patching that one byte therefore answers modes 0, 1 and 3 with mode 2's cryptographic
+        // material. The sender accepts it and phase 2 completes, so the wrapped key unwraps to a
+        // plausible-looking 16 bytes that is simply wrong — which is exactly what the decode-health
+        // gate sees (~5/24 ALAC frames decode, then the stream is muted).
+        //
+        // Fixing this needs the other three v2 phase-1 replies, captured from a real Apple TV or
+        // taken from an implementation that has them. Do not synthesise them.
         private val REPLY_V2 = hex(
             "46504c59020102000000008202022f7b69e6b27ebbf0685f98547f37cecf8706996e7e6b0fb2fa712053e39483da22c783a072404ddd41aa3d4c6e302255aaa2da1eb477838c79d56517c3fa0154339ee3829f30f0a48f76df77117e569ef395e8e213b31eb670ec5a8af26afcbc8931e67ee8b9c5f2c71d78f3ef8d61f73bcc17c34023524a8b9cb1750566e6b3"
         )
