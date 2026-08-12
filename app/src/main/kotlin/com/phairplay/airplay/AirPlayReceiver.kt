@@ -424,8 +424,15 @@ class AirPlayReceiver(
                 // sends the sender fast-forwarding, our local clock keeps advancing at 1x from a
                 // now-stale anchor, and the correcting push was being swallowed for being close to
                 // the wrong number we were already showing.
-                val changed = displayedSecond(pos) != displayedSecond(npPositionSec) || dur != npDurationSec
-                npPositionSec = pos; npDurationSec = dur
+                // ...except on a stream that has no track at all. macOS system-audio AirPlay (the
+                // "AUDIO" output device, not the Music app) still sends progress, but its window is
+                // a rolling live buffer with no beginning or end — which surfaced as a track that
+                // started at 0:25 and ran to 1:36. No title means no track, and no track means no
+                // duration worth showing.
+                val live = npTitle.isNullOrBlank() && npArtist.isNullOrBlank()
+                val shownDur = if (live) 0.0 else dur
+                val changed = displayedSecond(pos) != displayedSecond(npPositionSec) || shownDur != npDurationSec
+                npPositionSec = pos; npDurationSec = shownDur
                 if (changed) emitNowPlaying()
             },
             onPlaybackAnchor = { startTs, _ -> anchorStartTs = startTs },

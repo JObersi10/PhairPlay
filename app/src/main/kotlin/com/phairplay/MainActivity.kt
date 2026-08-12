@@ -367,6 +367,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 BackAction.STOP_STREAM -> {
                     Timber.d("Back during session, action=STOP_STREAM — ending AirPlay session")
+                    // The auto-return only exists for sessions that opened PhairPlay by themselves:
+                    // when the sender is finished, so are we. Pressing Back is the opposite — the
+                    // user is deliberately here and stopping the stream — so leaving anyway a few
+                    // seconds later read as the app quitting on its own.
+                    openedBySender = false
                     service?.endCurrentSession()
                 }
             }

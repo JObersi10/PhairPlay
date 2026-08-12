@@ -16,6 +16,21 @@ import com.phairplay.util.NetworkUtils
  */
 object InfoResponder {
 
+    /**
+     * The device's current media volume as an AirPlay level in dB (-30…0, or -144 when muted).
+     *
+     * AirPlay's scale is the 30 dB window senders use for their slider; Android's is a small
+     * integer step count, so this is a straight proportional map between the two.
+     */
+    private fun currentVolumeDb(context: Context): Double = runCatching {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (max <= 0) return@runCatching DEFAULT_VOLUME_DB
+        val level = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (level <= 0) return@runCatching MUTED_VOLUME_DB
+        -30.0 + 30.0 * level / max
+    }.getOrDefault(DEFAULT_VOLUME_DB)
+
     fun build(context: Context, width: Int = 1920, height: Int = 1080, pinRequired: Boolean = false): ByteArray {
         val mac = NetworkUtils.getMacAddress()
         // When PIN access control is on, set the "pairing/PIN required" status bit so the sender runs
@@ -55,9 +70,12 @@ object InfoResponder {
             // 1 = relative (up/down steps). Absent, senders assume absolute and send levels that
             // Android's stream volume cannot honour without fighting the system volume UI.
             "volumeControlType" to 1L,
-            // dB, not percent: 0 is full scale and -144 is muted. Reported so the sender's slider
-            // starts somewhere sane instead of snapping on first adjustment.
-            "initialVolume" to -20.0,
+            // dB, not percent: 0 is full scale and -144 is muted.
+            //
+            // Read from the device rather than hardcoded. A fixed value made the sender's slider
+            // start somewhere the TV was not — it showed 100% while the TV sat at 80% — and only
+            // agreed with reality after the first adjustment forced a round trip.
+            "initialVolume" to currentVolumeDb(context),
 
             // Screen recording is a sender-side capability we genuinely do not have; saying so
             // stops senders offering it and then failing.
@@ -115,4 +133,10 @@ object InfoResponder {
 
     private const val MODEL = "AppleTV6,2"
     private const val SOURCE_VERSION = AirPlayVersion.ADVERTISED
+
+    /** Used when the audio service can't be read at all. */
+    private const val DEFAULT_VOLUME_DB = -20.0
+
+    /** AirPlay's "muted" sentinel — anything at or below -144 dB. */
+    private const val MUTED_VOLUME_DB = -144.0
 }
