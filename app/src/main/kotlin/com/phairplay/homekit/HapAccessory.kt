@@ -106,9 +106,37 @@ class HapAccessory(val aid: Int, val services: List<HapService>) {
     fun toJson(): String =
         "{\"aid\":$aid,\"services\":[" + services.joinToString(",") { it.toJson(aid) } + "]}"
 
+    /**
+     * A stable fingerprint of this accessory's SHAPE — every service and characteristic, by
+     * instance id, type, format and permissions.
+     *
+     * Controllers cache /accessories and only re-read it when the config number (`c#`) goes up.
+     * Ship a build that adds, removes or renumbers a characteristic without bumping `c#` and the
+     * Home app keeps addressing instance ids that have moved — which it reports as "This accessory
+     * is not responding". Values are deliberately excluded: they change constantly and mean nothing
+     * to the cache.
+     */
+    fun shapeSignature(): String = buildString {
+        append(aid)
+        for (service in services) {
+            append('|').append(service.iid).append(':').append(service.type)
+            if (service.primary) append(":p")
+            if (service.linked.isNotEmpty()) append(":l").append(service.linked.sorted().joinToString("."))
+            for (c in service.characteristics) {
+                append(';').append(c.iid).append(':').append(c.type)
+                append(':').append(c.format)
+                append(':').append(c.perms.sorted().joinToString("."))
+            }
+        }
+    }
+
     companion object {
         fun database(accessories: List<HapAccessory>): String =
             "{\"accessories\":[" + accessories.joinToString(",") { it.toJson() } + "]}"
+
+        /** Combined [shapeSignature] for a whole accessory list. */
+        fun shapeSignature(accessories: List<HapAccessory>): String =
+            accessories.joinToString("/") { it.shapeSignature() }
     }
 }
 

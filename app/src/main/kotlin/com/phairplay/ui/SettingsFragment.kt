@@ -333,7 +333,10 @@ class SettingsFragment : Fragment() {
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
         rowBeatDelay.setOnClickListener { pickBeatDelay() }
-        setToggleListener(rowForceHighRes) { enabled -> save { it.copy(forceHighResolution = enabled) } }
+        // Restart, not a plain save: the resolution is baked into the /info response and the mirror
+        // video server at receiver startup, so a plain save left the toggle looking broken — it
+        // flipped in the UI and nothing changed until the service happened to restart later.
+        setToggleListener(rowForceHighRes) { enabled -> saveAndRestart { it.copy(forceHighResolution = enabled) } }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
         rowSenderVolume.setOnClickListener { showSenderVolumeDialog() }

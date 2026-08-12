@@ -114,6 +114,22 @@ class HapStore(context: Context) : HapPairingStore {
         Logger.i("HAP config number → ${configNumber}")
     }
 
+    /**
+     * Bumps the config number if the accessory's shape has changed since the last run.
+     *
+     * Without this, a new build that moves an instance id leaves every already-paired controller
+     * talking to a stale cached database — the "this accessory is not responding" that shows up
+     * immediately after an app update. The signature is remembered so an unchanged build does NOT
+     * bump: `c#` is a monotonic 32-bit counter and churning it on every launch would eventually
+     * wrap and would make controllers re-read the database for no reason.
+     */
+    fun syncConfigNumber(shapeSignature: String) {
+        if (prefs.getString(KEY_SHAPE, null) == shapeSignature) return
+        prefs.edit().putString(KEY_SHAPE, shapeSignature).apply()
+        bumpConfigNumber()
+        Logger.i("HAP accessory layout changed — controllers will re-read the database")
+    }
+
     /** Wipes the HomeKit identity entirely — used when the user resets pairings from Settings. */
     @Synchronized
     fun reset() {
@@ -136,6 +152,7 @@ class HapStore(context: Context) : HapPairingStore {
         private const val KEY_PAIRINGS = "pairings"
         private const val KEY_FAILED = "failed_attempts"
         private const val KEY_CONFIG = "config_number"
+        private const val KEY_SHAPE = "accessory_shape"
         private const val KEY_SETUP_CODE = "setup_code"
         private const val KEY_SETUP_ID = "setup_id"
 

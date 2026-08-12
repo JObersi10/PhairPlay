@@ -605,13 +605,16 @@ class PhairPlayService : Service() {
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
-            // Wake the screen and start the Activity the moment a sender opens the socket, so the
-            // Surface is already there when video arrives ~half a second later. Safe to fire on a
-            // connection that turns out to be a probe: no state changes here, and the Activity
-            // shows its normal Home screen until a session actually starts.
+            // Wake the screen and warm the Surface the moment a sender opens the socket, so it is
+            // already there when video arrives ~half a second later.
+            //
+            // This deliberately does NOT launch the Activity. "Safe to fire on a probe" was wrong:
+            // an iPhone opens this socket every time its AirPlay picker is shown, and each of those
+            // probes threw PhairPlay in front of whatever the user was watching. The session start
+            // (ProtocolState.CONNECTED, below) is the honest moment to take the screen, and it
+            // already does.
             onSenderApproaching = {
                 wakeDisplay()
-                bringAppToFront()
                 // Runs on an RTSP socket thread; view work has to hop to the main looper.
                 android.os.Handler(android.os.Looper.getMainLooper()).post {
                     val prepare = onPrepareSurface
@@ -633,9 +636,10 @@ class PhairPlayService : Service() {
             onPhotoCleared = {
                 _photoFrame.value = null
             },
+            // Authoritative, straight from the receiver — see the guesses removed below.
+            onVideoPlayingChanged = { playing -> _videoPlaying.value = playing },
             onNowPlayingChanged = { info ->
                 _nowPlaying.value = info
-                _videoPlaying.value = (info == null && _airPlayState.value == ProtocolState.CONNECTED)
                 if (info != null) {
                     val name = info.senderName.takeIf { it.isNotBlank() }
                     // The name known at CONNECTED time is the RTSP User-Agent fallback ("AirPlay").
@@ -670,7 +674,6 @@ class PhairPlayService : Service() {
                         acquireStreamLocks()
                         Logger.i("Volume capability: ${deviceVolume.describeCapability(senderVolumeMode)}")
                         rememberSender(pendingSenderName)
-                        _videoPlaying.value = (_nowPlaying.value == null)
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)

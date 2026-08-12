@@ -98,6 +98,14 @@ class AirPlayReceiver(
     /** Called when iOS/macOS clears the currently displayed `/photo`. */
     private val onPhotoCleared: () -> Unit = {},
     /**
+     * True while a video stream is actually negotiated and running.
+     *
+     * The UI shows the video Surface on true and its own screen on false, so this must come from
+     * the receiver rather than be guessed from now-playing metadata — an audio-only session that
+     * never reports a track would otherwise sit on a black Surface forever.
+     */
+    private val onVideoPlayingChanged: (Boolean) -> Unit = {},
+    /**
      * Called with the actual mDNS-registered name after [start].
      *
      * The name may differ from [displayName] if another device on the network already uses
@@ -931,6 +939,11 @@ class AirPlayReceiver(
     /** Pushes the current now-playing state out: a [NowPlayingInfo] when audio plays without video, else null. */
     private fun emitNowPlaying() {
         val show = audioPlaying && !videoPlaying
+        // The receiver is the only thing that KNOWS whether a video stream was negotiated. The
+        // service used to infer it from "is there now-playing metadata yet", which is false at
+        // CONNECTED for every session — so an audio-only sender that never produced metadata (a
+        // stalled Apple Music stream, say) left a black video surface on screen indefinitely.
+        onVideoPlayingChanged(videoPlaying)
         onNowPlayingChanged(
             if (show) NowPlayingInfo(
                 senderName = npSenderName,

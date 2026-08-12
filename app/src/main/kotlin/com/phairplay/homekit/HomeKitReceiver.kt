@@ -194,9 +194,14 @@ class HomeKitReceiver(
         if (started) return
         started = true
 
+        val accessories = listOf(accessory)
+        // Must happen before the mDNS record goes out: `c#` is read from the store when the TXT
+        // record is built, and a controller that sees the old number never re-reads /accessories.
+        store.syncConfigNumber(HapAccessory.shapeSignature(accessories))
+
         val s = HapServer(
             store = store,
-            accessories = listOf(accessory),
+            accessories = accessories,
             onIdentify = { actions.identify() },
             // Pairing state changes the `sf` flag, and iOS only re-reads it if the record is
             // re-announced — without this the accessory stays "unpaired" in every controller's
