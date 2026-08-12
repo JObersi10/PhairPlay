@@ -112,7 +112,8 @@ class AudioStreamServer(
         // Charge the AudioTrack buffer against the budget and prime the queue with the remainder.
         val trackSamples = sampleRate * TARGET_BUFFER_MS / 1000
         val queueSamples = (latencyMinSamples - trackSamples).coerceAtLeast(0)
-        (queueSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
+        (queueSamples / framesPerPacket.coerceAtLeast(1))
+            .coerceIn(MIN_QUEUE_FRAMES, AUDIO_QUEUE_CAPACITY / 2)
     }
 
     // RTP duplicate suppression. macOS sends each realtime-audio packet 2–3× for redundancy
@@ -595,7 +596,10 @@ class AudioStreamServer(
      * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
      */
     private fun resyncIfBacklogged() {
-        if (frameQueue.size < targetDepthFrames * 2) return
+        // Only step in for a backlog well clear of normal jitter. At 2x the target this triggered
+        // constantly and the "cure" — one artefact per resync — was worse than the latency it was
+        // treating.
+        if (frameQueue.size < targetDepthFrames * RESYNC_TRIGGER_MULTIPLE) return
         var dropped = 0
         while (frameQueue.size > targetDepthFrames && frameQueue.poll() != null) dropped++
         if (dropped > 0) {
@@ -718,6 +722,9 @@ class AudioStreamServer(
         // added latency to ~this many frames; in-order traffic adds zero). ~32 ≈ 0.25–0.35 s.
         private const val MAX_REORDER_HOLD = 32
 
+        /** How far past the target the queue must run before a resync is worth its artefact. */
+        private const val RESYNC_TRIGGER_MULTIPLE = 4
+
         // Don't ask for an absurd resend range (a huge gap = a real stall, not a few lost packets).
         private const val MAX_RESEND_RANGE = 128
 
@@ -727,8 +734,26 @@ class AudioStreamServer(
         // because targetDepthFrames is clamped to half the capacity.
         private const val AUDIO_QUEUE_CAPACITY = 1024
 
+        /**
+         * Floor on the jitter buffer, in frames (~90ms at 352 samples/frame).
+         *
+         * Wi-Fi delivers audio in bursts, and a queue shallower than this cannot absorb one — it
+         * either starves or trips the backlog resync. The old floor of 4 frames was 32ms, which is
+         * less than a single burst.
+         */
+        private const val MIN_QUEUE_FRAMES = 11
+
         /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
-        private const val TARGET_BUFFER_MS = 300
+        /**
+         * AudioTrack buffer size.
+         *
+         * Deliberately modest. This is a hardware buffer whose only job is to survive a scheduling
+         * hiccup between writes; network jitter is the queue's job. At 300ms it swallowed the whole
+         * of the sender's latency budget, which left the queue at its 4-frame floor — 32ms — and
+         * the backlog resync fired on every gust of Wi-Fi jitter, dropping 4-35 frames at a time,
+         * continuously. Each of those is an audible glitch.
+         */
+        private const val TARGET_BUFFER_MS = 100
 
         private const val PRIME_TIMEOUT_MS = 700L
 

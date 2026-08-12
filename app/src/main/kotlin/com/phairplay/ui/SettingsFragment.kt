@@ -610,9 +610,17 @@ class SettingsFragment : Fragment() {
     private fun resetSettings() {
         viewLifecycleOwner.lifecycleScope.launch {
             settingsRepository.resetToDefaults()
+            // Pairings are state the user configured just as much as any toggle, and they live in
+            // their own stores rather than in the settings DataStore — so clearing the DataStore
+            // alone left the device still joined to a Home and still trusting old senders, which is
+            // not what "reset to defaults" says on the tin.
+            com.phairplay.homekit.HapStore(requireContext()).reset()
+            com.phairplay.airplay.handshake.PairingStore(requireContext()).clearAll()
             val defaults = AppSettings.DEFAULT
             populateUI(defaults)
-            Logger.i("Settings reset to defaults")
+            // Everything the receivers read at startup just changed underneath them.
+            ServiceController.restart(requireContext())
+            Logger.i("Settings reset to defaults — pairings cleared, receivers restarting")
         }
     }
 
