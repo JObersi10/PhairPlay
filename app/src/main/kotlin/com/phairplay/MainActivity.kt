@@ -358,6 +358,9 @@ class MainActivity : AppCompatActivity() {
             Logger.i("PiP skipped ($reason): no video stream on screen")
             return
         }
+        // Repeated inline rather than left to pipSupported(): lint cannot follow the version check
+        // through a helper, and the firetv flavour's minSdk is 25 — below the API 26 this needs.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         runCatching { enterPictureInPictureMode(pipParams()) }
             .onSuccess { Logger.i("PiP entered ($reason)") }
             .onFailure { Logger.w("PiP entry refused ($reason): ${it.message}") }

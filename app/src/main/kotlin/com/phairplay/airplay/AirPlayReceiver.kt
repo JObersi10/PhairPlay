@@ -561,7 +561,7 @@ class AirPlayReceiver(
      * This prevents a zero-key cipher from producing garbage audio (S6-4 fix).
      */
     private fun startAudioPlayer(session: SessionDescription) {
-        audioPlayer = AudioPlayer().also { player ->
+        audioPlayer = AudioPlayer(extraDelayMs = audioDelayMs).also { player ->
             player.initialize(
                 aesKey     = session.aesKey.takeIf { session.isAudioEncrypted },
                 aesIv      = session.aesIv.takeIf  { session.isAudioEncrypted },
