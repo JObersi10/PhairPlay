@@ -181,6 +181,16 @@ data class AppSettings(
      * everyone. Turn it off to make PIN auth strict again.
      */
     val rememberPinPairing: Boolean = true,
+
+    /**
+     * Package names shown as extra HomeKit inputs, in slot order.
+     *
+     * HomeKit's TV accessory already renders an input list, and until now selecting anything in it
+     * just opened PhairPlay. Mapping a slot to an app turns that list into a launcher: pick
+     * "Netflix" in the Home app and the Fire TV switches to Netflix. A blank entry is an unused
+     * slot; [INPUT_APP_SLOTS] caps how many there are.
+     */
+    val inputApps: List<String> = emptyList(),
 ) {
 
     /** Advertised mirroring display size: 2560×1440 when [forceHighResolution], else 1920×1080. */
@@ -205,6 +215,22 @@ data class AppSettings(
     companion object {
         /** The default settings instance used on first launch. */
         val DEFAULT = AppSettings()
+
+        /** How many app shortcuts the HomeKit input list offers. */
+        const val INPUT_APP_SLOTS = 3
+
+        /**
+         * HomeKit input identifier for app slot [index].
+         *
+         * Starts above the built-in AirPlay (1) and DLNA (2) inputs so the numbering never collides.
+         */
+        fun inputAppIdentifier(index: Int): Int = FIRST_APP_INPUT_ID + index
+
+        /** Slot index for a HomeKit input identifier, or null if it is one of the built-ins. */
+        fun inputAppSlot(identifier: Int): Int? =
+            (identifier - FIRST_APP_INPUT_ID).takeIf { it in 0 until INPUT_APP_SLOTS }
+
+        private const val FIRST_APP_INPUT_ID = 3
 
         /** Maximum allowed length for the display name (mDNS limit). */
         const val DISPLAY_NAME_MAX_LENGTH = 63

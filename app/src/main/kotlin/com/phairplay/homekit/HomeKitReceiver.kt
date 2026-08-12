@@ -47,6 +47,14 @@ class HomeKitReceiver(
     private val context: Context,
     private val actions: HomeKitActions,
     private val deviceName: () -> String,
+    /**
+     * Extra input sources beyond AirPlay and DLNA, as identifier-to-label pairs.
+     *
+     * These are the user's app shortcuts. Read once when the accessory is built, because the HAP
+     * accessory database is static for the life of a connection — changing them restarts the
+     * service, and [HapStore.syncConfigNumber] makes controllers re-read the new layout.
+     */
+    private val extraInputs: List<Pair<Int, String>> = emptyList(),
 ) {
 
     private val store = HapStore(context)
@@ -133,7 +141,7 @@ class HomeKitReceiver(
             ),
         )
 
-        val inputs = INPUTS.map { (identifier, label) -> inputSource(identifier, label) }
+        val inputs = (INPUTS + extraInputs).map { (identifier, label) -> inputSource(identifier, label) }
 
         val television = HapService(
             iid = Ids.TV_SERVICE, type = HapServiceType.TELEVISION, primary = true,

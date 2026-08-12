@@ -29,6 +29,23 @@
          MainActivity directly when a sender connects. Without this, Android 10+ blocks the
          start and auto-open silently degrades to a heads-up notification. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!--
+         Package visibility (Android 11+). Without this, queryIntentActivities returns an EMPTY list
+         and getLeanbackLaunchIntentForPackage returns null, so the HomeKit app-shortcut picker would
+         show nothing and the shortcuts would never launch. Scoped to launchable activities only —
+         we ask which apps the user can open, not what is installed.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

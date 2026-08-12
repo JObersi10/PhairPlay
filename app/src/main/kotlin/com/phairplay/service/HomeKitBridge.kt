@@ -38,6 +38,13 @@ class HomeKitBridge(
     private val onSendRemoteCommand: (String) -> Unit,
     /** Delivers a D-pad/Back/Info press into PhairPlay's own Activity. */
     private val onNavKey: (Int) -> Unit,
+    /**
+     * Opens the app the user mapped to a HomeKit input, if any.
+     *
+     * @return true if an app was launched. False means the identifier is one of our own inputs
+     *   (AirPlay, DLNA) or has nothing assigned, and the default behaviour applies.
+     */
+    private val onLaunchInputApp: (Int) -> Boolean = { false },
 ) : HomeKitActions {
 
     private val audioManager by lazy {
@@ -209,9 +216,12 @@ class HomeKitBridge(
     private var volumeBeforeMute: Int? = null
 
     override fun selectInput(identifier: Int) {
-        // Inputs are advertised so the Home app renders a real TV tile rather than a bare switch.
-        // Selecting one brings PhairPlay forward; the sender decides what actually plays.
         Logger.i("HomeKit input selected: $identifier")
+        // A user-assigned shortcut wins: the whole point is to switch the TV to another app from
+        // the Home app, so pulling PhairPlay forward instead would defeat it.
+        if (onLaunchInputApp(identifier)) return
+        // Otherwise this is one of our own inputs (AirPlay, DLNA). Show PhairPlay; the sender
+        // decides what actually plays.
         onBringToFront()
     }
 

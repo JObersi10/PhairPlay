@@ -243,6 +243,10 @@
     <string name="setting_remember_pin">Remember paired senders</string>
     <string name="setting_remember_pin_subtitle">A sender that has entered the PIN once won\'t be asked again</string>
     <string name="setting_forget_pairings">Forget paired senders</string>
+    <string name="setting_input_apps">Home app shortcuts</string>
+    <string name="setting_input_apps_none">None</string>
+    <string name="setting_input_apps_slot">Shortcut %1$d</string>
+    <string name="setting_input_apps_clear">None (remove shortcut)</string>
     <string name="setting_forget_pairings_done">Paired senders forgotten — the PIN will be required again</string>
     <!-- Onboarding: recommended settings -->
     <string name="onboarding_prefs_title">Recommended settings</string>

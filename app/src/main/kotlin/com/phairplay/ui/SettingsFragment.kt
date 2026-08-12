@@ -74,6 +74,8 @@ class SettingsFragment : Fragment() {
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
     private lateinit var rowRememberPin: View
+    private lateinit var rowInputApps: LinearLayout
+    private lateinit var textInputAppsValue: TextView
     private lateinit var rowForgetPairings: LinearLayout
     private lateinit var rowSenderVolume: LinearLayout
     private lateinit var textSenderVolumeValue: TextView
@@ -132,6 +134,8 @@ class SettingsFragment : Fragment() {
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         rowRememberPin      = view.findViewById(R.id.row_remember_pin)
+        rowInputApps        = view.findViewById(R.id.row_input_apps)
+        textInputAppsValue  = view.findViewById(R.id.text_input_apps_value)
         rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
         rowSenderVolume     = view.findViewById(R.id.row_sender_volume)
         textSenderVolumeValue = view.findViewById(R.id.text_sender_volume_value)
@@ -253,6 +257,7 @@ class SettingsFragment : Fragment() {
         showBeatPulse(settings.beatPulse)
         showBeatDelay(settings.beatDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
+        textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
         showSenderVolumeMode(settings.senderVolumeMode)
         setToggle(rowScreensaver,  settings.screensaverEnabled)
@@ -337,6 +342,7 @@ class SettingsFragment : Fragment() {
         // video server at receiver startup, so a plain save left the toggle looking broken — it
         // flipped in the UI and nothing changed until the service happened to restart later.
         setToggleListener(rowForceHighRes) { enabled -> saveAndRestart { it.copy(forceHighResolution = enabled) } }
+        rowInputApps.setOnClickListener { showInputAppSlotDialog() }
         setToggleListener(rowScreensaver)  { enabled -> save { it.copy(screensaverEnabled = enabled) } }
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
         rowSenderVolume.setOnClickListener { showSenderVolumeDialog() }
@@ -606,6 +612,108 @@ class SettingsFragment : Fragment() {
             .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
+
+    /** Summarises the configured shortcuts for the settings row. */
+    private fun describeInputApps(packages: List<String>): String {
+        val configured = packages.count { it.isNotBlank() }
+        return if (configured == 0) getString(R.string.setting_input_apps_none) else "$configured"
+    }
+
+    /**
+     * Step one of assigning a shortcut: which of the slots to change.
+     *
+     * Slots rather than a free list because each one is a distinct HomeKit input identifier — slot 2
+     * is a different entry in the Home app's input list from slot 1, and reordering them would point
+     * an already-configured input at a different app.
+     */
+    private fun showInputAppSlotDialog() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val current = settingsRepository.settingsFlow.first().inputApps
+            val labels = (0 until AppSettings.INPUT_APP_SLOTS).map { slot ->
+                val pkg = current.getOrNull(slot).orEmpty()
+                val app = if (pkg.isBlank()) getString(R.string.setting_input_apps_none) else appLabel(pkg)
+                "${getString(R.string.setting_input_apps_slot, slot + 1)}: $app"
+            }
+            AlertDialog.Builder(requireContext())
+                .setTitle(R.string.setting_input_apps)
+                .setItems(labels.toTypedArray()) { _, slot -> showInputAppPickerDialog(slot) }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+        }
+    }
+
+    /** Step two: which app that slot should open. */
+    private fun showInputAppPickerDialog(slot: Int) {
+        val apps = launchableApps()
+        // "None" first so clearing a slot is always the same gesture regardless of how many apps
+        // are installed.
+        val labels = listOf(getString(R.string.setting_input_apps_clear)) + apps.map { it.second }
+        AlertDialog.Builder(requireContext())
+            .setTitle(getString(R.string.setting_input_apps_slot, slot + 1))
+            .setItems(labels.toTypedArray()) { _, index ->
+                val pkg = if (index == 0) "" else apps[index - 1].first
+                assignInputApp(slot, pkg)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /**
+     * Everything on this device with a TV launcher entry, by package and display name.
+     *
+     * LEANBACK_LAUNCHER rather than the phone launcher category: on a Fire TV that is the set of
+     * things the user can actually see and open, and it excludes the background services and
+     * phone-only apps that would otherwise flood the list.
+     *
+     * The lint warning is suppressed because the `<queries>` declaration it asks for IS in the
+     * manifest, matching these two intents exactly; lint cannot tie a dynamically built Intent back
+     * to it. Removing the manifest block would silently empty this list on Android 11+, so the
+     * suppression covers the check, not the requirement.
+     */
+    @android.annotation.SuppressLint("QueryPermissionsNeeded")
+    private fun launchableApps(): List<Pair<String, String>> {
+        val pm = requireContext().packageManager
+        val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
+            .addCategory(android.content.Intent.CATEGORY_LEANBACK_LAUNCHER)
+        val leanback = pm.queryIntentActivities(intent, 0)
+        val resolved = leanback.ifEmpty {
+            // Not a TV build, or a device that does not use the leanback category — fall back so the
+            // picker is never simply empty.
+            pm.queryIntentActivities(
+                android.content.Intent(android.content.Intent.ACTION_MAIN)
+                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER),
+                0,
+            )
+        }
+        return resolved
+            .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
+            .filter { it.first != requireContext().packageName }   // opening ourselves is not a shortcut
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+    }
+
+    private fun assignInputApp(slot: Int, packageName: String) {
+        viewLifecycleOwner.lifecycleScope.launch {
+            settingsRepository.update { settings ->
+                // Pad to a fixed length so a value can be written into any slot, including one past
+                // the end of a shorter saved list.
+                val slots = MutableList(AppSettings.INPUT_APP_SLOTS) { settings.inputApps.getOrNull(it).orEmpty() }
+                slots[slot] = packageName
+                settings.copy(inputApps = slots)
+            }
+            textInputAppsValue.text =
+                describeInputApps(settingsRepository.settingsFlow.first().inputApps)
+            // The HomeKit accessory database is built at startup, so a new shortcut only appears in
+            // the Home app after the receiver restarts.
+            ServiceController.restart(requireContext())
+            Logger.i("HomeKit shortcut slot ${slot + 1} set to ${packageName.ifBlank { "none" }} — restarting")
+        }
+    }
+
+    private fun appLabel(packageName: String): String = runCatching {
+        val pm = requireContext().packageManager
+        pm.getApplicationLabel(pm.getApplicationInfo(packageName, 0)).toString()
+    }.getOrDefault(packageName)
 
     private fun resetSettings() {
         viewLifecycleOwner.lifecycleScope.launch {

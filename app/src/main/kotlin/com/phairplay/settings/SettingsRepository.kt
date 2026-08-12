@@ -128,6 +128,9 @@ class SettingsRepository(private val context: Context) {
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
         beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
+        // Stored as one delimited string rather than a DataStore string set, because slot ORDER is
+        // the identity here — slot 2 is a different HomeKit input from slot 1 — and a set has none.
+        inputApps          = this[Keys.INPUT_APPS]?.split('\u0000')?.filter { it.isNotBlank() } ?: emptyList(),
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
         screensaverTimeoutMin = this[Keys.SCREENSAVER_TIMEOUT]  ?: 15,
@@ -157,6 +160,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.BEAT_PULSE]           = settings.beatPulse
         this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
+        this[Keys.INPUT_APPS] = settings.inputApps.joinToString("\u0000")
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
         this[Keys.SCREENSAVER_TIMEOUT]  = settings.screensaverTimeoutMin
@@ -191,6 +195,7 @@ class SettingsRepository(private val context: Context) {
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
         val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
+        val INPUT_APPS = stringPreferencesKey("input_apps")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")
         val SCREENSAVER_TIMEOUT = intPreferencesKey("screensaver_timeout_min")

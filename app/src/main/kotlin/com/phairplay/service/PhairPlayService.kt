@@ -152,6 +152,9 @@ class PhairPlayService : Service() {
 
     /** HomeKit accessory. Null unless the user enabled it — pairing joins their Home, so it is opt-in. */
     private var homeKit: com.phairplay.homekit.HomeKitReceiver? = null
+
+    /** App shortcuts as of the last HomeKit start, in slot order. See [launchInputApp]. */
+    @Volatile private var homeKitInputApps: List<String> = emptyList()
     @Volatile private var senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF
 
     private val _pairingPin = MutableStateFlow<String?>(null)
@@ -504,14 +507,68 @@ class PhairPlayService : Service() {
             onWakeDisplay = { wakeDisplay() },
             onSendRemoteCommand = { cmd -> airPlayReceiver?.sendRemoteCommand(cmd) },
             onNavKey = { keyCode -> emitRemoteKey(keyCode) },
+            onLaunchInputApp = { identifier -> launchInputApp(identifier) },
         )
+        // Snapshot for launchInputApp, which runs later on a HAP connection thread and has no
+        // settings of its own. Kept in slot order so an identifier still maps to the right app.
+        homeKitInputApps = settings.inputApps
         runCatching {
             com.phairplay.homekit.HomeKitReceiver(
                 context = applicationContext,
                 actions = bridge,
                 deviceName = { settings.displayName.ifBlank { android.os.Build.MODEL } },
+                extraInputs = inputAppEntries(settings),
             ).also { it.start(); homeKit = it }
         }.onFailure { Logger.e("HomeKit failed to start (streaming is unaffected)", it) }
+    }
+
+    /**
+     * The user's app shortcuts as HomeKit inputs, labelled with each app's real name.
+     *
+     * Apps that are no longer installed are dropped rather than shown as a dead entry — an input
+     * that cannot launch anything is worse than one that isn't offered.
+     */
+    private fun inputAppEntries(settings: AppSettings): List<Pair<Int, String>> {
+        val pm = packageManager
+        return settings.inputApps.mapIndexedNotNull { index, pkg ->
+            if (pkg.isBlank()) return@mapIndexedNotNull null
+            val label = runCatching {
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            }.getOrElse {
+                Logger.i("HomeKit input slot $index: $pkg is not installed — leaving it out")
+                return@mapIndexedNotNull null
+            }
+            AppSettings.inputAppIdentifier(index) to label
+        }
+    }
+
+    /**
+     * Launches the app mapped to a HomeKit input.
+     *
+     * @return true if something was launched, so the caller knows not to fall back to showing
+     *   PhairPlay — the point of the shortcut is to leave PhairPlay.
+     */
+    private fun launchInputApp(identifier: Int): Boolean {
+        val slot = AppSettings.inputAppSlot(identifier) ?: return false
+        val pkg = homeKitInputApps.getOrNull(slot)?.takeIf { it.isNotBlank() } ?: return false
+        // Prefer the TV launcher entry: on Fire TV an app's phone-style launcher activity is often
+        // absent or a stub, and getLaunchIntentForPackage picks that one.
+        val intent = packageManager.getLeanbackLaunchIntentForPackage(pkg)
+            ?: packageManager.getLaunchIntentForPackage(pkg)
+        if (intent == null) {
+            Logger.w("HomeKit input $identifier: $pkg has no launchable activity")
+            return false
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching {
+            wakeDisplay()
+            startActivity(intent)
+            Logger.i("HomeKit input $identifier → launched $pkg")
+            true
+        }.getOrElse {
+            Logger.w("HomeKit input $identifier: could not launch $pkg — ${it.message}")
+            false
+        }
     }
 
     private fun stopHomeKit() {
