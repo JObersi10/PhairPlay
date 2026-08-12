@@ -31,6 +31,7 @@ import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
+import com.phairplay.util.Logger
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.MirrorControls
 import com.phairplay.ui.HomeKitSetupFragment
@@ -294,11 +295,11 @@ class MainActivity : AppCompatActivity() {
         super.onUserLeaveHint()
         // On API 31+ the system auto-enters PiP from setAutoEnterEnabled, so this path is only the
         // fallback for older releases. Entering again on 31+ would animate twice.
-        if (pipEnabled && currentVideoPlaying &&
+        if (pipEnabled &&
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             Build.VERSION.SDK_INT < Build.VERSION_CODES.S
         ) {
-            runCatching { enterPictureInPictureMode(pipParams()) }
+            enterPip("leaving the app")
         }
     }
 
@@ -321,6 +322,45 @@ class MainActivity : AppCompatActivity() {
             builder.setAutoEnterEnabled(pipEnabled && currentVideoPlaying)
         }
         return builder.build()
+    }
+
+    /**
+     * Whether this device can do PiP at all, logged the first time we look.
+     *
+     * Fire TV is the reason this exists: `android:supportsPictureInPicture` in the manifest is a
+     * request, not a guarantee, and many Fire TV devices simply do not ship the
+     * `android.software.picture_in_picture` feature. Every entry attempt was wrapped in a
+     * `runCatching` that reported through Timber, so on a device without the feature PiP did
+     * nothing and said nothing — which is indistinguishable from a bug in our code.
+     */
+    private fun pipSupported(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Logger.i("PiP unavailable: needs Android 8, this device is API ${Build.VERSION.SDK_INT}")
+            return false
+        }
+        val has = packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+        if (!has) Logger.i("PiP unavailable: this device does not have FEATURE_PICTURE_IN_PICTURE")
+        return has
+    }
+
+    /**
+     * Enters PiP, saying out loud why when it doesn't.
+     *
+     * @param reason where the attempt came from, so the log distinguishes the auto path from the
+     *   button the user actually pressed.
+     */
+    private fun enterPip(reason: String) {
+        if (!pipSupported()) return
+        if (!currentVideoPlaying) {
+            // PiP shows the video Surface. An audio-only AirPlay session has none, so there would
+            // be nothing in the window — worth saying, because "PiP doesn't work" while listening
+            // to music is this, not a failure.
+            Logger.i("PiP skipped ($reason): no video stream on screen")
+            return
+        }
+        runCatching { enterPictureInPictureMode(pipParams()) }
+            .onSuccess { Logger.i("PiP entered ($reason)") }
+            .onFailure { Logger.w("PiP entry refused ($reason): ${it.message}") }
     }
 
     /** Re-publishes PiP params whenever the thing they describe changes. */
@@ -421,12 +461,7 @@ class MainActivity : AppCompatActivity() {
                 Timber.d("Mirror controls: stop — ending session")
                 service?.endCurrentSession()
             }
-            it.onPipClick = {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    runCatching { enterPictureInPictureMode(pipParams()) }
-                        .onFailure { e -> Timber.w(e, "PiP from mirror controls failed") }
-                }
-            }
+            it.onPipClick = { enterPip("mirror controls button") }
         }
         streamingContainer.addView(streamingScreen)
         streamingContainer.addView(photoScreen)
@@ -605,7 +640,7 @@ class MainActivity : AppCompatActivity() {
         streamingContainer.visibility = View.VISIBLE
         streamingContainer.bringToFront()
         // The bar stays hidden until the user asks for it; this only makes it available.
-        mirrorControls.setPipAvailable(pipEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+        mirrorControls.setPipAvailable(pipEnabled && pipSupported())
         setOverlayOwnsInput(true)
     }
 

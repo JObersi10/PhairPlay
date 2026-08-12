@@ -70,7 +70,12 @@ class HomeKitBridge(
             // looks broken and there is no in-app way to grant it on Fire TV.
             Logger.w(
                 "HomeKit off: the TV stays awake because device admin is not granted. Enable it with: " +
-                    "adb shell dpm set-active-admin com.phairplay.firetv/.service.PhairPlayDeviceAdmin",
+                    // Built from the real ComponentName rather than written out by hand. The short
+                    // `pkg/.Class` form resolves against the MANIFEST package (com.phairplay), not
+                    // the applicationId (com.phairplay.firetv), so the hand-written version named a
+                    // class that does not exist and dpm answered "Unknown admin".
+                    "adb shell dpm set-active-admin " +
+                        ComponentName(context, PhairPlayDeviceAdmin::class.java).flattenToString(),
             )
         }
     }
