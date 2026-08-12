@@ -67,9 +67,11 @@ object InfoResponder {
                 "supportsInterstitials" to true,
             ),
 
-            // 1 = relative (up/down steps). Absent, senders assume absolute and send levels that
-            // Android's stream volume cannot honour without fighting the system volume UI.
-            "volumeControlType" to 1L,
+            // 2 = absolute. Claiming 1 (relative up/down steps) and then answering every query with
+            // an absolute dB level is a contradiction, and macOS responded to it by re-sending its
+            // volume dozens of times a second — the Music slider "refreshing" on its own without
+            // the level ever changing. We do handle absolute levels, so say so.
+            "volumeControlType" to 2L,
             // dB, not percent: 0 is full scale and -144 is muted.
             //
             // Read from the device rather than hardcoded. A fixed value made the sender's slider

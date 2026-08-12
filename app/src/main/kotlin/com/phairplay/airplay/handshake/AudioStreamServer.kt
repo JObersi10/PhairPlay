@@ -570,8 +570,20 @@ class AudioStreamServer(
         while (running && frameQueue.size < targetDepthFrames && System.currentTimeMillis() < deadline) {
             Thread.sleep(5)
         }
+        // Waiting for "at least N" is not the same as starting at N. Packets arrive far faster than
+        // realtime at stream start, so the queue routinely blew past the target before this loop
+        // next looked — observed 34 frames against a target of 4. AudioTrack is written with
+        // WRITE_BLOCKING, which paces at exactly realtime and therefore never drains a backlog, so
+        // every one of those extra frames became permanent delay. Drop the overshoot before the
+        // first sample is played: cheap here, impossible to recover later.
+        val overshoot = frameQueue.size - targetDepthFrames
+        if (overshoot > 0) {
+            repeat(overshoot) { frameQueue.poll() }
+            Logger.i("Audio: dropped $overshoot frame(s) of prime overshoot " +
+                "(~${overshoot * framesPerPacket * 1000 / sampleRate}ms that would never drain)")
+        }
         Logger.i("Audio: primed with ${frameQueue.size}/$targetDepthFrames frames " +
-            "(~${targetDepthFrames * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
+            "(~${frameQueue.size * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
     }
 
     /**
