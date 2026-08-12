@@ -327,9 +327,16 @@ class HomeKitReceiver(
         const val INPUT_AIRPLAY = 1
         const val INPUT_DLNA = 2
 
+        /**
+         * The one built-in input: PhairPlay itself.
+         *
+         * "AirPlay" and "DLNA" used to be listed separately, but selecting either did the same
+         * thing — show PhairPlay — so the Home app offered a choice that wasn't one. The protocol
+         * is decided by whatever connects, not by the input the user picks. Everything else in the
+         * list is now a user-assigned app shortcut, which is a real choice.
+         */
         private val INPUTS = listOf(
-            INPUT_AIRPLAY to "AirPlay",
-            INPUT_DLNA to "DLNA",
+            INPUT_AIRPLAY to "PhairPlay",
         )
     }
 }

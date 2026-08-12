@@ -577,6 +577,13 @@ class AudioStreamServer(
         // WRITE_BLOCKING, which paces at exactly realtime and therefore never drains a backlog, so
         // every one of those extra frames became permanent delay. Drop the overshoot before the
         // first sample is played: cheap here, impossible to recover later.
+        // A prime that timed out with nothing in the queue means the sender opened the stream and
+        // sent no audio. Starting playback from empty guarantees an immediate underrun, so say so
+        // rather than pretending the buffer is at its target.
+        if (frameQueue.isEmpty()) {
+            Logger.w("Audio: prime timed out with an empty queue — sender opened the stream but sent nothing")
+            return
+        }
         val overshoot = frameQueue.size - targetDepthFrames
         if (overshoot > 0) {
             repeat(overshoot) { frameQueue.poll() }
