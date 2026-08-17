@@ -67,6 +67,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowProjectorMode: View
+    private lateinit var rowArtworkLookup: View
     private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
@@ -141,6 +142,7 @@ class SettingsFragment : Fragment() {
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowProjectorMode    = view.findViewById(R.id.row_projector_mode)
+        rowArtworkLookup    = view.findViewById(R.id.row_artwork_lookup)
         rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
@@ -213,6 +215,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowProjectorMode, R.string.setting_projector,        R.string.setting_projector_subtitle)
+        configureToggleRow(rowArtworkLookup, R.string.setting_artwork_lookup,    R.string.setting_artwork_lookup_subtitle)
         configureToggleRow(rowStreamEndAction, R.string.setting_stream_end,     R.string.setting_stream_end_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
@@ -286,6 +289,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         setToggle(rowProjectorMode, settings.projectorMode)
+        setToggle(rowArtworkLookup, settings.artworkLookup)
         setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
@@ -372,6 +376,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         setToggleListener(rowProjectorMode) { enabled -> save { it.copy(projectorMode = enabled) } }
+        setToggleListener(rowArtworkLookup) { enabled -> save { it.copy(artworkLookup = enabled) } }
         setToggleListener(rowStreamEndAction) { enabled ->
             save { it.copy(streamEndAction = if (enabled) StreamEndAction.EXIT_APP else StreamEndAction.STAY_IN_APP) }
         }

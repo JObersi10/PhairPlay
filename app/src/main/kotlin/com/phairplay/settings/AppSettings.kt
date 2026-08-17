@@ -187,6 +187,14 @@ data class AppSettings(
      * boundary at all. Off by default — on a normal TV it just looks dimmer.
      */
     val projectorMode: Boolean = false,
+    /**
+     * Look album art up online when the sender did not supply any (DLNA mostly).
+     *
+     * Off by default deliberately. It is the only feature that makes the receiver contact a third
+     * party, and sending the titles someone plays to an outside service is their decision, not a
+     * sensible default. Uses MusicBrainz + the Cover Art Archive — see CoverArtFinder for why those.
+     */
+    val artworkLookup: Boolean = false,
 
     /** What to do when a stream ends. */
     val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,

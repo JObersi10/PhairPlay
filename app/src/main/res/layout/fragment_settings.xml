@@ -562,6 +562,13 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
+        <!-- Look a missing album cover up online. Off by default: it is the only setting that makes
+             the receiver talk to a third party. -->
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_artwork_lookup"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
         <!-- What happens when the sender stops streaming. -->
         <include layout="@layout/settings_toggle_row"
             android:id="@+id/row_stream_end_action"

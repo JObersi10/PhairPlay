@@ -498,8 +498,8 @@ class MainActivity : AppCompatActivity() {
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this).also {
             it.onPlayPauseClick = { nowPlayingScreen.togglePause() }
-            it.onPrevClick     = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_PREV) }
-            it.onNextClick     = { service?.sendAirPlayRemoteCommand(com.phairplay.airplay.DacpClient.CMD_NEXT) }
+            it.onPrevClick     = { service?.dispatchTransportCommand(com.phairplay.airplay.DacpClient.CMD_PREV) }
+            it.onNextClick     = { service?.dispatchTransportCommand(com.phairplay.airplay.DacpClient.CMD_NEXT) }
         }
         pinScreen = PinScreen(this)
         mirrorControls = MirrorControls(this).also {
@@ -576,7 +576,7 @@ class MainActivity : AppCompatActivity() {
                 if (kotlin.math.abs(dx) < kotlin.math.abs(dy) * 2) return false
                 val command = if (dx < 0) DacpClient.CMD_NEXT else DacpClient.CMD_PREV
                 Timber.d("Overlay fling ${if (dx < 0) "left" else "right"} — $command")
-                service?.sendAirPlayRemoteCommand(command)
+                service?.dispatchTransportCommand(command)
                 return true
             }
         })
@@ -836,13 +836,19 @@ class MainActivity : AppCompatActivity() {
                 else -> null
             }
             if (videoCommand != null) {
-                service?.sendAirPlayRemoteCommand(videoCommand)
+                service?.dispatchTransportCommand(videoCommand)
                 return true
             }
             return super.onKeyDown(keyCode, event)
         }
 
-        val overlayActive = currentNowPlaying != null || currentAirPlayState == ProtocolState.CONNECTED
+        // DLNA counts as an active overlay too. This tested AirPlay only, so during a DLNA render the
+        // whole audio key mapping below was skipped and every transport key fell through to
+        // super.onKeyDown -- which is why play/pause worked from the UMS control point (a UPnP action
+        // we answer) but not from the TV remote (a key we never looked at).
+        val overlayActive = currentNowPlaying != null ||
+            currentAirPlayState == ProtocolState.CONNECTED ||
+            currentDlnaState == ProtocolState.CONNECTED
         if (overlayActive) {
             // Any remote press counts as presence — restart the Now Playing idle countdown.
             nowPlayingScreen.notifyActivity()
@@ -893,7 +899,7 @@ class MainActivity : AppCompatActivity() {
                 else -> null
             }
             if (command != null) {
-                service?.sendAirPlayRemoteCommand(command)
+                service?.dispatchTransportCommand(command)
                 return true
             }
         }
@@ -907,7 +913,7 @@ class MainActivity : AppCompatActivity() {
     override fun onKeyUp(keyCode: Int, event: android.view.KeyEvent?): Boolean {
         if (isSeekActive && keyCode in SEEK_KEYS) {
             isSeekActive = false
-            service?.sendAirPlayRemoteCommand(DacpClient.CMD_PLAY_RESUME)
+            service?.dispatchTransportCommand(DacpClient.CMD_PLAY_RESUME)
             return true
         }
         return super.onKeyUp(keyCode, event)
@@ -1133,6 +1139,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     svc.audioEnergy.collect { e -> nowPlayingScreen.setEnergy(e) }
+                }
+                launch {
+                    svc.audioBands.collect { b -> nowPlayingScreen.setBands(b) }
                 }
                 launch {
                     svc.volumeReport.collect { r -> nowPlayingScreen.setVolumeReport(r?.display) }

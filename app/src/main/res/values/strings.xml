@@ -290,6 +290,8 @@
     <string name="setting_remote">Remote control</string>
     <string name="setting_remote_subtitle">Off by default. Works properly inside PhairPlay; unreliable elsewhere — see the permission notice below.</string>
 
+    <string name="setting_artwork_lookup">Find missing album art</string>
+    <string name="setting_artwork_lookup_subtitle">When a sender streams without cover art — most DLNA apps do — look one up by title using MusicBrainz and the Cover Art Archive. Track names are sent to those services while this is on.</string>
     <string name="setting_projector">Projector mode</string>
     <string name="setting_projector_subtitle">Pure black background with the beat visual centred and faded out on every side, so a projected image has no visible edge.</string>
     <string name="setting_stream_end">Exit when the stream ends</string>

@@ -185,6 +185,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         dynamicBg.setEnergy(e)
     }
 
+    /** Bass/mid/treble levels for the per-band orbs. Dropped while compact, same reasoning. */
+    fun setBands(bands: FloatArray) {
+        if (isCompact) return
+        dynamicBg.setBands(bands)
+    }
+
     // ── Views ────────────────────────────────────────────────────────────────
     private val artworkView: ImageView
     private val titleView: TextView
@@ -766,8 +772,34 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun applyArtwork(bytes: ByteArray?) {
         val key = bytes?.contentHashCode()
         if (key == artworkKey && currentArtDrawable != null) return
-        artworkKey = key
 
+        // HOLD THE OUTGOING COVER instead of clearing it the instant art goes away.
+        //
+        // Between tracks a sender drops artwork for a moment and sends the next image shortly after,
+        // and a DLNA lookup takes a second or two to answer. Clearing immediately made the card flash
+        // the grey placeholder in both cases -- a visible stutter that says "we lost it" when nothing
+        // was lost. So an EMPTY update is deferred: if real art arrives inside the grace period the
+        // placeholder is never shown at all, and if none does, the card falls back once, calmly.
+        artworkClear?.let { removeCallbacks(it); artworkClear = null }
+        if ((bytes == null || bytes.isEmpty()) && currentArtDrawable != null) {
+            val pending = Runnable {
+                artworkClear = null
+                artworkKey = null
+                applyArtworkNow(null)
+            }
+            artworkClear = pending
+            postDelayed(pending, ARTWORK_HOLD_MS)
+            return
+        }
+
+        artworkKey = key
+        applyArtworkNow(bytes)
+    }
+
+    /** Pending "no artwork" fallback, cancelled the moment a real image turns up. */
+    private var artworkClear: Runnable? = null
+
+    private fun applyArtworkNow(bytes: ByteArray?) {
         // Senders push a 0-byte "image/none" placeholder between tracks (visible in the RTSP log as
         // `artwork (0B, image/none)`). Treat it as "no art yet" rather than decoding it, so it can't
         // clear real cover art that is about to arrive a few milliseconds later.
@@ -1025,6 +1057,13 @@ class NowPlayingScreen @JvmOverloads constructor(
         )
 
         private const val ARTWORK_FADE_MS = 450
+
+        /**
+         * How long the previous cover stays up after artwork disappears, waiting for a replacement.
+         * Long enough to cover a track change on a sender and an online cover lookup; short enough
+         * that a genuinely art-less track does not look stuck on the wrong image.
+         */
+        private const val ARTWORK_HOLD_MS = 2500L
 
         /** Screensaver default, mirrored by AppSettings.screensaverTimeoutMin. */
         const val DEFAULT_SCREENSAVER_MINUTES = 15

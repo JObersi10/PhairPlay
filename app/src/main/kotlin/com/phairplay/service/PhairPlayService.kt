@@ -120,6 +120,9 @@ class PhairPlayService : Service() {
     /** Mirror of AppSettings.remoteEnabled, so the HAP thread need not touch DataStore. */
     @Volatile private var remoteEnabled: Boolean = false
 
+    /** Mirror of AppSettings.artworkLookup, read from the DLNA artwork thread. */
+    @Volatile private var artworkLookup: Boolean = false
+
     private fun emitRemoteKey(keyCode: Int) {
         if (!remoteEnabled) {
             Logger.i("Remote key $keyCode ignored — the remote is switched off in Settings")
@@ -168,6 +171,10 @@ class PhairPlayService : Service() {
 
     private val _audioEnergy = MutableStateFlow(0f)
     val audioEnergy: StateFlow<Float> = _audioEnergy.asStateFlow()
+
+    /** Bass/mid/treble, 0..1. Drives one orb each in the projector backdrop. */
+    private val _audioBands = MutableStateFlow(floatArrayOf(0f, 0f, 0f))
+    val audioBands: StateFlow<FloatArray> = _audioBands.asStateFlow()
 
     // Non-null while a PIN should be shown on screen for SRP pair-setup (PIN access control).
     // Latest sender volume change, with what we managed to do about it — surfaced so the UI can
@@ -366,7 +373,7 @@ class PhairPlayService : Service() {
      *    MediaRemote; the log line below is here so the distinction is visible in a capture rather
      *    than being guessed at.
      */
-    private fun dispatchTransportCommand(command: String) {
+    fun dispatchTransportCommand(command: String) {
         val player = dlnaServer?.mediaPlayer
         if (_dlnaState.value == ProtocolState.CONNECTED && player != null) {
             when (command) {
@@ -680,6 +687,7 @@ class PhairPlayService : Service() {
 
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
+        artworkLookup = settings.artworkLookup
         // Switching the remote off must also clear what it drew and remembered, not just stop new
         // presses — otherwise a ring stays on screen over an app that never asked for one.
         if (!remoteEnabled) PhairPlayAccessibilityService.resetRemoteState()
@@ -943,6 +951,7 @@ class PhairPlayService : Service() {
                 }
             },
             onEnergyChanged = { e -> _audioEnergy.value = e },
+            onBandsChanged = { b -> _audioBands.value = b },
             onPinChanged = { pin ->
                 _pairingPin.value = pin
                 // The code is useless if nobody can see it. Pairing happens before CONNECTED, so
@@ -994,9 +1003,21 @@ class PhairPlayService : Service() {
                         // TV off, and saying so made the Home tile flip to "off" while the user was
                         // sitting in front of a lit screen. Active follows the display now — see
                         // registerDisplayWatcher.
-                        _nowPlaying.value = null
-                        _photoFrame.value = null
-                        _activeConnection.value = null
+                        // ONLY clear the shared now-playing state if it is still AirPlay's.
+                        //
+                        // _nowPlaying and _activeConnection are shared by both protocols, and the
+                        // DLNA handover runs in exactly the wrong order to survive an unguarded
+                        // reset: the control point publishes its metadata, then reports CONNECTED,
+                        // which calls endOtherSession -> AirPlay endSession -> this branch, which
+                        // wiped the DLNA track that had just been set. The Activity keeps the last
+                        // non-null value it saw, so the card sat there still showing the AirPlay
+                        // sender for the whole DLNA render -- "the now playing screen doesn't
+                        // switch". Whoever owns the connection owns the right to clear it.
+                        if (_activeConnection.value?.protocol != Protocol.DLNA) {
+                            _nowPlaying.value = null
+                            _photoFrame.value = null
+                            _activeConnection.value = null
+                        }
                         updateNotification(isRunning = state != ProtocolState.DISABLED &&
                                                        state != ProtocolState.ERROR)
                     }
@@ -1086,7 +1107,8 @@ class PhairPlayService : Service() {
                     _activeConnection.value = null
                 }
             },
-            onNowPlayingChanged = { info -> _nowPlaying.value = info }
+            onNowPlayingChanged = { info -> _nowPlaying.value = info },
+            artworkLookupEnabled = { artworkLookup },
         ).also {
             // Drop the reference on a failed bind so the guard above doesn't treat a dead server as
             // running, and a later restart gets a clean retry.

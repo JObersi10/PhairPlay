@@ -122,6 +122,8 @@ class AirPlayReceiver(
      */
     private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
     private val onEnergyChanged: (Float) -> Unit = {},
+    /** Bass, mid and treble levels 0..1 — see AudioStreamServer.onBands. */
+    private val onBandsChanged: (FloatArray) -> Unit = {},
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
     private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
@@ -820,6 +822,7 @@ class AirPlayReceiver(
             trackBufferMs = audioBufferMs,
             beatDelayMs = beatDelayMs.toLong(),
             onEnergy = { e -> onEnergyChanged(e) },
+            onBands = { b -> onBandsChanged(b) },
             // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.

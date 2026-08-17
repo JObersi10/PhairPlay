@@ -17,9 +17,61 @@ import java.util.TimerTask
 class DlnaServer(
     private val context: Context,
     private val onStateChanged: (ProtocolState) -> Unit,
-    private val onNowPlayingChanged: (com.phairplay.airplay.NowPlayingInfo?) -> Unit = {}
+    private val onNowPlayingChanged: (com.phairplay.airplay.NowPlayingInfo?) -> Unit = {},
+    /** AppSettings.artworkLookup — whether to look a missing cover up online. */
+    private val artworkLookupEnabled: () -> Boolean = { false },
 ) {
     val mediaPlayer = SharedMediaPlayer(context)
+
+    /**
+     * Single-threaded, so two quick track changes cannot race to publish artwork out of order and
+     * leave the card showing the previous track's cover. Daemon, so it never holds the process up.
+     */
+    private val artworkExecutor: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "dlna-artwork").apply { isDaemon = true }
+        }
+
+    /** Counter identifying the current track, so a slow fetch for an old one is discarded. */
+    private val artworkGeneration = java.util.concurrent.atomic.AtomicInteger(0)
+
+    /**
+     * Finds and publishes artwork for the track just announced, off the SOAP handler thread.
+     *
+     * Runs asynchronously on purpose: a control point is waiting on the SetAVTransportURI response,
+     * and two HTTP round trips to MusicBrainz and the Cover Art Archive inside that handler would
+     * stall the whole play request behind a network lookup — the track would start seconds late, or
+     * the control point would time out and report a failure.
+     */
+    private fun resolveArtwork(didlUri: String?, title: String?, artist: String?, album: String?) {
+        val generation = artworkGeneration.incrementAndGet()
+        val lookup = runCatching { artworkLookupEnabled() }.getOrDefault(false)
+        if (didlUri.isNullOrBlank() && !lookup) return
+        artworkExecutor.execute {
+            val result = com.phairplay.media.CoverArtFinder.find(
+                didlUri = didlUri, title = title, artist = artist, album = album,
+                lookupEnabled = lookup,
+            )
+            // Another track was announced while we were fetching. Publishing now would put the wrong
+            // cover on screen and leave it there until the next change.
+            if (generation != artworkGeneration.get()) {
+                Logger.i("DLNA artwork discarded — track changed during lookup")
+                return@execute
+            }
+            val bytes = result.bytes
+            if (bytes == null) {
+                Logger.i("DLNA artwork: none found for title=$title album=$album")
+                return@execute
+            }
+            Logger.i("DLNA artwork: ${bytes.size} bytes from ${result.source}")
+            onNowPlayingChanged(
+                com.phairplay.airplay.NowPlayingInfo(
+                    senderName = "DLNA", title = title, artist = artist, album = album,
+                    artwork = bytes,
+                )
+            )
+        }
+    }
 
     @Volatile private var running = false
     private var httpSocket: ServerSocket? = null
@@ -88,6 +140,7 @@ class DlnaServer(
     }
 
     fun stop() {
+        runCatching { artworkExecutor.shutdownNow() }
         running = false
         announceTimer?.cancel(); announceTimer = null
         runCatching { ssdpSocket?.leaveGroup(InetAddress.getByName(SSDP_ADDR)) }
@@ -245,17 +298,30 @@ class DlnaServer(
                     val title  = didl.extractDidlTag("dc:title") ?: titleFromUrl(url)
                     val artist = didl.extractDidlTag("upnp:artist") ?: didl.extractDidlTag("dc:creator")
                     val album  = didl.extractDidlTag("upnp:album")
-                    Logger.i("DLNA metadata title=$title artist=$artist album=$album")
+                    // Control points that DO ship artwork put it here. Nothing read this tag before,
+                    // which is the whole reason a DLNA render never showed a cover.
+                    val artUri = didl.extractDidlTag("upnp:albumArtURI")
+                    Logger.i("DLNA metadata title=$title artist=$artist album=$album art=$artUri")
                     // Published here rather than from the load callback: the track is known the
                     // moment the control point names it, and waiting for ExoPlayer to reach READY
                     // left the screen on the idle card for the whole buffering window.
+                    // CONNECTED FIRST, metadata second. Reporting connected is what hands the audio
+                    // output over from any AirPlay session, and that handover clears the shared
+                    // now-playing state -- so publishing the track before it simply had the track
+                    // erased a moment later, leaving the card on the previous AirPlay sender.
+                    onStateChanged(ProtocolState.CONNECTED)
                     onNowPlayingChanged(com.phairplay.airplay.NowPlayingInfo(
                         senderName = "DLNA",
                         title = title,
                         artist = artist,
-                        album = album
+                        album = album,
+                        artwork = null,
                     ))
-                    onStateChanged(ProtocolState.CONNECTED)
+                    // Cover art is fetched off-thread: the control point may have named one in the
+                    // DIDL document, and if it did not (most do not) the lookup service can find one
+                    // from the title. Either way it lands as a second emission rather than holding
+                    // the card back until an image is available.
+                    resolveArtwork(artUri, title, artist, album)
                     mediaPlayer.load(url) {
                         Logger.i("DLNA ExoPlayer ready — playing")
                         setTransportState("PLAYING")

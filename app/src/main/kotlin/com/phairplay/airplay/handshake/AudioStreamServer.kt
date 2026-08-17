@@ -68,6 +68,14 @@ class AudioStreamServer(
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
     /**
+     * Called alongside [onEnergy] with three normalised band levels — bass, mid, treble — so the
+     * backdrop can react to different parts of the music rather than to one loudness figure.
+     *
+     * Always a fresh array: it crosses to the main thread, and reusing one buffer would let the UI
+     * read a half-written frame.
+     */
+    val onBands: (FloatArray) -> Unit = {},
+    /**
      * True when audio packets have stopped arriving, false when they resume.
      *
      * This is how a pause is actually detected. Apple Music never sends RTSP PAUSE, so the
@@ -170,6 +178,32 @@ class AudioStreamServer(
 
     // Beat detection state (playback thread only).
     private var lowPass = 0.0
+
+    // ── Three-band filter bank ───────────────────────────────────────────────────────────────
+    // A filter bank rather than an FFT, and worth being precise about why: we need three numbers
+    // ten times a second, not a spectrum. Four one-pole filters give real frequency separation for
+    // a handful of multiply-adds per sample, where a windowed FFT would cost a transform per block
+    // on the same thread that feeds AudioTrack -- the thread whose stalls are audible.
+    //
+    //   bass   = lp160                 (kick, bassline)
+    //   mid    = lp2500 - lp300        (vocals and most instruments)
+    //   treble = sample - lp4000       (cymbals, sibilance, air)
+    private var lp160 = 0.0
+    private var lp300 = 0.0
+    private var lp2500 = 0.0
+    private var lp4000 = 0.0
+
+    /**
+     * Per-band automatic gain, decaying.
+     *
+     * Absolute band levels are useless to a visual: treble sits an order of magnitude below bass on
+     * most material, so a fixed scale leaves the treble orb permanently dead and the bass orb
+     * permanently saturated. Each band is normalised against its own recent peak instead, so all
+     * three use their full range, and a quiet passage still animates. The peak decays so the bank
+     * re-adapts when the material changes.
+     */
+    private val bandPeak = DoubleArray(3) { BAND_PEAK_FLOOR }
+    private val bandLevel = FloatArray(3)
     private val history = DoubleArray(100)
     private var historyIdx = 0
     private var lastOnsetMs = 0L
@@ -500,8 +534,16 @@ class AudioStreamServer(
      * the recent running mean. The result is a punch that decays, which is what reads as a beat.
      */
     private fun emitEnergy(pcm: ByteArray) {
-        // Window energy, mono, low-passed to ~130Hz with a one-pole filter.
+        // Window energy, mono, low-passed to ~130Hz with a one-pole filter. The same pass also runs
+        // the three-band bank below, so the PCM is walked once rather than four times.
+        val a160 = alphaFor(160.0)
+        val a300 = alphaFor(300.0)
+        val a2500 = alphaFor(2500.0)
+        val a4000 = alphaFor(4000.0)
         var sum = 0.0
+        var sumBass = 0.0
+        var sumMid = 0.0
+        var sumTreble = 0.0
         var count = 0
         var i = 0
         while (i + 1 < pcm.size) {
@@ -513,10 +555,25 @@ class AudioStreamServer(
             }
             lowPass += LP_ALPHA * (sample - lowPass)
             sum += lowPass * lowPass
+
+            lp160 += a160 * (sample - lp160)
+            lp300 += a300 * (sample - lp300)
+            lp2500 += a2500 * (sample - lp2500)
+            lp4000 += a4000 * (sample - lp4000)
+            val mid = lp2500 - lp300
+            val treble = sample - lp4000
+            sumBass += lp160 * lp160
+            sumMid += mid * mid
+            sumTreble += treble * treble
             count++
         }
         if (count == 0) return
         val level = Math.sqrt(sum / count) / 32768.0
+        updateBands(
+            Math.sqrt(sumBass / count) / 32768.0,
+            Math.sqrt(sumMid / count) / 32768.0,
+            Math.sqrt(sumTreble / count) / 32768.0,
+        )
 
         // Running mean/variance over roughly the last second of windows.
         history[historyIdx % history.size] = level
@@ -547,6 +604,41 @@ class AudioStreamServer(
         // emitting immediately made the backdrop flash ahead of the beat.
         emitDelayed(envelope)
     }
+
+    /**
+     * One-pole coefficient for a cutoff of [hz] at the current sample rate.
+     *
+     * Cheap enough to recompute per block (three exp() calls per ~10ms of audio) and correct across
+     * a rate change, which a hard-coded constant is not — the same filter would sit at a different
+     * frequency for 44.1k and 48k material.
+     */
+    private fun alphaFor(hz: Double): Double {
+        val sr = sampleRate.coerceAtLeast(8000).toDouble()
+        return 1.0 - Math.exp(-2.0 * Math.PI * hz / sr)
+    }
+
+    /** Normalises the three raw band RMS figures against their own decaying peaks. */
+    private fun updateBands(bass: Double, mid: Double, treble: Double) {
+        val raw = RAW_BANDS
+        raw[0] = bass; raw[1] = mid; raw[2] = treble
+        for (b in 0 until 3) {
+            val peak = bandPeak[b]
+            bandPeak[b] = if (raw[b] > peak) raw[b] else {
+                (peak * BAND_PEAK_DECAY).coerceAtLeast(BAND_PEAK_FLOOR)
+            }
+            val norm = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            // Slight upward curve. Linear normalised RMS clusters low, so the orbs sat near their
+            // base size most of the time; the exponent lifts the middle of the range where the
+            // interesting movement is without letting quiet passages read as loud.
+            bandLevel[b] = Math.pow(norm, BAND_CURVE).toFloat()
+        }
+        val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
+        val delay = beatEmitDelayMs()
+        if (delay <= 0L) energyHandler.post { onBands(snapshot) }
+        else energyHandler.postDelayed({ onBands(snapshot) }, delay)
+    }
+
+    private val RAW_BANDS = DoubleArray(3)
 
 
     private fun initDecoder() {
@@ -728,15 +820,25 @@ class AudioStreamServer(
      * is not exposed by Android and is not included; the user's audio trim covers that.
      */
     private fun emitDelayed(value: Float) {
+        val delay = beatEmitDelayMs()
+        if (delay <= 0L) { onEnergy(value); return }
+        energyHandler.postDelayed({ onEnergy(value) }, delay)
+    }
+
+    /**
+     * How long to hold a beat measurement before showing it, so the visual lands with the sound.
+     *
+     * Shared by [emitDelayed] and the band emission: both describe the same PCM, so they must be
+     * delayed by the same amount or the orbs would react on a different beat from the pulse.
+     */
+    private fun beatEmitDelayMs(): Long {
         val track = audioTrack
         val bufferedMs = if (track != null) {
             val queuedFrames = frameQueue.size * framesPerPacket
             val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
             ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
         } else 0L
-        val delay = bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
-        if (delay <= 0L) { onEnergy(value); return }
-        energyHandler.postDelayed({ onEnergy(value) }, delay)
+        return bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
     }
 
     /**
@@ -922,6 +1024,12 @@ class AudioStreamServer(
         /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
         private const val LP_ALPHA = 0.018
         /** How far above the running mean a window must sit to count as a beat. */
+        /** Band AGC: how fast a band's reference peak falls when nothing louder arrives. */
+        private const val BAND_PEAK_DECAY = 0.985
+        /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
+        private const val BAND_PEAK_FLOOR = 1e-4
+        private const val BAND_CURVE = 0.65
+
         private const val ONSET_SIGMA = 1.5
         private const val REFRACTORY_MS = 120L
         private const val DECAY_MS = 250f

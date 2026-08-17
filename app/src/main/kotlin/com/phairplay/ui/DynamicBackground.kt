@@ -71,17 +71,39 @@ class DynamicBackground @JvmOverloads constructor(
 
     fun setEnergy(e: Float) {
         energyTarget = e
-        // A CRUDE BAND SPLIT, and worth naming as such: the audio path hands us one broadband
-        // energy figure, not a spectrum, so this is not a real FFT. Each orb follows that figure
-        // with its own smoothing constant, which separates them by how FAST they respond -- the
-        // slow one tracks sustained level (roughly what bass does), the fast one snaps to
-        // transients (roughly percussion). It reads as three orbs reacting to different parts of
-        // the music because in time-domain terms they are. Real per-band reaction needs an FFT in
-        // AudioStreamServer; this is deliberately the cheap version.
+        // Fallback only. While real band levels are arriving [setBands] owns the orbs; this keeps
+        // them alive for any source that reports loudness but not spectrum, by separating the orbs
+        // on RESPONSE SPEED instead of on frequency.
+        if (haveBands) return
         for (i in orbEnergy.indices) {
             orbEnergy[i] += (e - orbEnergy[i]) * ORB_FOLLOW[i]
         }
     }
+
+    /**
+     * Real per-band levels: index 0 bass, 1 mid, 2 treble.
+     *
+     * One orb per band, which is the point — the bass orb swells on the kick, the mid orb moves with
+     * vocals, the treble orb flickers on cymbals. They are still smoothed, but each with a constant
+     * suited to its band rather than as a way of faking the split: bass is slow because bass IS
+     * slow, treble is fast because a hi-hat is over in 30ms.
+     */
+    fun setBands(bands: FloatArray) {
+        if (bands.size < 3) return
+        haveBands = true
+        for (i in 0 until 3) {
+            orbEnergy[i] += (bands[i] - orbEnergy[i]) * ORB_FOLLOW[i]
+        }
+        // The full-screen (non-projector) blob field reacts too, so the two modes feel like the same
+        // visual rather than two unrelated backdrops. Bass drives scale because that is what reads
+        // as the beat at a glance; treble adds a small brightness lift.
+        bandBass = orbEnergy[0]
+        bandTreble = orbEnergy[2]
+    }
+
+    private var haveBands = false
+    private var bandBass = 0f
+    private var bandTreble = 0f
 
     private val orbEnergy = FloatArray(3)
 
@@ -90,13 +112,22 @@ class DynamicBackground @JvmOverloads constructor(
     private var lowPower = false
 
     fun updateColors(bitmap: Bitmap) {
-        Palette.from(bitmap).maximumColorCount(7).generate { palette ->
+        Palette.from(bitmap).maximumColorCount(16).generate { palette ->
             if (palette == null) return@generate
-            val swatches = listOfNotNull(
-                palette.vibrantSwatch, palette.darkVibrantSwatch, palette.mutedSwatch,
-                palette.lightVibrantSwatch, palette.darkMutedSwatch, palette.lightMutedSwatch,
-                palette.dominantSwatch
-            ).sortedByDescending { it.population }.map { s ->
+            // The six NAMED swatches plus every swatch Palette actually found.
+            //
+            // The named ones alone are the reason a blue-and-red cover looked blue: "vibrant",
+            // "muted", "dark muted" and friends are roles, and on a cover with one dominant colour
+            // several of those roles are filled by shades of that SAME colour, so the pool handed to
+            // the hue filter had no red in it to pick. palette.swatches is the full quantised set,
+            // where a strong secondary colour does appear even when it holds no named role.
+            val swatches = (
+                listOfNotNull(
+                    palette.vibrantSwatch, palette.darkVibrantSwatch, palette.mutedSwatch,
+                    palette.lightVibrantSwatch, palette.darkMutedSwatch, palette.lightMutedSwatch,
+                    palette.dominantSwatch,
+                ) + palette.swatches
+                ).distinctBy { it.rgb }.sortedByDescending { it.population }.map { s ->
                 // Push toward vivid. The value ceiling matters most: a pale, high-value swatch
                 // reads as light grey and washes out the text on top, so cap value and floor
                 // saturation to force deep colour rather than haze. A plain saturation filter was
@@ -129,8 +160,14 @@ class DynamicBackground @JvmOverloads constructor(
         val a3 = t3.animatedValue as Float
 
         val e = (energy * beatMultiplier).coerceIn(0f, 1f)
-        val beatScale = 1f + e * 0.25f
-        val beatAlpha = 0.66f + e * 0.22f
+        // The full-screen field uses the SAME band levels as the projector orbs, so the two modes
+        // read as one visual. Bass goes to scale, because size is what registers as the beat from
+        // across a room; treble goes to brightness, where a fast flicker looks like air rather than
+        // like the whole picture pumping.
+        val bass = (bandBass * beatMultiplier).coerceIn(0f, 1f)
+        val treble = (bandTreble * beatMultiplier).coerceIn(0f, 1f)
+        val beatScale = 1f + (e * 0.16f) + (bass * 0.16f)
+        val beatAlpha = 0.66f + e * 0.14f + treble * 0.10f
         val r = maxOf(w, h) * 0.62f * beatScale
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
@@ -258,12 +295,15 @@ class DynamicBackground @JvmOverloads constructor(
             }
             if (!clash) picked += c
         }
-        for (c in source) {
-            if (picked.size >= PALETTE_SIZE) break
-            if (c !in picked) picked += c
-        }
-        while (picked.size < PALETTE_SIZE && picked.isNotEmpty()) picked += picked[picked.size % picked.size.coerceAtLeast(1)]
-        return picked.ifEmpty { DEFAULTS.map { Color.parseColor(it) } }
+        // Top up by CYCLING the hue-distinct picks rather than by admitting the near-duplicates the
+        // filter above just rejected. Those duplicates used to fill the tail of the palette, and
+        // since the orbs read the first three slots, a two-colour cover produced one real hue plus
+        // two washed-out variants of it. Repeating a strong colour is better than introducing a weak
+        // one: the blobs pair slots up anyway, so a repeat still shows as motion between two tones.
+        val distinct = picked.toList()
+        if (distinct.isEmpty()) return DEFAULTS.map { Color.parseColor(it) }
+        while (picked.size < PALETTE_SIZE) picked += distinct[picked.size % distinct.size]
+        return picked
     }
 
     /**
@@ -325,8 +365,24 @@ class DynamicBackground @JvmOverloads constructor(
             if (room <= 0f) continue
             radius = radius.coerceAtMost(room)
 
-            val tint = colors[(k * 2) % PALETTE_SIZE]
-            val key = tint and 0xF8F8F8.toInt()
+            // THE FIRST THREE palette slots, not every second one.
+            //
+            // This read colors[k * 2] -- slots 0, 2, 4. spreadByHue fills the low slots with
+            // genuinely hue-distinct colours and then TOPS UP the rest with whatever is left over,
+            // near-duplicates included. So on a blue-and-red cover the red landed in slot 1, which
+            // the orbs skipped, and slots 2 and 4 held second-rate blues: three blue orbs from a
+            // two-colour cover. Slots 0..2 are exactly the three most-separated hues available.
+            //
+            // Blended toward the incoming palette rather than read raw, so a track change moves the
+            // orbs' colour smoothly across the crossfade. Reading colors[] directly meant they held
+            // the old hue for the whole 1.5s fade and then snapped.
+            val cf = colorFade
+            val tint = blend(colors[k % PALETTE_SIZE], targets[k % PALETTE_SIZE], cf)
+            // Slot the orb's own drift into the hue too, so it travels between its colour and its
+            // neighbour's over minutes instead of sitting on one tone forever.
+            val partner = blend(colors[(k + 1) % PALETTE_SIZE], targets[(k + 1) % PALETTE_SIZE], cf)
+            val mixed = blend(tint, partner, ORB_HUE_TRAVEL * (if (k == 0) a1 else if (k == 1) a2 else a3))
+            val key = mixed and 0xF8F8F8.toInt()
             if (orbGrads[k] == null || orbKeys[k] != key) {
                 orbKeys[k] = key
                 orbGrads[k] = RadialGradient(
@@ -526,6 +582,12 @@ class DynamicBackground @JvmOverloads constructor(
         /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */
         private const val ORB_DRIFT_X = 0.10f
         private const val ORB_DRIFT_Y = 0.05f
+
+        /**
+         * How far an orb's colour travels toward its neighbour's over one animator cycle. Enough to
+         * see the hue move on a long track, small enough that the trio never converges on one shade.
+         */
+        private const val ORB_HUE_TRAVEL = 0.34f
 
         /** Starting angle per orb, so they do not set off from the same point on their ellipses. */
         private val ORB_PHASE = floatArrayOf(0f, 2.1f, 4.2f)

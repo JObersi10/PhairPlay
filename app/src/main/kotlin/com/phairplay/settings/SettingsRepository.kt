@@ -145,6 +145,7 @@ class SettingsRepository(private val context: Context) {
         // field always read its default. Persisted now.
         remoteEnabled      = this[Keys.REMOTE_ENABLED]          ?: false,
         projectorMode      = this[Keys.PROJECTOR_MODE]          ?: false,
+        artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
         streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
@@ -179,6 +180,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.REMEMBER_PIN_PAIRING] = settings.rememberPinPairing
         this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
         this[Keys.PROJECTOR_MODE]       = settings.projectorMode
+        this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
         this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
@@ -201,6 +203,7 @@ class SettingsRepository(private val context: Context) {
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
         val REMOTE_ENABLED      = booleanPreferencesKey("remote_enabled")
         val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
+        val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
         val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
