@@ -776,6 +776,24 @@ class PhairPlayAccessibilityService : AccessibilityService() {
         /** Sends [keyCode] system-wide, returning false if the service is not enabled. */
         fun sendKey(keyCode: Int): Boolean = instance?.press(keyCode) ?: false
 
+        /**
+         * Undoes everything the remote leaves lying around, for when the user switches it off.
+         *
+         * Gating [emitRemoteKey] alone stops new presses but leaves the last state on screen: a
+         * ring still drawn over whatever app is in front, a remembered cursor rect that will be
+         * resumed from if the remote is ever turned back on, and a set of packages still marked
+         * hostile from a previous session. Turning a feature off should leave no trace of it.
+         */
+        fun resetRemoteState() {
+            instance?.let { svc ->
+                svc.cursorOverlay?.destroy()
+                svc.cursorOverlay = RemoteCursorOverlay(svc)
+                svc.lastMovedTo = null
+            }
+            hostilePackages.clear()
+            Logger.i("Remote state cleared — cursor, ring and hostile-app list reset")
+        }
+
         /** Ancestor hops allowed when hunting for a clickable parent. */
         private const val MAX_ANCESTOR_WALK = 5
 

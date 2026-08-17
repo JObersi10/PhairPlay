@@ -116,7 +116,7 @@ class PhairPlayService : Service() {
     val remoteKeys = _remoteKeys.asSharedFlow()
 
     /** Mirror of AppSettings.remoteEnabled, so the HAP thread need not touch DataStore. */
-    @Volatile private var remoteEnabled: Boolean = true
+    @Volatile private var remoteEnabled: Boolean = false
 
     private fun emitRemoteKey(keyCode: Int) {
         if (!remoteEnabled) {
@@ -609,6 +609,9 @@ class PhairPlayService : Service() {
 
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
+        // Switching the remote off must also clear what it drew and remembered, not just stop new
+        // presses — otherwise a ring stays on screen over an app that never asked for one.
+        if (!remoteEnabled) PhairPlayAccessibilityService.resetRemoteState()
         if (settings.lastSenderName.isNotBlank()) {
             _lastSender.value = LastSender(settings.lastSenderName, settings.lastSenderAtMs)
         }

@@ -171,7 +171,14 @@ data class AppSettings(
      * having because on Fire OS the D-pad cannot reliably drive other apps, and a remote that
      * half-works is worse than one that is honestly switched off.
      */
-    val remoteEnabled: Boolean = true,
+    /**
+     * OFF by default. The remote works properly inside PhairPlay, but outside it Fire TV refuses
+     * every accessibility focus action, so navigation is faked with a drawn cursor and synthetic
+     * swipes. That is unreliable enough on the launcher and in apps like Netflix that shipping it
+     * on by default makes the whole app look broken. Users who want it can turn it on and are told
+     * plainly what to expect.
+     */
+    val remoteEnabled: Boolean = false,
 
     /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
     val beatPulse: Int = 0,
