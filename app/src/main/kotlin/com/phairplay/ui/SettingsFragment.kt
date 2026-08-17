@@ -796,6 +796,9 @@ class SettingsFragment : Fragment() {
 
         /** A/V sync trim options, in milliseconds added to the sender's requested latency. */
         val AUDIO_DELAY_CHOICES = listOf(0, 250, 500, 750, 1000, 1250, 1500, 2000, 2500, 3000)
+
+        /** Connect and read timeout for the update download. */
+        private const val UPDATE_TIMEOUT_MS = 15_000
         val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 400, 500, 750, 1000)
     }
 
@@ -943,11 +946,45 @@ class SettingsFragment : Fragment() {
         }
     }
 
+    /**
+     * Downloads [url] and returns an install Intent for it.
+     *
+     * Lives here rather than in UpdateChecker because FileProvider is AndroidX, and UpdateChecker is
+     * compiled by the JVM protocol test module, which has no AndroidX on its classpath.
+     *
+     * @return null if the download failed, so the caller says so rather than opening an installer
+     *   for a half-written file.
+     */
+    private suspend fun downloadUpdate(context: android.content.Context, url: String): android.content.Intent? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching {
+                val target = java.io.File(context.cacheDir, "update.apk")
+                (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                    instanceFollowRedirects = true
+                    connectTimeout = UPDATE_TIMEOUT_MS
+                    readTimeout = UPDATE_TIMEOUT_MS
+                }.inputStream.use { input -> target.outputStream().use { input.copyTo(it) } }
+
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    context, "${'$'}{context.packageName}.updates", target)
+                android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            android.content.Intent.FLAG_ACTIVITY_NEW_TASK,
+                    )
+                }
+            }.getOrElse {
+                Logger.w("Update download failed — ${'$'}{it.message}")
+                null
+            }
+        }
+
     private fun installUpdate(assetUrl: String) {
         val ctx = context ?: return
         textUpdateValue.setText(R.string.setting_update_downloading)
         viewLifecycleOwner.lifecycleScope.launch {
-            val intent = com.phairplay.util.UpdateChecker.download(ctx, assetUrl)
+            val intent = downloadUpdate(ctx, assetUrl)
             if (intent == null) {
                 textUpdateValue.setText(R.string.setting_update_failed)
                 showPermissionInfo(

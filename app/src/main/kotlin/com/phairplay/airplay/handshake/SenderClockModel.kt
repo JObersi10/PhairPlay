@@ -154,7 +154,14 @@ class SenderClockModel(private val capacity: Int = DEFAULT_CAPACITY) {
          * At 60s the same 15ms of endpoint noise contributes about 250ppm — still not tight, but the
          * fit is now dominated by real drift rather than by jitter, and the estimate stops swinging.
          */
-        private const val MIN_SPAN_NANOS = 60_000_000_000L
+        // Five seconds, NOT sixty.
+        //
+        // I raised this to 60s mid-session to quieten a skew figure that looked noisy in the device
+        // log, with no measurement behind it. It broke four tests that document the intended
+        // behaviour -- a 40ppm skew is meant to be recoverable from 30 samples over 29 seconds --
+        // and the device log kept swinging between -33ppm and +15ppm afterwards anyway, so the
+        // change did not even achieve what it was guessing at. Reverted.
+        private const val MIN_SPAN_NANOS = 5_000_000_000L
 
         /**
          * 100ppm. Consumer crystals are specified within roughly ±50ppm, so a fit beyond this is
@@ -164,6 +171,9 @@ class SenderClockModel(private val capacity: Int = DEFAULT_CAPACITY) {
          * untouched — the clamp only caught fits that were already absurd, so the plainly wrong
          * 115.6ppm went straight to playback as if measured.
          */
-        private const val MAX_SKEW = 0.0001
+        // 500ppm. Also reverted from the 100ppm I set at the same time and for the same
+        // non-reason: real crystals drift well past 100ppm and clamping there would silently cap a
+        // correction the model had measured correctly.
+        private const val MAX_SKEW = 0.0005
     }
 }

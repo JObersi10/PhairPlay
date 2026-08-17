@@ -1,12 +1,8 @@
 package com.phairplay.util
 
-import android.content.Context
-import android.content.Intent
-import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -17,10 +13,13 @@ import java.net.URL
  * end. Instead the whole path lives here: read the latest release, compare versions, download the
  * APK asset, and hand it to the package installer.
  *
- * WHAT THIS DELIBERATELY DOES NOT DO: install anything on its own. [download] returns an Intent the
- * user has to confirm on the system's own installer screen, and no check runs unless the user opens
- * the settings row. Silent background self-updating is not a thing a sideloaded receiver app should
- * be doing to someone's television.
+ * WHAT THIS DELIBERATELY DOES NOT DO: install anything on its own, or touch Android at all. The
+ * download and the install Intent live in the settings screen; this object is pure JVM so the
+ * version comparison stays covered by the protocol test suite, which compiles app sources WITHOUT
+ * AndroidX. Importing FileProvider here broke that build -- see test-runner/build.gradle.kts.
+ *
+ * No check runs unless the user opens the settings row. Silent background self-updating is not a
+ * thing a sideloaded receiver app should be doing to someone's television.
  */
 object UpdateChecker {
 
@@ -73,32 +72,6 @@ object UpdateChecker {
             .substringBefore('-')
             .split('.')
             .map { it.toIntOrNull() ?: 0 }
-
-    /**
-     * Downloads [url] and returns an install Intent for it.
-     *
-     * @return null if the download failed. The caller says so rather than opening an installer for a
-     *   half-written file.
-     */
-    suspend fun download(context: Context, url: String): Intent? = withContext(Dispatchers.IO) {
-        runCatching {
-            val target = File(context.cacheDir, "update.apk")
-            (URL(url).openConnection() as HttpURLConnection).apply {
-                instanceFollowRedirects = true
-                connectTimeout = TIMEOUT_MS
-                readTimeout = TIMEOUT_MS
-            }.inputStream.use { input -> target.outputStream().use { input.copyTo(it) } }
-
-            val uri = FileProvider.getUriForFile(context, "${context.packageName}.updates", target)
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "application/vnd.android.package-archive")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-        }.getOrElse {
-            Logger.w("Update download failed — ${it.message}")
-            null
-        }
-    }
 
     private fun fetch(url: String): String =
         (URL(url).openConnection() as HttpURLConnection).run {
