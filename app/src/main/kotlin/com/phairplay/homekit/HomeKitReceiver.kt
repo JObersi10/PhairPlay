@@ -280,17 +280,14 @@ class HomeKitReceiver(
             // sf=1 means "discoverable and unpaired". It MUST become 0 once paired, or every
             // controller keeps offering to set up an accessory that is already in a Home.
             setAttribute("sf", if (store.isPaired()) "0" else "1")
-            // CATEGORY, not just the characteristic, decides whether iOS offers a remote.
+            // ALWAYS a Television, even with the remote switched off.
             //
-            // Dropping RemoteKey from the accessory was not enough: the Apple TV Remote in Control
-            // Centre lists HomeKit accessories by CATEGORY, so a category-31 Television keeps
-            // appearing there whether or not it exposes a remote -- which is the "I still see the TV
-            // in the remote app" report. Advertising as an audio receiver takes it out of that list.
-            //
-            // Trade-off, and the reason this is tied to the remote toggle rather than done always:
-            // as an audio receiver the Home app shows PhairPlay as a plain accessory, so the input
-            // list and the TV-style tile go with it. Turning the remote back on restores both.
-            setAttribute("ci", (if (remoteEnabled) CATEGORY_TELEVISION else CATEGORY_AUDIO_RECEIVER).toString())
+            // Advertising as an audio receiver did remove PhairPlay from the Apple TV Remote list,
+            // but the category is also what gives it the TV tile and the input sources in the Home
+            // app, and losing those is a worse trade than an unused remote entry. iOS lists remotes
+            // by category, so with HomeKit on as a TV the entry appears whether or not RemoteKey is
+            // exposed; that is iOS's behaviour, not something this can switch off.
+            setAttribute("ci", CATEGORY_TELEVISION.toString())
             setAttribute("sh", setupHash())
         }
 
@@ -341,8 +338,6 @@ class HomeKitReceiver(
 
     companion object {
         private const val SERVICE_TYPE = "_hap._tcp"
-        /** HAP accessory category 26 — not listed by the Apple TV Remote. */
-        private const val CATEGORY_AUDIO_RECEIVER = 26
         private const val CATEGORY_TELEVISION = 31
         private const val VOLUME_CONTROL_RELATIVE = 1
         private const val INPUT_SOURCE_TYPE_APPLICATION = 10
