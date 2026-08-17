@@ -34,6 +34,9 @@ class SharedMediaPlayer(private val context: Context) {
                 main.post(positionTick)
             }
             p.stop()
+            // A fresh ExoPlayer starts at unity gain, which would silently undo any SetVolume the
+            // control point issued before the first track loaded.
+            p.volume = if (muted) 0f else volumePercent / 100f
             p.setMediaItem(MediaItem.fromUri(url))
             p.prepare()
             p.addListener(object : Player.Listener {
@@ -57,6 +60,21 @@ class SharedMediaPlayer(private val context: Context) {
     fun pause() { main.post { player?.pause() } }
     fun stop()  { main.post { player?.stop(); player?.clearMediaItems() } }
     fun seekTo(ms: Long) { main.post { player?.seekTo(ms) } }
+
+    /** 0..100, as UPnP RenderingControl speaks it. Applied as ExoPlayer's 0f..1f gain. */
+    fun setVolumePercent(percent: Int) {
+        val clamped = percent.coerceIn(0, 100)
+        volumePercent = clamped
+        main.post { player?.volume = if (muted) 0f else clamped / 100f }
+    }
+
+    fun setMuted(mute: Boolean) {
+        muted = mute
+        main.post { player?.volume = if (mute) 0f else volumePercent / 100f }
+    }
+
+    @Volatile var volumePercent: Int = 100; private set
+    @Volatile var muted: Boolean = false; private set
 
     fun release() {
         main.removeCallbacks(positionTick)

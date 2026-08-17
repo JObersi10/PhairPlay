@@ -127,6 +127,61 @@ object AdbShell {
         }
     }
 
+    /**
+     * Every address worth dialling, best first.
+     *
+     * Our own LAN address leads because it is the one that stands a chance: see the note in
+     * [connect]. Loopback is kept last rather than dropped — it is the correct address on any device
+     * whose adbd does not police self-attach, and costs one refused socket where it isn't.
+     */
+    private fun candidateHosts(): List<String> =
+        listOfNotNull(localAddress(), HOST).distinct()
+
+    /**
+     * This device's own address on the LAN. Enumerated from the interfaces rather than read from
+     * WifiManager so a Fire TV on ethernet is handled the same as one on wifi.
+     */
+    private fun localAddress(): String? = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces().toList()
+            .filter { it.isUp && !it.isLoopback }
+            .flatMap { it.inetAddresses.toList() }
+            .firstOrNull { !it.isLoopbackAddress && it is java.net.Inet4Address }
+            ?.hostAddress
+    }.getOrNull()
+
+    /**
+     * Decides whether adbd intends to serve this connection, before we commit to it.
+     *
+     * "Broken pipe" on the first write means the socket was accepted and then reset, which could be
+     * either adbd disliking our banner or adbd refusing us outright. Those need completely different
+     * responses, and guessing between them has already cost a build. A short read separates them:
+     * adbd stays silent and waits for CNXN on a connection it intends to serve, so an immediate
+     * end-of-stream means it hung up before we said a word.
+     *
+     * Leaves [pushback] and [input] wired to the surviving socket, with any greeting byte unread.
+     */
+    private fun survivesRefusalProbe(sock: Socket, host: String): Boolean {
+        val pb = PushbackInputStream(sock.getInputStream(), 1)
+        val stream = DataInputStream(pb)
+        sock.soTimeout = PROBE_TIMEOUT_MS
+        val probe = runCatching { stream.read() }.getOrElse { -2 }
+        sock.soTimeout = READ_TIMEOUT_MS
+        if (probe == -1) {
+            Logger.i("ADB: adbd hung up on $host before the handshake — refusing connections from there")
+            return false
+        }
+        if (probe >= 0) {
+            pb.unread(probe)
+            Logger.i("ADB: adbd greeted us first (0x${probe.toString(16)}) — pushed back")
+        } else {
+            Logger.i("ADB: adbd on $host is waiting for CNXN, as expected")
+        }
+        pushback = pb
+        input = stream
+        Logger.i("ADB: socket open to $host:$PORT")
+        return true
+    }
+
     /** adbd hung up before the handshake — a policy decision, not a protocol error. */
     private class RefusedByDaemon(message: String) : IllegalStateException(message)
 
@@ -139,41 +194,41 @@ object AdbShell {
         // more reason adbd might hang up that has nothing to do with the protocol.
         val keys = loadOrCreateKey(context)
 
-        val sock = Socket().apply {
-            tcpNoDelay = true
-            connect(InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS)
-            soTimeout = READ_TIMEOUT_MS
+        // Try each candidate address before declaring defeat. adbd's self-attach block is a check on
+        // the PEER address of the incoming connection: a connection from 127.0.0.1 is visibly the
+        // device talking to itself and gets hung up on before the handshake, which is exactly what
+        // the device log showed. Dialling our own LAN address instead sends the packets out through
+        // the network stack, so the peer address adbd sees is 192.168.x.x -- indistinguishable from
+        // the developer machine it is happy to serve. Whether Fire OS blocks that too is the open
+        // question this answers; loopback stays in the list as the fallback for devices that allow it.
+        var sock: Socket? = null
+        var lastFailure: Throwable? = null
+        for (host in candidateHosts()) {
+            val attempt = runCatching {
+                Socket().apply {
+                    tcpNoDelay = true
+                    connect(InetSocketAddress(host, PORT), CONNECT_TIMEOUT_MS)
+                    soTimeout = READ_TIMEOUT_MS
+                }
+            }
+            if (attempt.isFailure) {
+                lastFailure = attempt.exceptionOrNull()
+                Logger.i("ADB: $host:$PORT unreachable — ${lastFailure?.message}")
+                continue
+            }
+            val candidate = attempt.getOrThrow()
+            // A socket that opens is not a socket adbd will serve. Probe this one before committing,
+            // so a loopback refusal doesn't consume the attempt the LAN address would have won.
+            if (survivesRefusalProbe(candidate, host)) { sock = candidate; break }
+            runCatching { candidate.close() }
+            lastFailure = RefusedByDaemon("adbd refused the connection from $host before the handshake")
+        }
+        if (sock == null) {
+            throw (lastFailure as? RefusedByDaemon)
+                ?: RefusedByDaemon("no address reachable on port $PORT — ${lastFailure?.message}")
         }
         socket = sock
-        // Pushback, so the pre-handshake probe below can put a byte back if adbd greets us first.
-        pushback = PushbackInputStream(sock.getInputStream(), 1)
-        input = DataInputStream(pushback)
         output = sock.getOutputStream()
-        Logger.i("ADB: socket open to $HOST:$PORT")
-
-        // Before writing anything, find out whether adbd actually wants to talk to us.
-        //
-        // "Broken pipe" on the very first write means the socket was accepted and then reset, which
-        // could be either adbd disliking our banner or adbd refusing the connection outright. Those
-        // need completely different responses, and guessing between them has already cost a build.
-        // A short read first separates them: adbd stays silent and waits for CNXN on a connection it
-        // intends to serve, so an immediate end-of-stream means it hung up on us before we said a
-        // word -- nothing about our protocol handling can fix that.
-        sock.soTimeout = PROBE_TIMEOUT_MS
-        val probe = runCatching { input!!.read() }.getOrElse { -2 }
-        sock.soTimeout = READ_TIMEOUT_MS
-        when (probe) {
-            -1 -> throw RefusedByDaemon(
-                "adbd closed the connection before the handshake — it is refusing local connections " +
-                    "(SELinux or adbd policy), not rejecting our protocol",
-            )
-            -2 -> Logger.i("ADB: adbd is waiting for CNXN, as expected")
-            else -> {
-                // adbd greeted us first. Put the byte back so the header parse still sees it.
-                pushback?.unread(probe)
-                Logger.i("ADB: adbd greeted us first (0x${probe.toString(16)}) — pushed back")
-            }
-        }
 
         // NUL-terminated, like every adb payload -- adbd parses these as C strings.
         send(A_CNXN, VERSION, MAX_PAYLOAD, "host::features=shell_v2,cmd\u0000".toByteArray())

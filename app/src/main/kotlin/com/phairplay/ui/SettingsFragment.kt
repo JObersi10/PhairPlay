@@ -76,12 +76,15 @@ class SettingsFragment : Fragment() {
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
     private lateinit var rowRememberPin: View
+    private lateinit var rowRemoteEnabled: View
     private lateinit var rowInputApps: LinearLayout
     private lateinit var textInputAppsValue: TextView
     private lateinit var rowForgetPairings: LinearLayout
     private lateinit var rowPermRemote: LinearLayout
+    private lateinit var rowPermOverlay: LinearLayout
     private lateinit var rowPermSleep: LinearLayout
     private lateinit var textPermRemoteValue: TextView
+    private lateinit var textPermOverlayValue: TextView
     private lateinit var textPermSleepValue: TextView
     private lateinit var rowSenderVolume: LinearLayout
     private lateinit var textSenderVolumeValue: TextView
@@ -145,12 +148,15 @@ class SettingsFragment : Fragment() {
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
         rowRememberPin      = view.findViewById(R.id.row_remember_pin)
+        rowRemoteEnabled    = view.findViewById(R.id.row_remote_enabled)
         rowInputApps        = view.findViewById(R.id.row_input_apps)
         textInputAppsValue  = view.findViewById(R.id.text_input_apps_value)
         rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
         rowPermRemote       = view.findViewById(R.id.row_perm_remote)
+        rowPermOverlay      = view.findViewById(R.id.row_perm_overlay)
         rowPermSleep        = view.findViewById(R.id.row_perm_sleep)
         textPermRemoteValue = view.findViewById(R.id.text_perm_remote_value)
+        textPermOverlayValue = view.findViewById(R.id.text_perm_overlay_value)
         textPermSleepValue  = view.findViewById(R.id.text_perm_sleep_value)
         rowSenderVolume     = view.findViewById(R.id.row_sender_volume)
         textSenderVolumeValue = view.findViewById(R.id.text_sender_volume_value)
@@ -197,6 +203,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
+        configureToggleRow(rowRemoteEnabled, R.string.setting_remote,             R.string.setting_remote_subtitle)
         configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
@@ -280,6 +287,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowForceHighRes, settings.forceHighResolution)
         textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
+        setToggle(rowRemoteEnabled, settings.remoteEnabled)
         showSenderVolumeMode(settings.senderVolumeMode)
         setToggle(rowScreensaver,  settings.screensaverEnabled)
         showScreensaverTimeout(settings.screensaverTimeoutMin)
@@ -369,8 +377,10 @@ class SettingsFragment : Fragment() {
         rowScreensaverTimeout.setOnClickListener { showScreensaverTimeoutDialog() }
         rowSenderVolume.setOnClickListener { showSenderVolumeDialog() }
         setToggleListener(rowRememberPin) { enabled -> saveAndRestart { it.copy(rememberPinPairing = enabled) } }
+        setToggleListener(rowRemoteEnabled) { enabled -> saveAndRestart { it.copy(remoteEnabled = enabled) } }
         rowForgetPairings.setOnClickListener { forgetPairings() }
         rowPermRemote.setOnClickListener { grantRemoteControl() }
+        rowPermOverlay.setOnClickListener { grantOverlay() }
         rowPermSleep.setOnClickListener { grantSleep() }
 
         rowUpdate.setOnClickListener { checkForUpdate() }
@@ -846,6 +856,10 @@ class SettingsFragment : Fragment() {
             if (SystemPermissions.isAccessibilityGranted(ctx)) R.string.setting_perm_on
             else R.string.setting_perm_off,
         )
+        textPermOverlayValue.setText(
+            if (SystemPermissions.isOverlayGranted(ctx)) R.string.setting_perm_on
+            else R.string.setting_perm_off,
+        )
         textPermSleepValue.setText(
             if (SystemPermissions.isDeviceAdminGranted(ctx)) R.string.setting_perm_on
             else R.string.setting_perm_off,
@@ -885,6 +899,33 @@ class SettingsFragment : Fragment() {
             .setNeutralButton(R.string.setting_perm_open_settings) { _, _ ->
                 SystemPermissions.openAccessibilitySettings(ctx)
             }
+            .show()
+    }
+
+    /**
+     * Sends the user to "Display over other apps" so the remote can draw its own focus ring.
+     *
+     * Unlike the accessibility service this one IS reachable from a normal system screen, and the
+     * package-scoped Intent lands on PhairPlay's own entry rather than an alphabetical list of every
+     * installed app — which on a TV, navigated by D-pad, is the difference between an instruction
+     * someone follows and one they abandon.
+     */
+    private fun grantOverlay() {
+        val ctx = context ?: return
+        if (SystemPermissions.isOverlayGranted(ctx)) {
+            showPermissionInfo(
+                R.string.setting_perm_overlay,
+                getString(R.string.setting_perm_overlay_granted),
+            )
+            return
+        }
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.setting_perm_overlay)
+            .setMessage(R.string.setting_perm_overlay_explanation)
+            .setPositiveButton(R.string.setting_perm_open_settings) { _, _ ->
+                SystemPermissions.openOverlaySettings(ctx)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
             .show()
     }
 

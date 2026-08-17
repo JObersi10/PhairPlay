@@ -38,6 +38,19 @@ class DlnaServer(
     @Volatile private var currentUrl: String? = null
     @Volatile private var transportState = "STOPPED"
 
+    /**
+     * Live GENA subscriptions, keyed by SID.
+     *
+     * Previously a SUBSCRIBE got exactly one event — the initial one — and was then forgotten. A
+     * control point learns transport state ONLY from these NOTIFYs, so it kept believing the
+     * renderer was STOPPED forever and greyed out pause, stop and the volume slider; Play was the
+     * one control still legal from STOPPED, which is exactly the symptom seen in UMS.
+     */
+    private class Subscription(val callbackUrl: String, val service: String) {
+        var seq: Int = 0
+    }
+    private val subscriptions = java.util.concurrent.ConcurrentHashMap<String, Subscription>()
+
     /** Returns true only if the HTTP listener bound; false means DLNA is not actually serving. */
     fun start(): Boolean {
         running = true
@@ -59,6 +72,19 @@ class DlnaServer(
         onStateChanged(ProtocolState.ADVERTISING)
         Logger.i("DLNA server started — HTTP :$HTTP_PORT  SSDP multicast")
         return true
+    }
+
+    /**
+     * Ends the current render without tearing the server down — the DLNA equivalent of hanging up on
+     * one sender. Back on the TV calls this; the renderer stays advertised for the next push.
+     */
+    fun endSession() {
+        setTransportState("STOPPED")
+        mediaPlayer.stop()
+        currentUrl = null
+        onNowPlayingChanged(null)
+        onStateChanged(ProtocolState.ADVERTISING)
+        Logger.i("DLNA render ended by user")
     }
 
     fun stop() {
@@ -147,12 +173,30 @@ class DlnaServer(
                 method == "POST" && path == "/RenderingControl/control" -> Triple(200, "text/xml", handleRc(soapAction, body))
                 method == "POST" && path == "/ConnectionManager/control" -> Triple(200, "text/xml", handleCm(soapAction))
                 method == "SUBSCRIBE" -> {
-                    subscribeSid = "uuid:" + java.util.UUID.randomUUID()
-                    // CALLBACK is "<http://host:port/path>" — possibly several, space separated.
-                    headers["callback"]
-                        ?.substringAfter('<')?.substringBefore('>')
-                        ?.takeIf { it.startsWith("http") }
-                        ?.let { sendInitialEvent(it, subscribeSid, path) }
+                    // A SUBSCRIBE with a SID and no CALLBACK is a renewal, not a new subscription.
+                    // Minting a fresh SID for it orphaned the entry we were about to send events to.
+                    val renewal = headers["sid"]?.takeIf { subscriptions.containsKey(it) }
+                    if (renewal != null) {
+                        subscribeSid = renewal
+                    } else {
+                        val sid = "uuid:" + java.util.UUID.randomUUID()
+                        subscribeSid = sid
+                        // CALLBACK is "<http://host:port/path>" — possibly several, space separated.
+                        headers["callback"]
+                            ?.substringAfter('<')?.substringBefore('>')
+                            ?.takeIf { it.startsWith("http") }
+                            ?.let { cb ->
+                                subscriptions[sid] = Subscription(cb, path.substringAfter('/').substringBefore('/'))
+                                sendEvent(sid, initial = true)
+                            }
+                    }
+                    Triple(200, "text/plain", "")
+                }
+                method == "UNSUBSCRIBE" -> {
+                    // This used to answer 404 for every UNSUBSCRIBE, which tells a control point the
+                    // renderer forgot it — some then drop the device outright rather than resubscribe.
+                    headers["sid"]?.let { subscriptions.remove(it) }
+                    stopIfControlPointLeft()
                     Triple(200, "text/plain", "")
                 }
                 else -> Triple(404, "text/plain", "Not Found")
@@ -182,46 +226,57 @@ class DlnaServer(
 
     // ── AVTransport SOAP ───────────────────────────────────────────────────
 
-    private fun handleAvt(action: String, body: String): String {
+    internal fun handleAvt(action: String, body: String): String {
         return when (action) {
             "SetAVTransportURI" -> {
                 val url = body.extractTag("CurrentURI")?.takeIf { it.isNotBlank() }
                 Logger.i("DLNA SetAVTransportURI url=$url")
                 if (url != null) {
                     currentUrl = url
-                    transportState = "STOPPED"
-                    val title  = body.extractDidlTag("dc:title")
-                    val artist = body.extractDidlTag("upnp:artist") ?: body.extractDidlTag("dc:creator")
-                    val album  = body.extractDidlTag("upnp:album")
+                    setTransportState("TRANSITIONING")
+                    // The DIDL-Lite document arrives ENTITY-ESCAPED inside <CurrentURIMetaData>, so
+                    // its tags are `&lt;dc:title&gt;` in the raw body and no tag regex could ever
+                    // match them. Unescaping first is the whole fix — every title, artist and album
+                    // logged null before this, which is also why the now-playing screen had nothing
+                    // to draw.
+                    val didl = body.extractTag("CurrentURIMetaData").orEmpty().ifBlank { body }.unescapeXml()
+                    // A renderer with no title on screen is useless, and some control points send
+                    // no metadata at all — the file name beats an empty card.
+                    val title  = didl.extractDidlTag("dc:title") ?: titleFromUrl(url)
+                    val artist = didl.extractDidlTag("upnp:artist") ?: didl.extractDidlTag("dc:creator")
+                    val album  = didl.extractDidlTag("upnp:album")
                     Logger.i("DLNA metadata title=$title artist=$artist album=$album")
+                    // Published here rather than from the load callback: the track is known the
+                    // moment the control point names it, and waiting for ExoPlayer to reach READY
+                    // left the screen on the idle card for the whole buffering window.
+                    onNowPlayingChanged(com.phairplay.airplay.NowPlayingInfo(
+                        senderName = "DLNA",
+                        title = title,
+                        artist = artist,
+                        album = album
+                    ))
+                    onStateChanged(ProtocolState.CONNECTED)
                     mediaPlayer.load(url) {
                         Logger.i("DLNA ExoPlayer ready — playing")
-                        transportState = "PLAYING"
+                        setTransportState("PLAYING")
                         mediaPlayer.play()
-                        onNowPlayingChanged(com.phairplay.airplay.NowPlayingInfo(
-                            senderName = "DLNA",
-                            title = title,
-                            artist = artist,
-                            album = album
-                        ))
                     }
-                    onStateChanged(ProtocolState.CONNECTED)
                 }
                 soapOk("AVTransport", "SetAVTransportURIResponse")
             }
             "Play" -> {
                 Logger.i("DLNA Play (transportState=$transportState url=$currentUrl)")
-                transportState = "PLAYING"; mediaPlayer.play()
+                setTransportState("PLAYING"); mediaPlayer.play()
                 soapOk("AVTransport", "PlayResponse")
             }
             "Pause" -> {
                 Logger.i("DLNA Pause")
-                transportState = "PAUSED_PLAYBACK"; mediaPlayer.pause()
+                setTransportState("PAUSED_PLAYBACK"); mediaPlayer.pause()
                 soapOk("AVTransport", "PauseResponse")
             }
             "Stop" -> {
                 Logger.i("DLNA Stop")
-                transportState = "STOPPED"; mediaPlayer.stop(); currentUrl = null
+                setTransportState("STOPPED"); mediaPlayer.stop(); currentUrl = null
                 onNowPlayingChanged(null)
                 onStateChanged(ProtocolState.ADVERTISING)
                 soapOk("AVTransport", "StopResponse")
@@ -264,16 +319,35 @@ class DlnaServer(
         }
     }
 
-    // `body` is unread on purpose-for-now: SetVolume carries the requested level in its SOAP body and
-    // this handler acknowledges it without applying it, so the control point sees success and no
-    // volume change. Kept in the signature because fixing that means parsing this body, not removing
-    // it. Same shape as the AVTransport handler above.
-    @Suppress("UNUSED_PARAMETER")
-    private fun handleRc(action: String, body: String): String = when (action) {
-        "SetVolume" -> soapOk("RenderingControl", "SetVolumeResponse")
-        "GetVolume" -> soapResponse("RenderingControl", "GetVolumeResponse", "<CurrentVolume>100</CurrentVolume>")
-        "SetMute"   -> soapOk("RenderingControl", "SetMuteResponse")
-        "GetMute"   -> soapResponse("RenderingControl", "GetMuteResponse", "<CurrentMute>0</CurrentMute>")
+    /**
+     * RenderingControl. SetVolume and SetMute used to answer OK and do nothing at all, so a control
+     * point's slider moved and the sound never changed. They drive the ExoPlayer gain now, and the
+     * getters report the real value instead of a hardcoded 100.
+     */
+    internal fun handleRc(action: String, body: String): String = when (action) {
+        "SetVolume" -> {
+            val level = body.extractTag("DesiredVolume")?.toIntOrNull()
+            if (level != null) {
+                mediaPlayer.setVolumePercent(level)
+                Logger.i("DLNA SetVolume $level")
+                notifySubscribers("RenderingControl")
+            }
+            soapOk("RenderingControl", "SetVolumeResponse")
+        }
+        "GetVolume" -> soapResponse("RenderingControl", "GetVolumeResponse",
+            "<CurrentVolume>${mediaPlayer.volumePercent}</CurrentVolume>")
+        "SetMute"   -> {
+            // UPnP booleans arrive as either "1"/"0" or "true"/"false" depending on the sender.
+            val desired = body.extractTag("DesiredMute")?.trim()
+            if (desired != null) {
+                mediaPlayer.setMuted(desired == "1" || desired.equals("true", ignoreCase = true))
+                Logger.i("DLNA SetMute ${mediaPlayer.muted}")
+                notifySubscribers("RenderingControl")
+            }
+            soapOk("RenderingControl", "SetMuteResponse")
+        }
+        "GetMute"   -> soapResponse("RenderingControl", "GetMuteResponse",
+            "<CurrentMute>${if (mediaPlayer.muted) 1 else 0}</CurrentMute>")
         else        -> soapOk("RenderingControl", "${action}Response")
     }
 
@@ -406,7 +480,7 @@ class DlnaServer(
   <s:Body><u:$action xmlns:u="urn:schemas-upnp-org:service:$svc:1">$inner</u:$action></s:Body>
 </s:Envelope>"""
 
-    private fun avtScpd() = """<?xml version="1.0"?>
+    internal fun avtScpd() = """<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <actionList>
@@ -452,7 +526,9 @@ class DlnaServer(
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>AVTransportURI</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>AVTransportURIMetaData</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="yes"><name>TransportState</name><dataType>string</dataType><allowedValueList><allowedValue>STOPPED</allowedValue><allowedValue>PLAYING</allowedValue><allowedValue>PAUSED_PLAYBACK</allowedValue><allowedValue>TRANSITIONING</allowedValue></allowedValueList></stateVariable>
+    <stateVariable sendEvents="no"><name>TransportState</name><dataType>string</dataType><allowedValueList><allowedValue>STOPPED</allowedValue><allowedValue>PLAYING</allowedValue><allowedValue>PAUSED_PLAYBACK</allowedValue><allowedValue>TRANSITIONING</allowedValue></allowedValueList></stateVariable>
+    <!-- See the note in rcScpd: AVTransport events through LastChange only. -->
+    <stateVariable sendEvents="yes"><name>LastChange</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>TransportStatus</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>TransportPlaySpeed</name><dataType>string</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>CurrentTrack</name><dataType>ui4</dataType></stateVariable>
@@ -468,7 +544,7 @@ class DlnaServer(
   </serviceStateTable>
 </scpd>"""
 
-    private fun rcScpd() = """<?xml version="1.0"?>
+    internal fun rcScpd() = """<?xml version="1.0"?>
 <scpd xmlns="urn:schemas-upnp-org:service-1-0">
   <specVersion><major>1</major><minor>0</minor></specVersion>
   <actionList>
@@ -482,11 +558,27 @@ class DlnaServer(
       <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>
       <argument><name>CurrentVolume</name><direction>out</direction><relatedStateVariable>Volume</relatedStateVariable></argument>
     </argumentList></action>
+    <action><name>SetMute</name><argumentList>
+      <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+      <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>
+      <argument><name>DesiredMute</name><direction>in</direction><relatedStateVariable>Mute</relatedStateVariable></argument>
+    </argumentList></action>
+    <action><name>GetMute</name><argumentList>
+      <argument><name>InstanceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_InstanceID</relatedStateVariable></argument>
+      <argument><name>Channel</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_Channel</relatedStateVariable></argument>
+      <argument><name>CurrentMute</name><direction>out</direction><relatedStateVariable>Mute</relatedStateVariable></argument>
+    </argumentList></action>
   </actionList>
   <serviceStateTable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_InstanceID</name><dataType>ui4</dataType></stateVariable>
     <stateVariable sendEvents="no"><name>A_ARG_TYPE_Channel</name><dataType>string</dataType></stateVariable>
-    <stateVariable sendEvents="yes"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange></stateVariable>
+    <stateVariable sendEvents="no"><name>Volume</name><dataType>ui2</dataType><allowedValueRange><minimum>0</minimum><maximum>100</maximum><step>1</step></allowedValueRange></stateVariable>
+    <stateVariable sendEvents="no"><name>Mute</name><dataType>boolean</dataType></stateVariable>
+    <!-- UPnP AV events the whole service through LastChange, never the individual variables. Volume
+         was marked sendEvents="yes" while the NOTIFY body carried LastChange, so a strict control
+         point (UMS is Cling-based, and Cling is strict) saw an event for a variable it had not been
+         told to expect and discarded it. -->
+    <stateVariable sendEvents="yes"><name>LastChange</name><dataType>string</dataType></stateVariable>
   </serviceStateTable>
 </scpd>"""
 
@@ -514,12 +606,16 @@ class DlnaServer(
      *
      * Sent over a raw socket because HttpURLConnection refuses the non-standard NOTIFY verb.
      */
-    private fun sendInitialEvent(callbackUrl: String, sid: String, path: String) {
+    private fun sendEvent(sid: String, initial: Boolean = false) {
+        val sub = subscriptions[sid] ?: return
+        val callbackUrl = sub.callbackUrl
+        val seq = if (initial) 0 else ++sub.seq
         Thread {
             runCatching {
-                val lastChange = if (path.startsWith("/RenderingControl")) {
+                val lastChange = if (sub.service == "RenderingControl") {
                     """<Event xmlns="urn:schemas-upnp-org:metadata-1-0/RCS/"><InstanceID val="0">""" +
-                        """<Volume channel="Master" val="100"/><Mute channel="Master" val="0"/></InstanceID></Event>"""
+                        """<Volume channel="Master" val="${mediaPlayer.volumePercent}"/>""" +
+                        """<Mute channel="Master" val="${if (mediaPlayer.muted) 1 else 0}"/></InstanceID></Event>"""
                 } else {
                     """<Event xmlns="urn:schemas-upnp-org:metadata-1-0/AVT/"><InstanceID val="0">""" +
                         """<TransportState val="$transportState"/>""" +
@@ -535,16 +631,56 @@ class DlnaServer(
                     "HOST: ${url.host}:$port\r\n" +
                     "CONTENT-TYPE: text/xml; charset=\"utf-8\"\r\n" +
                     "NT: upnp:event\r\nNTS: upnp:propchange\r\n" +
-                    "SID: $sid\r\nSEQ: 0\r\n" +
+                    "SID: $sid\r\nSEQ: $seq\r\n" +
                     "CONTENT-LENGTH: ${bytes.size}\r\nConnection: close\r\n\r\n"
 
                 java.net.Socket().use { sock ->
                     sock.connect(java.net.InetSocketAddress(url.host, port), 5_000)
                     sock.getOutputStream().apply { write(request.toByteArray()); write(bytes); flush() }
                 }
-                Logger.i("DLNA initial event sent to $callbackUrl sid=$sid")
-            }.onFailure { Logger.w("DLNA initial event to $callbackUrl failed: ${it.message}") }
+                Logger.i("DLNA event seq=$seq ${sub.service} -> $callbackUrl sid=$sid")
+            }.onFailure {
+                Logger.w("DLNA event to $callbackUrl failed: ${it.message}")
+                // A callback that refuses connections is a control point that went away. Keeping it
+                // means every later state change spends five seconds timing out against it.
+                if (!initial) subscriptions.remove(sid)
+            }
         }.also { it.isDaemon = true; it.name = "dlna-event"; it.start() }
+    }
+
+    /**
+     * Ends playback once the last subscription is gone.
+     *
+     * UPnP does not say a renderer must stop when a control point unsubscribes — strictly, the two
+     * are unrelated. In practice a control point unsubscribes from all three services exactly when
+     * the user closes it or stops the renderer, and leaving music playing out of a TV with no way
+     * left to control it is the wrong behaviour for a receiver on someone's television.
+     *
+     * The delay is the safety margin: a control point that is merely resubscribing (a renewal that
+     * arrived as UNSUBSCRIBE + SUBSCRIBE rather than a SID refresh) gets its new subscription in
+     * well inside the window, and the pending stop is abandoned.
+     */
+    private fun stopIfControlPointLeft() {
+        if (subscriptions.isNotEmpty()) return
+        if (transportState == "STOPPED") return
+        Logger.i("DLNA last subscription dropped — stopping in ${LEAVE_GRACE_MS}ms unless one returns")
+        Thread {
+            Thread.sleep(LEAVE_GRACE_MS)
+            if (!running || subscriptions.isNotEmpty() || transportState == "STOPPED") return@Thread
+            Logger.i("DLNA control point gone — stopping playback")
+            setTransportState("STOPPED")
+            mediaPlayer.stop()
+            currentUrl = null
+            onNowPlayingChanged(null)
+            onStateChanged(ProtocolState.ADVERTISING)
+        }.also { it.isDaemon = true; it.name = "dlna-leave"; it.start() }
+    }
+
+    /** Pushes the current state to every live subscription of one service. */
+    private fun notifySubscribers(service: String) {
+        subscriptions.entries
+            .filter { it.value.service == service }
+            .forEach { sendEvent(it.key) }
     }
 
     /** GENA carries the LastChange document as escaped text inside the propertyset. */
@@ -581,13 +717,35 @@ class DlnaServer(
         "<$tag[^>]*>([^<]*)</$tag>".toRegex().find(this)?.groupValues?.getOrNull(1)
 
     private fun String.extractDidlTag(tag: String): String? =
-        extractTag(tag)?.trim()
-            ?.replace("&amp;", "&")?.replace("&lt;", "<")?.replace("&gt;", ">")
-            ?.replace("&quot;", "\"")?.replace("&apos;", "'")
-            ?.ifBlank { null }
+        extractTag(tag)?.trim()?.ifBlank { null }
+
+    /**
+     * `&lt;` before `&amp;`, deliberately: unescaping ampersands first would turn a literal
+     * `&amp;lt;` in a track title into a spurious tag delimiter.
+     */
+    private fun String.unescapeXml() =
+        replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", "\"").replace("&apos;", "'")
+            .replace("&amp;", "&")
+
+    /** Last path segment of the media URL, cleaned up enough to read as a track name. */
+    private fun titleFromUrl(url: String): String? =
+        url.substringAfterLast('/').substringBefore('?')
+            .let { java.net.URLDecoder.decode(it, "UTF-8") }
+            .substringBeforeLast('.')
+            .replace('-', ' ').replace('_', ' ')
+            .trim().ifBlank { null }
+
+    /** Single place a transport state changes, so no path can forget to tell the subscribers. */
+    private fun setTransportState(state: String) {
+        if (transportState == state) return
+        transportState = state
+        notifySubscribers("AVTransport")
+    }
 
     companion object {
         const val HTTP_PORT = 8200
+        private const val LEAVE_GRACE_MS = 3_000L
         private const val SSDP_ADDR = "239.255.255.250"
         private const val SSDP_PORT = 1900
     }

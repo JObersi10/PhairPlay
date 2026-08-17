@@ -115,7 +115,14 @@ class PhairPlayService : Service() {
     private val _remoteKeys = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 16)
     val remoteKeys = _remoteKeys.asSharedFlow()
 
+    /** Mirror of AppSettings.remoteEnabled, so the HAP thread need not touch DataStore. */
+    @Volatile private var remoteEnabled: Boolean = true
+
     private fun emitRemoteKey(keyCode: Int) {
+        if (!remoteEnabled) {
+            Logger.i("Remote key $keyCode ignored — the remote is switched off in Settings")
+            return
+        }
         // System-wide first. With the accessibility service enabled the remote drives whatever is
         // actually on screen -- the launcher, Netflix, anything -- which is the point of having it.
         // Crucially we must NOT bring PhairPlay forward in that case: yanking the app to the front
@@ -344,9 +351,22 @@ class PhairPlayService : Service() {
         // Drop just this sender. Restarting every receiver took mDNS down and put it straight back,
         // which the sender treated as an invitation to reconnect — Back appeared to do nothing on
         // the phone. Fall back to a restart only if AirPlay isn't the thing that's streaming.
+        // Whatever is actually playing is what Back has to end. This asked the AirPlay receiver and
+        // nothing else — and the AirPlay receiver is non-null whenever AirPlay is merely *enabled*,
+        // so a DLNA render took the first branch, ended an AirPlay session that wasn't running, and
+        // left the music playing with the screen already gone.
+        var ended = false
+        if (dlnaServer != null && _dlnaState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending DLNA render")
+            dlnaServer?.endSession()
+            ended = true
+        }
         val receiver = airPlayReceiver
-        if (receiver != null) receiver.endSession()
-        else serviceScope.launch { restartReceivers() }
+        if (receiver != null && _airPlayState.value == ProtocolState.CONNECTED) {
+            receiver.endSession()
+            ended = true
+        }
+        if (!ended) serviceScope.launch { restartReceivers() }
     }
 
     /**
@@ -588,6 +608,7 @@ class PhairPlayService : Service() {
         Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, DLNA=${settings.dlnaEnabled}")
 
         senderVolumeMode = settings.senderVolumeMode
+        remoteEnabled = settings.remoteEnabled
         if (settings.lastSenderName.isNotBlank()) {
             _lastSender.value = LastSender(settings.lastSenderName, settings.lastSenderAtMs)
         }
@@ -630,7 +651,14 @@ class PhairPlayService : Service() {
             com.phairplay.homekit.HomeKitReceiver(
                 context = applicationContext,
                 actions = bridge,
-                deviceName = { settings.displayName.ifBlank { android.os.Build.MODEL } },
+                // Same name AirPlay advertises, not Build.MODEL. These disagreed whenever the user
+                // left the display name blank: AirPlay fell back to the device's friendly name
+                // ("Living room Fire TV") while HomeKit fell back to the model code ("AFTKM"), so
+                // the Home app showed a different device from the AirPlay picker.
+                deviceName = {
+                    settings.effectiveDisplayName
+                        .ifBlank { com.phairplay.util.NetworkUtils.getDeviceName(this) }
+                },
                 extraInputs = inputAppEntries(settings),
             ).also {
                 it.start()
@@ -734,10 +762,19 @@ class PhairPlayService : Service() {
      * Used for applying settings changes or recovering from errors.
      */
     private suspend fun restartReceivers() {
-        Logger.i("Restarting all receivers")
+        // HomeKit SURVIVES a receiver restart.
+        //
+        // It did not, and that was doing real damage. Every restart tore down the HAP server and
+        // brought it back on a fresh port, killing every controller connection mid-flight. Worse,
+        // turning the TV off from the Home app routes through endCurrentSession, which falls back
+        // to a restart when no stream is running -- so the Home app's own command destroyed the
+        // server it had just sent that command to, and then had nothing left to receive the state
+        // change on. The tile sitting on a stale value and the iPad's remote picker being
+        // unreliable are both downstream of this.
+        Logger.i("Restarting streaming receivers (HomeKit stays up)")
         _serviceState.value = ServiceState.Restarting
         updateNotification(isRunning = false)
-        stopAllReceiversInternal()
+        stopAllReceiversInternal(includeHomeKit = false)
         kotlinx.coroutines.delay(500) // brief pause to ensure ports are released
         startReceivers()
     }
@@ -955,8 +992,13 @@ class PhairPlayService : Service() {
             context = applicationContext,
             onStateChanged = { state ->
                 _dlnaState.value = state
-                if (state == ProtocolState.CONNECTED) bringAppToFront()
-                if (state != ProtocolState.CONNECTED) _nowPlaying.value = null
+                if (state == ProtocolState.CONNECTED) {
+                    bringAppToFront()
+                    _activeConnection.value = ActiveConnection("DLNA", Protocol.DLNA)
+                } else {
+                    _nowPlaying.value = null
+                    _activeConnection.value = null
+                }
             },
             onNowPlayingChanged = { info -> _nowPlaying.value = info }
         ).also {
@@ -966,7 +1008,12 @@ class PhairPlayService : Service() {
         }
     }
 
-    private fun stopAllReceiversInternal() {
+    /**
+     * @param includeHomeKit false leaves the HomeKit accessory running across the teardown.
+     *   HomeKit shares nothing with the streaming receivers -- different port, different identity,
+     *   different lifetime -- so restarting AirPlay has never been a reason to drop it.
+     */
+    private fun stopAllReceiversInternal(includeHomeKit: Boolean = true) {
         releaseStreamLocks()
         releaseWifiLock()
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
@@ -975,7 +1022,7 @@ class PhairPlayService : Service() {
         airPlayReceiver = null
         miracastReceiver = null
         dlnaServer = null
-        stopHomeKit()
+        if (includeHomeKit) stopHomeKit()
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED

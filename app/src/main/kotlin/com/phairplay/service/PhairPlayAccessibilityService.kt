@@ -34,20 +34,28 @@ import com.phairplay.util.Logger
  */
 class PhairPlayAccessibilityService : AccessibilityService() {
 
+    /** Our own focus ring, for apps that refuse to move theirs. Null until the service connects. */
+    private var cursorOverlay: RemoteCursorOverlay? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        cursorOverlay = RemoteCursorOverlay(this)
         Logger.i("Accessibility service connected — system-wide remote control available")
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         instance = null
+        cursorOverlay?.destroy()
+        cursorOverlay = null
         Logger.i("Accessibility service disconnected — remote falls back to in-app keys")
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
         instance = null
+        cursorOverlay?.destroy()
+        cursorOverlay = null
         super.onDestroy()
     }
 
@@ -76,6 +84,14 @@ class PhairPlayAccessibilityService : AccessibilityService() {
         if (event?.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
             event?.eventType == AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED
         ) {
+            // NOT in an app we drive with the phantom cursor. Syncing to the app's focus is right
+            // where the app and we agree on what focus means; in a hostile app it is self-defeating,
+            // because "hostile" is defined as an app that moves focus back on its own. Adopting that
+            // move drags our cursor to wherever the launcher decided, which is the same drift the
+            // phantom cursor exists to remove — the press after it is then computed from a position
+            // the user never navigated to.
+            val syncingPkg = rootInActiveWindow?.packageName?.toString()
+            if (syncingPkg != null && syncingPkg in hostilePackages) return
             event.source?.let { node ->
                 val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
                 // POISONED SYNC FILTER. When the launcher reverts focus it broadcasts
@@ -97,8 +113,16 @@ class PhairPlayAccessibilityService : AccessibilityService() {
         if (pkg == packageName) return          // our own windows are not an "input"
         if (pkg == lastForegroundPackage) return
         lastForegroundPackage = pkg
-        // A remembered rect belongs to the screen it was taken from.
+        // A remembered rect belongs to the screen it was taken from, and so does the ring drawn at
+        // it — leaving it up would park a highlight over an app that has no such item.
         lastMovedTo = null
+        cursorOverlay?.hide()
+        // Hostility is a property of a SCREEN, not of an app for all time. One transient refusal --
+        // during a layout pass, or on a splash screen with nothing focusable yet -- used to put a
+        // package on the phantom-cursor path permanently, which is strictly worse for an app that
+        // would have accepted ordinary focus a second later. Apple Music TV, where the remote was
+        // reported working, is exactly the kind of app that loses out. Re-earned per window.
+        hostilePackages -= pkg
         onForegroundApp?.invoke(pkg)
     }
 
@@ -177,18 +201,37 @@ class PhairPlayAccessibilityService : AccessibilityService() {
         // ACTION_FOCUS at all.
         val pkg = root.packageName?.toString()
         if (pkg != null && pkg in hostilePackages) {
+            // PHANTOM CURSOR. We no longer ask this app to move any kind of focus.
+            //
+            // The previous version tried ACTION_ACCESSIBILITY_FOCUS here on the theory that it is
+            // tracked by ViewRootImpl and so cannot be reverted by the app's focus manager. The
+            // device log killed that theory: the action returns FALSE on every press — the launcher
+            // refuses it outright, exactly as it refuses ACTION_FOCUS. Both focus systems are shut,
+            // and no amount of re-ordering them opens one.
+            //
+            // So the cursor becomes entirely ours. nearestInDirection already resumes from the
+            // remembered rect and advances it; we draw the highlight ourselves in an overlay window,
+            // and Select activates by ACTION_CLICK, which is a different code path in the app (it is
+            // what screen readers use) and is honoured where focus is not.
             val target = nearestInDirection(root, from, direction)
-            if (target != null &&
-                target.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
-            ) {
+            if (target != null) {
                 remember(target)
+                showCursor(target)
+                // Best-effort, purely so the app's own highlight follows along where it will take
+                // it. The return value is deliberately ignored: our cursor has already moved and
+                // the press is handled either way.
+                target.performAction(AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS)
                 return true
             }
-            if (target != null && scrollToPosition(target)) return true
-            // Stop here. Falling through re-ran focusSearch and a second geometric pass, which is
-            // why one press produced two "Nothing beyond the remembered position" lines and moved
-            // twice as far as intended when both passes happened to succeed.
-            Logger.i("Hostile app would not take accessibility focus (direction $direction)")
+            // Nothing that way on screen means the row or grid has to page. Scroll the CONTAINER,
+            // not the leaf: Leanback routes navigation through its grid views, and their
+            // accessibility delegate implements the directional scroll actions even though it
+            // ignores focus requests on children.
+            if (scrollContainer(from, direction)) {
+                Logger.i("Scrolled the container (direction $direction) — cursor waiting for the new layout")
+                return true
+            }
+            Logger.i("Cursor is at the edge and nothing scrolls (direction $direction)")
             return true
         }
 
@@ -324,10 +367,22 @@ class PhairPlayAccessibilityService : AccessibilityService() {
                 Logger.i("Window root holds focus and no child would take it — app manages its own focus")
                 return null
             }
-            Logger.i("Seeded focus onto a real child — continuing the move from there")
-            val moved = nearestInDirection(root, seed, direction) ?: seed
-            remember(moved)
-            return moved
+            // LAND ON THE SEED, do not move on from it.
+            //
+            // This used to apply the requested direction immediately after seeding, so the first
+            // press of a screen travelled two positions: onto the seed, and then one beyond it.
+            // Every later press moves one. That is the "+1" — the cursor is permanently one step
+            // further along than the number of presses accounts for, and it shows up as the whole
+            // sequence being offset rather than as a single wrong jump.
+            //
+            // The double move was a workaround for focus not sticking, back when the app was
+            // expected to hold it: seeding alone appeared to do nothing, so the direction was
+            // applied to "get one real move out of the press". The cursor is ours now and the seed
+            // is a visible position in its own right, so the workaround is just an off-by-one.
+            Logger.i("Seeded the cursor onto a real child (direction $direction)")
+            remember(seed)
+            showCursor(seed)
+            return seed
         }
         val candidates = mutableListOf<AccessibilityNodeInfo>()
         collectFocusable(root, candidates)
@@ -501,6 +556,157 @@ class PhairPlayAccessibilityService : AccessibilityService() {
         return false
     }
 
+    /**
+     * Pages the grid container that owns [node], in the direction asked for.
+     *
+     * Distinct from [scrollNearest] in two ways that matter on Leanback. First it prefers the
+     * DIRECTIONAL scroll actions (API 29+) over forward/backward: a row-of-rows layout has a
+     * horizontal grid nested in a vertical one, and "forward" is ambiguous between them — which is
+     * how a left press ended up paging a row rightwards. Second it prefers the container exposing
+     * CollectionInfo, because that is the node whose accessibility delegate Leanback actually
+     * implements; the leaf tiles have none.
+     *
+     * Falls back to forward/backward on API 28, where the directional actions do not exist.
+     */
+    private fun scrollContainer(node: AccessibilityNodeInfo, direction: Int): Boolean {
+        val directional = if (Build.VERSION.SDK_INT >= 29) when (direction) {
+            View.FOCUS_UP    -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_UP.id
+            View.FOCUS_DOWN  -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_DOWN.id
+            View.FOCUS_LEFT  -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_LEFT.id
+            else             -> AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_RIGHT.id
+        } else null
+
+        val fallback = if (direction == View.FOCUS_DOWN || direction == View.FOCUS_RIGHT) {
+            AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+        } else {
+            AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+        }
+
+        // Paging actions, API 29+. Never tried before this: a launcher row that ignores a one-step
+        // scroll may still honour a page, because that is what a fast-forward gesture maps to.
+        val page = if (Build.VERSION.SDK_INT >= 29) when (direction) {
+            View.FOCUS_UP    -> AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_UP.id
+            View.FOCUS_DOWN  -> AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_DOWN.id
+            View.FOCUS_LEFT  -> AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_LEFT.id
+            else             -> AccessibilityNodeInfo.AccessibilityAction.ACTION_PAGE_RIGHT.id
+        } else null
+
+        // Collections first, then any scrollable ancestor. Two passes rather than one so a
+        // scrollable-but-not-a-collection wrapper cannot swallow the press before the real grid
+        // underneath it gets a turn.
+        for (collectionsOnly in listOf(true, false)) {
+            var current: AccessibilityNodeInfo? = node
+            var depth = 0
+            while (current != null && depth < MAX_ANCESTOR_WALK) {
+                val eligible = if (collectionsOnly) current.collectionInfo != null else current.isScrollable
+                if (eligible) {
+                    if (directional != null && current.performAction(directional)) return true
+                    if (page != null && current.performAction(page)) return true
+                    // Leanback's own action, and the one this method LOST when the hostile path was
+                    // rewritten around the phantom cursor -- the previous version called it and this
+                    // one did not, so the current build was trying strictly fewer things than the
+                    // build before it. Restored here rather than in the caller so every scroll
+                    // attempt goes through one chain.
+                    if (current.performAction(ACTION_SCROLL_TO_POSITION)) return true
+                    if (current.isScrollable && current.performAction(fallback)) return true
+                }
+                current = current.parent
+                depth++
+            }
+        }
+
+        // Last resort: ask the app to bring the far edge of the collection into view.
+        //
+        // ACTION_SHOW_ON_SCREEN is answered by the VIEW rather than by a scroll container, so it
+        // survives a container that refuses every scroll action -- which is exactly the situation
+        // the device log shows. Aimed at the node furthest along the direction of travel, because
+        // asking to show a node already on screen is a no-op.
+        val edge = furthestInDirection(node, direction)
+        if (edge != null &&
+            edge.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SHOW_ON_SCREEN.id)
+        ) {
+            Logger.i("Asked the app to show the far edge on screen (direction $direction)")
+            return true
+        }
+        return swipeToScroll(direction)
+    }
+
+    /**
+     * Scrolls by synthesising a touch swipe, when every accessibility scroll action has been refused.
+     *
+     * WHY THIS IS WORTH TRYING despite Fire TV having no touchscreen: Leanback's grid views are
+     * RecyclerViews, which implement touch scrolling themselves, and dispatchGesture injects
+     * MotionEvents through InputManager rather than through a driver -- the view cannot tell that no
+     * finger exists. This asks the list to scroll the way a phone user would, which is a completely
+     * different code path from the accessibility scroll actions the launcher rejects.
+     *
+     * Note this is used ONLY to scroll, never to move focus. Trying to steer a cursor with blind
+     * swipes on a device with no pointer would be guesswork; bringing more rows into the node tree
+     * so the real cursor has somewhere to go is a narrow, checkable job.
+     *
+     * The swipe runs opposite to the direction of travel — dragging content up reveals what is
+     * below it — and is kept short and fast so it scrolls by roughly one item rather than flinging.
+     */
+    private fun swipeToScroll(direction: Int): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
+        val screen = android.graphics.Rect().also { rootInActiveWindow?.getBoundsInScreen(it) }
+        if (screen.isEmpty) return false
+        val cx = screen.centerX().toFloat()
+        val cy = screen.centerY().toFloat()
+        val dx = screen.width() * SWIPE_FRACTION
+        val dy = screen.height() * SWIPE_FRACTION
+
+        val path = android.graphics.Path()
+        path.moveTo(cx, cy)
+        when (direction) {
+            View.FOCUS_UP    -> path.lineTo(cx, cy + dy)
+            View.FOCUS_DOWN  -> path.lineTo(cx, cy - dy)
+            View.FOCUS_LEFT  -> path.lineTo(cx + dx, cy)
+            else             -> path.lineTo(cx - dx, cy)
+        }
+        val gesture = android.accessibilityservice.GestureDescription.Builder()
+            .addStroke(android.accessibilityservice.GestureDescription.StrokeDescription(path, 0, SWIPE_MS))
+            .build()
+        val dispatched = runCatching { dispatchGesture(gesture, null, null) }.getOrDefault(false)
+        Logger.i("Swipe-to-scroll (direction $direction) dispatched=$dispatched")
+        // The cursor is deliberately NOT advanced here. The swipe is asynchronous and the node tree
+        // does not update until the list settles, so the next press is what picks up the new rows --
+        // pretending the move already happened would put the cursor somewhere nothing exists yet.
+        return dispatched
+    }
+
+    /**
+     * The focusable node furthest along [direction] from [from] — the one whose appearance would
+     * mean the list has paged. Used only as the target for ACTION_SHOW_ON_SCREEN.
+     */
+    private fun furthestInDirection(from: AccessibilityNodeInfo, direction: Int): AccessibilityNodeInfo? {
+        val root = rootInActiveWindow ?: return null
+        val origin = android.graphics.Rect().also { from.getBoundsInScreen(it) }
+        val all = mutableListOf<AccessibilityNodeInfo>()
+        collectFocusable(root, all)
+        val bounds = android.graphics.Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestDistance = 0
+        for (node in all) {
+            node.getBoundsInScreen(bounds)
+            if (bounds.isEmpty) continue
+            val along = when (direction) {
+                View.FOCUS_UP    -> origin.top - bounds.bottom
+                View.FOCUS_DOWN  -> bounds.top - origin.bottom
+                View.FOCUS_LEFT  -> origin.left - bounds.right
+                else             -> bounds.left - origin.right
+            }
+            if (along > bestDistance) { bestDistance = along; best = node }
+        }
+        return best
+    }
+
+    /** Draws our own highlight at [node], since the app will not move one for us. */
+    private fun showCursor(node: AccessibilityNodeInfo) {
+        val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+        cursorOverlay?.moveTo(bounds)
+    }
+
     /** Activates whatever currently has focus. */
     private fun click(): Boolean {
         val root = rootInActiveWindow ?: return false
@@ -590,6 +796,10 @@ class PhairPlayAccessibilityService : AccessibilityService() {
 
         // Named here rather than referenced directly so the file still compiles against an SDK
         // below 34, where these constants do not exist.
+        /** Fraction of the screen a scroll swipe travels — about one row, not a fling. */
+        private const val SWIPE_FRACTION = 0.25f
+        private const val SWIPE_MS = 120L
+
         private const val ACTION_DPAD_UP = 16
         private const val ACTION_DPAD_DOWN = 17
         private const val ACTION_DPAD_LEFT = 18

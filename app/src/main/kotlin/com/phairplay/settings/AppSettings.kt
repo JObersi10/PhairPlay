@@ -163,6 +163,16 @@ data class AppSettings(
      */
     val pipEnabled: Boolean = true,
 
+    /**
+     * Whether the HomeKit / iPhone remote may drive the Fire TV at all.
+     *
+     * On by default. Turning it off stops PhairPlay acting on remote key presses entirely — the
+     * accessory stays paired and the power tile keeps working, but the D-pad does nothing. Worth
+     * having because on Fire OS the D-pad cannot reliably drive other apps, and a remote that
+     * half-works is worse than one that is honestly switched off.
+     */
+    val remoteEnabled: Boolean = true,
+
     /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
     val beatPulse: Int = 0,
 

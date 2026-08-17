@@ -46,11 +46,40 @@ class HapServer(
      */
     private val MAX_CONNECTIONS = 8
 
+    /**
+     * The port HomeKit is advertised on. 51826 is the port the reference HAP implementations use,
+     * so it is the least likely to collide with anything else that matters on a Fire TV.
+     */
+    private val PREFERRED_PORT = 51826
+
     /** Monotonic id so a connection's open and close lines can be paired up in the log. */
     private var nextConnectionId = 1
 
     fun start(): Int {
-        val ss = ServerSocket(0)
+        // A STABLE port, not an ephemeral one.
+        //
+        // This was ServerSocket(0), so every restart bound a different port -- the device log shows
+        // 37645 -> 40755 -> 32939 -> 33519 across nine minutes -- and re-registered mDNS on each.
+        // iOS caches an accessory's host and port, so a port that moves underneath it leaves the
+        // iPad talking to a socket that no longer exists until rediscovery catches up. That is what
+        // "the TV selection is really unreliable" looks like from the sofa, and it is also why the
+        // Home tile can sit on a stale value: the Active=false published during a restart reaches
+        // the controller, the Active=true correction a few seconds later does not, because the
+        // connection it would have travelled on died with the old socket.
+        //
+        // Falls back to an ephemeral port rather than failing outright -- a working accessory on an
+        // awkward port beats no accessory at all -- but says so, because that restores the old
+        // flapping behaviour and it should not be a silent diagnosis.
+        val ss = runCatching {
+            ServerSocket().apply {
+                reuseAddress = true
+                bind(java.net.InetSocketAddress(PREFERRED_PORT))
+            }
+        }.getOrElse {
+            Logger.w("HAP port $PREFERRED_PORT unavailable (${it.message}) — falling back to an " +
+                "ephemeral port, which controllers will have to rediscover after every restart")
+            ServerSocket(0)
+        }
         serverSocket = ss
         running = true
         thread(name = "hap-accept", isDaemon = true) {

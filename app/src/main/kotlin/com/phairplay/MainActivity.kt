@@ -89,6 +89,7 @@ class MainActivity : AppCompatActivity() {
     val boundService: PhairPlayService? get() = service
     private var isBound = false
     private var currentAirPlayState = ProtocolState.DISABLED
+    private var currentDlnaState = ProtocolState.DISABLED
     private var currentPhotoFrame: PhotoFrame? = null
     private var currentNowPlaying: NowPlayingInfo? = null
     private var currentPin: String? = null
@@ -380,7 +381,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun pipHasContent(): Boolean =
         currentVideoPlaying || currentNowPlaying != null ||
-            currentAirPlayState == ProtocolState.CONNECTED
+            currentAirPlayState == ProtocolState.CONNECTED ||
+            currentDlnaState == ProtocolState.CONNECTED
 
     /**
      * Swaps the now-playing screen between full and compact when the window becomes a PiP.
@@ -1063,6 +1065,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 launch {
+                    svc.dlnaState.collectLatest { state ->
+                        currentDlnaState = state
+                        updateOverlay()
+                    }
+                }
+                launch {
                     svc.photoFrame.collectLatest { frame ->
                         currentPhotoFrame = frame
                         updateOverlay()
@@ -1120,7 +1128,12 @@ class MainActivity : AppCompatActivity() {
         // decoder happily rendered 33fps into a live Surface nobody could see. Disconnecting and
         // reconnecting worked only because it produced further emissions, one update too late.
         if (nowPlaying != null) lastNowPlaying = nowPlaying
-        val connected = currentAirPlayState == ProtocolState.CONNECTED
+        // DLNA counts as a live session too. This read AirPlay's state alone, so a DLNA render —
+        // which publishes now-playing on the same flow — always hit the `!connected` branch below,
+        // which resets the mode to NONE and clears lastNowPlaying. The audio played and the screen
+        // stayed on the idle card, every time, with nothing in the log to say why.
+        val connected = currentAirPlayState == ProtocolState.CONNECTED ||
+                        currentDlnaState == ProtocolState.CONNECTED
         if (!connected && photoFrame == null) { sessionMode = Mode.NONE; lastNowPlaying = null }
         else if (sessionMode == Mode.NONE) {
             sessionMode = if (nowPlaying != null) Mode.AUDIO
@@ -1147,7 +1160,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val sessionActive = pin != null || currentVideoPlaying || nowPlaying != null ||
-                            photoFrame != null || currentAirPlayState == ProtocolState.CONNECTED
+                            photoFrame != null || connected
         keepScreenAwake(sessionActive)
         trackSessionEnd(sessionActive)
     }

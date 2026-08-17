@@ -100,6 +100,32 @@ object SystemPermissions {
     }
 
     /** Opens the system Accessibility screen. @return false if the device has no such screen. */
+    /** True when PhairPlay may draw the remote's focus ring over other apps. */
+    fun isOverlayGranted(context: Context): Boolean =
+        android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M ||
+            Settings.canDrawOverlays(context)
+
+    /**
+     * Opens the "Display over other apps" consent screen, pre-filtered to PhairPlay.
+     *
+     * The package-scoped Uri is what makes this land on our own entry rather than an alphabetical
+     * list of every app on the device — on a TV, scrolling that list with a D-pad is the difference
+     * between a working instruction and one the user gives up on. Falls back to the unfiltered
+     * screen, because some Fire OS builds reject the scoped form.
+     */
+    fun openOverlaySettings(context: Context): Boolean {
+        val scoped = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            android.net.Uri.parse("package:${context.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (start(context, scoped, "overlay settings")) return true
+        return start(
+            context,
+            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            "overlay settings (unfiltered)",
+        )
+    }
+
     fun openAccessibilitySettings(context: Context): Boolean =
         start(
             context,
