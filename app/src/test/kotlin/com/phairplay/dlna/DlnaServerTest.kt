@@ -140,4 +140,27 @@ class DlnaServerTest {
             assertTrue("$action missing from RenderingControl SCPD", scpd.contains("<name>$action</name>"))
         }
     }
+
+    @Test
+    fun `AVTransport declares the actions a control point uses to enable its buttons`() {
+        val scpd = server().avtScpd()
+        // Implemented in handleAvt but previously absent here, which is why a control point showed
+        // only a volume slider: it will not invoke an action the descriptor does not declare.
+        assertTrue("GetCurrentTransportActions must be declared",
+            scpd.contains("<name>GetCurrentTransportActions</name>"))
+        assertTrue("GetMediaInfo must be declared", scpd.contains("<name>GetMediaInfo</name>"))
+        assertTrue("CurrentTransportActions state variable must exist",
+            scpd.contains("<name>CurrentTransportActions</name>"))
+    }
+
+    @Test
+    fun `every relatedStateVariable in the AVTransport SCPD is declared`() {
+        val scpd = server().avtScpd()
+        val declared = Regex("<stateVariable[^>]*><name>([A-Za-z_]+)</name>")
+            .findAll(scpd).map { it.groupValues[1] }.toSet()
+        val referenced = Regex("<relatedStateVariable>([A-Za-z_]+)</relatedStateVariable>")
+            .findAll(scpd).map { it.groupValues[1] }.toSet()
+        // A dangling reference makes a strict (Cling-based) control point reject the whole service.
+        assertEquals(emptySet<String>(), referenced - declared)
+    }
 }

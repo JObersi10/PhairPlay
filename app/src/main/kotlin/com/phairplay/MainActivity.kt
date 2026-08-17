@@ -401,6 +401,9 @@ class MainActivity : AppCompatActivity() {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
         Logger.i("PiP mode changed → $isInPictureInPictureMode")
         nowPlayingScreen.setCompact(isInPictureInPictureMode)
+        // The video surface is sized by a cached aspect-fit pass; a PiP transition resizes the
+        // container underneath it, so drop the cache and let the next pass recompute.
+        streamingScreen.invalidateAspectFit()
         // The mirror control bar is driven by D-pad presses that cannot reach a PiP window, and it
         // would cover most of one.
         if (isInPictureInPictureMode) mirrorControls.hideBar()

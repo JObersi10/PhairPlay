@@ -148,6 +148,14 @@ class AirPlayReceiver(
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
     @Volatile private var mirrorServer: MirrorStreamServer? = null
     @Volatile private var audioServer: AudioStreamServer? = null
+
+    /**
+     * The last gain the sender asked for, kept across audio servers.
+     *
+     * Senders set volume on connect and between tracks, both of which happen while no server
+     * exists. Without this the value was dropped and playback started at the default.
+     */
+    @Volatile private var lastVolumeGain: Float? = null
     @Volatile private var bufferedAudioServer: BufferedAudioServer? = null
     @Volatile private var urlVideoPlayer: AirPlayVideoPlayer? = null
 
@@ -427,7 +435,15 @@ class AirPlayReceiver(
             onVolume = { v ->
                 // 0f is 0 dB, i.e. unity gain — the right software setting when the hardware is
                 // doing the attenuation for us.
-                audioServer?.setVolume(if (onVolumeRequest(v)) 0f else v)
+                val gain = if (onVolumeRequest(v)) 0f else v
+                // REMEMBERED, not just forwarded. Senders send volume as soon as they connect,
+                // which is BEFORE any audio server exists, so `audioServer?.setVolume` discarded it
+                // through the safe call and the first track played at the default gain -- the
+                // "changing volume before the first play does nothing" report. The same null made
+                // every later session start at default too, because each one builds a fresh server:
+                // that is the volume "resetting". Hold the last value and apply it on creation.
+                lastVolumeGain = gain
+                audioServer?.setVolume(gain)
             },
             onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
                 val changed = title != npTitle || artist != npArtist || album != npAlbum
@@ -793,7 +809,12 @@ class AirPlayReceiver(
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.
             onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
-            .also { audioServer = it; it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it) }
+            .also {
+                audioServer = it
+                // Apply whatever the sender asked for before this server existed.
+                lastVolumeGain?.let { g -> it.setVolume(g) }
+                it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it)
+            }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")

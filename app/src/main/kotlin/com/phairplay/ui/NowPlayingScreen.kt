@@ -1113,6 +1113,7 @@ class NowPlayingScreen @JvmOverloads constructor(
      */
     private fun applyCompactState() {
         val compact = isCompact
+        dynamicBg.setLowPower(compact)
 
         // THIS is what was actually wrong, and no amount of text sizing was ever going to fix it.
         //

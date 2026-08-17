@@ -59,7 +59,10 @@ class DynamicBackground @JvmOverloads constructor(
         override fun run() {
             energy += (energyTarget - energy) * 0.22f
             invalidate()
-            handler.postDelayed(this, 16)
+            // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
+            // is studying it, but the full-rate redraw competes for CPU with the video decoder and
+            // the audio writer -- which is exactly when the hiccups were reported.
+            handler.postDelayed(this, if (lowPower) 33L else 16L)
         }
     }
 
@@ -67,6 +70,10 @@ class DynamicBackground @JvmOverloads constructor(
     override fun onDetachedFromWindow() { super.onDetachedFromWindow(); t1.cancel(); t2.cancel(); t3.cancel(); handler.removeCallbacks(tick) }
 
     fun setEnergy(e: Float) { energyTarget = e }
+
+    /** Halves the redraw rate — set while the window is a PiP thumbnail. */
+    fun setLowPower(on: Boolean) { lowPower = on }
+    private var lowPower = false
 
     fun updateColors(bitmap: Bitmap) {
         Palette.from(bitmap).maximumColorCount(7).generate { palette ->
@@ -146,10 +153,10 @@ class DynamicBackground @JvmOverloads constructor(
             val c2 = blend(colors[(i * 2 + 1) % PALETTE_SIZE], targets[(i * 2 + 1) % PALETTE_SIZE], f)
             cs[i] = blend(c1, c2, blobMix[i])
         }
-        blob(canvas, cx0, cy0, r, cs[0], beatAlpha)
-        blob(canvas, cx1, cy1, r, cs[1], beatAlpha)
-        blob(canvas, cx2, cy2, r, cs[2], beatAlpha)
-        blob(canvas, cx3, cy3, r, cs[3], beatAlpha)
+        blob(canvas, 0, cx0, cy0, r, cs[0], beatAlpha)
+        blob(canvas, 1, cx1, cy1, r, cs[1], beatAlpha)
+        blob(canvas, 2, cx2, cy2, r, cs[2], beatAlpha)
+        blob(canvas, 3, cx3, cy3, r, cs[3], beatAlpha)
 
         canvas.restoreToCount(sc)
 
@@ -254,14 +261,47 @@ class DynamicBackground @JvmOverloads constructor(
         return picked.ifEmpty { DEFAULTS.map { Color.parseColor(it) } }
     }
 
-    private fun blob(canvas: Canvas, cx: Float, cy: Float, r: Float, color: Int, alpha: Float) {
-        val a = (alpha * 255).toInt().coerceIn(0, 255)
-        val center = Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-        val grad = RadialGradient(cx, cy, r, intArrayOf(center, 0x00000000), floatArrayOf(0f, 1f), Shader.TileMode.CLAMP)
+    /**
+     * Draws one blob, reusing its gradient across frames.
+     *
+     * This used to build a RadialGradient per blob per frame — four native allocations every frame,
+     * ~240 a second, in the one method whose own header says allocating in onDraw is pure GC
+     * pressure. The pauses that caused are not confined to the UI thread: they showed up as audio
+     * hiccups, because a collection stops the audio writer too.
+     *
+     * The fix is to separate what actually changes. Position and radius change every frame but are
+     * pure geometry, so the gradient is built once at unit scale about the origin and moved with a
+     * local matrix, which costs nothing. Colour changes slowly, so the gradient is rebuilt only when
+     * the quantised colour actually differs — a few times a track instead of sixty times a second.
+     * Alpha rides on the Paint, where it was always free.
+     */
+    private fun blob(canvas: Canvas, i: Int, cx: Float, cy: Float, r: Float, color: Int, alpha: Float) {
+        if (r <= 0f) return
+        // 5 bits per channel: far finer than the eye can follow on a slow crossfade, and it turns a
+        // continuously-changing int into one that holds still for many frames.
+        val key = color and 0xF8F8F8.toInt()
+        if (blobGrads[i] == null || blobGradKeys[i] != key) {
+            blobGradKeys[i] = key
+            blobGrads[i] = RadialGradient(
+                0f, 0f, 1f,
+                intArrayOf(key or 0xFF000000.toInt(), key and 0xFFFFFF),
+                BLOB_STOPS, Shader.TileMode.CLAMP,
+            )
+        }
+        val grad = blobGrads[i] ?: return
+        blobMatrix.setScale(r, r)
+        blobMatrix.postTranslate(cx, cy)
+        grad.setLocalMatrix(blobMatrix)
         blobPaint.shader = grad
+        blobPaint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
         canvas.drawCircle(cx, cy, r, blobPaint)
         blobPaint.shader = null
+        blobPaint.alpha = 255
     }
+
+    private val blobGrads = arrayOfNulls<RadialGradient>(4)
+    private val blobGradKeys = IntArray(4) { -1 }
+    private val blobMatrix = android.graphics.Matrix()
 
     private fun blend(c1: Int, c2: Int, f: Float): Int {
         val i = 1f - f
@@ -317,6 +357,7 @@ class DynamicBackground @JvmOverloads constructor(
         private val VIGNETTE_COLORS = intArrayOf(0x00000000, 0x00000000, 0x80000000.toInt(), 0xFF000000.toInt())
         private val VIGNETTE_STOPS = floatArrayOf(0f, 0.45f, 0.75f, 1f)
 
+        private val BLOB_STOPS = floatArrayOf(0f, 1f)
         private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
         private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 
