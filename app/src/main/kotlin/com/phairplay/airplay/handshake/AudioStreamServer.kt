@@ -628,20 +628,40 @@ class AudioStreamServer(
         val n = minOf(onsetIdx, onsetIntervals.size)
         if (n < MIN_INTERVALS_FOR_BPM) return
 
-        // Fold every interval into the 60..180 BPM octave, then take the median.
-        val folded = DoubleArray(n)
-        for (i in 0 until n) {
-            var bpm = 60_000.0 / onsetIntervals[i]
-            while (bpm > BPM_MAX) bpm /= 2.0
-            while (bpm < BPM_MIN) bpm *= 2.0
-            folded[i] = bpm
+        // HARMONIC SCORING, not a median of folded intervals.
+        //
+        // The median version scored 25-41% confidence on Drake's "Hotline Bling" -- a track with an
+        // unmistakable beat -- and never cleared its own threshold. The reason is that folding each
+        // interval into one octave only rescues a CLEAN double or half. Real onset detection misses
+        // beats, so intervals arrive at 2x, 3x, sometimes 1.5x the true period; folding maps those
+        // onto unrelated tempos, which then drag the median and disagree with it. The log's spread
+        // of 106, 110, 115, 116 across consecutive estimates is that scatter, not tempo drift.
+        //
+        // Scoring candidates directly inverts the problem. For each candidate period, an interval
+        // counts as agreeing if it lands near ANY small integer multiple of it -- which is exactly
+        // what a missed beat produces. A track's true tempo is then the candidate almost every
+        // interval agrees with, and the harmonics that used to be noise become evidence for it.
+        var bestBpm = 0.0
+        var bestScore = 0
+        var candidate = BPM_MIN
+        while (candidate <= BPM_MAX) {
+            val period = 60_000.0 / candidate
+            var score = 0
+            for (i in 0 until n) {
+                val ratio = onsetIntervals[i] / period
+                val nearest = Math.round(ratio).toInt()
+                if (nearest in 1..MAX_BEAT_MULTIPLE &&
+                    Math.abs(ratio - nearest) / nearest <= BPM_TOLERANCE
+                ) score++
+            }
+            // Strictly greater, so the LOWEST tempo wins a tie. Every candidate's double scores at
+            // least as well as the candidate itself (twice the period still divides the intervals),
+            // so ties broken the other way would report 240 BPM for a 120 BPM track every time.
+            if (score > bestScore) { bestScore = score; bestBpm = candidate }
+            candidate += BPM_STEP
         }
-        folded.sort()
-        val median = if (n % 2 == 1) folded[n / 2] else (folded[n / 2 - 1] + folded[n / 2]) / 2.0
-
-        var agree = 0
-        for (v in folded) if (Math.abs(v - median) / median <= BPM_TOLERANCE) agree++
-        val confidence = agree.toFloat() / n
+        val median = bestBpm
+        val confidence = bestScore.toFloat() / n
 
         currentBpm = if (confidence >= BPM_MIN_CONFIDENCE) median.toFloat() else 0f
         val now = System.currentTimeMillis()
@@ -1167,6 +1187,10 @@ class AudioStreamServer(
         /** How close an interval must be to the median to count as agreeing with it. */
         private const val BPM_TOLERANCE = 0.08
         private const val BPM_MIN_CONFIDENCE = 0.5f
+        /** Candidate resolution. 0.5 BPM is finer than anyone can hear a visual lag against. */
+        private const val BPM_STEP = 0.5
+        /** How many beats a single missed-onset gap may span and still count as evidence. */
+        private const val MAX_BEAT_MULTIPLE = 4
         private const val BPM_LOG_INTERVAL_MS = 5000L
 
         private const val ONSET_SIGMA = 1.5

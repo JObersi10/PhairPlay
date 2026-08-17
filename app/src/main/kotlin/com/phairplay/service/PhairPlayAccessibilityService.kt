@@ -719,10 +719,25 @@ class PhairPlayAccessibilityService : AccessibilityService() {
      */
     private fun isContainerSized(bounds: android.graphics.Rect): Boolean {
         if (bounds.isEmpty) return true
-        val screen = android.graphics.Rect().also { rootInActiveWindow?.getBoundsInScreen(it) }
-        val tooWide = screen.width() > 0 && bounds.width() * 2 >= screen.width()
-        val tooTall = screen.height() > 0 && bounds.height() * 2 >= screen.height()
-        return tooWide && tooTall
+        // MEASURE AGAINST THE DISPLAY, not against rootInActiveWindow.
+        //
+        // This asked the active window for its own size, which is wrong whenever the active window
+        // is not the app being driven -- and one of the windows that can hold it is the cursor
+        // overlay this service puts up itself. When that happened the reference rect collapsed to a
+        // few hundred pixels, every ordinary node then measured "at least half the screen in both
+        // directions", and the two callers did what they are told to do with a container: refuse to
+        // draw the ring, and refuse to adopt the position. lastMovedTo stayed stale, so every
+        // subsequent direction was computed from an old rect. That is the remote going dead and the
+        // directions sticking -- introduced by this very check, which was added to fix the opposite
+        // problem of a ring around the whole screen.
+        //
+        // The display bounds cannot be affected by which window is in front, which is the property
+        // this comparison actually needs.
+        val metrics = resources.displayMetrics
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
+        if (screenW <= 0 || screenH <= 0) return false
+        return bounds.width() * 2 >= screenW && bounds.height() * 2 >= screenH
     }
 
     /** Activates whatever currently has focus. */

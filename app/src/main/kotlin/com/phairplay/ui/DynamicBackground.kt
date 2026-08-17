@@ -626,7 +626,7 @@ class DynamicBackground @JvmOverloads constructor(
          * inside ~110px, which on a 1920-wide panel read as three faint smudges rather than as glows
          * (visible in the 1080p capture). The edge budget below is what caps this, not taste.
          */
-        private const val ORB_BASE_RADIUS = 0.28f
+        private const val ORB_BASE_RADIUS = 0.24f
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -678,7 +678,16 @@ class DynamicBackground @JvmOverloads constructor(
          * screen and duly read as the orb touching the edge. 0.13 is ~140px of guaranteed black.
          */
         private const val ORB_EDGE_MARGIN = 0.05f
-        private const val ORB_BEAT_SWELL = 0.30f
+        /**
+         * How much the beat grows an orb.
+         *
+         * Sized against what the bands ACTUALLY deliver rather than against their theoretical range.
+         * The device log has them peaking around 0.65-0.70 on real music and only brushing 1.0, so a
+         * swell of 0.30 bought a ~20% size change on a loud beat -- present in the numbers, barely
+         * readable on screen. At 0.60 the same beat is a ~40% change, and the base radius comes down
+         * to keep the fully-swollen orb inside the edge budget.
+         */
+        private const val ORB_BEAT_SWELL = 0.60f
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         private const val ORB_BASE_ALPHA = 0.92f
