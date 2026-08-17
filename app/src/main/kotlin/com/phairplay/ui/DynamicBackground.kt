@@ -16,6 +16,7 @@ import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
 import androidx.palette.graphics.Palette
+import com.phairplay.util.Logger
 
 class DynamicBackground @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -141,6 +142,18 @@ class DynamicBackground @JvmOverloads constructor(
             if (swatches.isEmpty()) return@generate
             val spread = spreadByHue(swatches)
             for (i in 0 until PALETTE_SIZE) targets[i] = spread[i % spread.size]
+            // The three hues the ORBS will use. A capture showed three purple orbs over a vivid
+            // pink/orange/green cover, and there was no way to tell whether Palette had failed to
+            // find the other colours or whether something downstream was muddying them. Printing the
+            // hue angles settles which end to fix: three numbers far apart here means the palette is
+            // fine and the drawing is at fault.
+            val hs = FloatArray(3)
+            Logger.i(
+                "Palette orb hues: " + (0 until 3).joinToString(", ") { i ->
+                    Color.colorToHSV(targets[i], hs)
+                    "%.0f° s=%.2f v=%.2f".format(hs[0], hs[1], hs[2])
+                }
+            )
             colorFade = 0f; colorAnim.cancel(); colorAnim.start()
         }
     }
@@ -526,10 +539,10 @@ class DynamicBackground @JvmOverloads constructor(
         /** Vividness push. Do not raise VALUE_CEILING past ~0.85 — that is where text starts to lose. */
         private const val SAT_BOOST = 1.45f
         private const val SAT_FLOOR = 0.55f
-        private const val VALUE_CEILING = 0.80f
+        private const val VALUE_CEILING = 0.92f
 
         /** Minimum hue separation between chosen palette colours, in degrees. */
-        private const val HUE_MIN_ANGLE = 28f
+        private const val HUE_MIN_ANGLE = 40f
 
         /** Darkness directly under the text block; the gradient fades to nothing from there. */
         private const val TEXT_DARKEN_ARGB = 0x8C000000.toInt()
@@ -561,7 +574,14 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
         private const val ORB_COUNT = 3
-        private const val ORB_BASE_RADIUS = 0.19f
+        /**
+         * Orb size against the SHORT side.
+         *
+         * Raised from 0.19: with the front-loaded falloff below, 0.19 of 1080px put most of the light
+         * inside ~110px, which on a 1920-wide panel read as three faint smudges rather than as glows
+         * (visible in the 1080p capture). The edge budget below is what caps this, not taste.
+         */
+        private const val ORB_BASE_RADIUS = 0.28f
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -576,18 +596,18 @@ class DynamicBackground @JvmOverloads constructor(
          * still clears the [ORB_EDGE_MARGIN] on every side without the clamp ever engaging. Vertical
          * is the binding axis on a wide screen, which is why ORB_Y is the tighter of the two.
          */
-        private val ORB_X = floatArrayOf(0.32f, 0.52f, 0.68f)
-        private val ORB_Y = floatArrayOf(0.44f, 0.57f, 0.46f)
+        private val ORB_X = floatArrayOf(0.34f, 0.52f, 0.66f)
+        private val ORB_Y = floatArrayOf(0.46f, 0.54f, 0.48f)
 
         /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */
-        private const val ORB_DRIFT_X = 0.10f
-        private const val ORB_DRIFT_Y = 0.05f
+        private const val ORB_DRIFT_X = 0.09f
+        private const val ORB_DRIFT_Y = 0.04f
 
         /**
          * How far an orb's colour travels toward its neighbour's over one animator cycle. Enough to
          * see the hue move on a long track, small enough that the trio never converges on one shade.
          */
-        private const val ORB_HUE_TRAVEL = 0.34f
+        private const val ORB_HUE_TRAVEL = 0.10f
 
         /** Starting angle per orb, so they do not set off from the same point on their ellipses. */
         private val ORB_PHASE = floatArrayOf(0f, 2.1f, 4.2f)
@@ -603,16 +623,16 @@ class DynamicBackground @JvmOverloads constructor(
          * side. Raised sharply from 0.06: at 1080p that was a ~65px gap, which is a hair on a 1920px
          * screen and duly read as the orb touching the edge. 0.13 is ~140px of guaranteed black.
          */
-        private const val ORB_EDGE_MARGIN = 0.13f
-        private const val ORB_BEAT_SWELL = 0.26f
+        private const val ORB_EDGE_MARGIN = 0.05f
+        private const val ORB_BEAT_SWELL = 0.30f
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
-        private const val ORB_BASE_ALPHA = 0.80f
+        private const val ORB_BASE_ALPHA = 0.92f
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
-        private const val ORB_CORE_ALPHA = 0.34f
-        private const val ORB_CORE_BEAT_ALPHA = 0.46f
+        private const val ORB_CORE_ALPHA = 0.30f
+        private const val ORB_CORE_BEAT_ALPHA = 0.62f
         private const val CORE_WHITEN = 0.34f
         private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
 

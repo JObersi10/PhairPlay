@@ -626,7 +626,10 @@ class AudioStreamServer(
             bandPeak[b] = if (raw[b] > peak) raw[b] else {
                 (peak * BAND_PEAK_DECAY).coerceAtLeast(BAND_PEAK_FLOOR)
             }
-            val norm = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            val ratio = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
+            // costs no headroom at the top.
+            val norm = ((ratio - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
             // Slight upward curve. Linear normalised RMS clusters low, so the orbs sat near their
             // base size most of the time; the exponent lifts the middle of the range where the
             // interesting movement is without letting quiet passages read as loud.
@@ -1036,11 +1039,41 @@ class AudioStreamServer(
         /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
         private const val LP_ALPHA = 0.018
         /** How far above the running mean a window must sit to count as a beat. */
-        /** Band AGC: how fast a band's reference peak falls when nothing louder arrives. */
-        private const val BAND_PEAK_DECAY = 0.985
+        /**
+         * Band AGC: how fast a band's reference peak falls when nothing louder arrives.
+         *
+         * PER CALL, and that is the whole subtlety. updateBands runs once per PCM block -- roughly
+         * 100 times a second, not the ~10 the emission rate suggests -- so the first value here
+         * (0.985) decayed the reference by 0.985^100 = 0.22 EVERY SECOND. The peak therefore
+         * collapsed onto the current level almost immediately, level/peak was permanently ~1.0, and
+         * the device log showed exactly that: bass, mid and treble all sitting between 0.5 and 1.00
+         * and hitting the ceiling constantly. The bank was separating correctly and the orbs still
+         * could not pulse, because there was no headroom left to pulse into.
+         *
+         * 0.9985^100 = 0.86 per second, so the reference holds across a bar or two of music and a
+         * quiet passage genuinely reads as quiet.
+         */
+        private const val BAND_PEAK_DECAY = 0.9985
         /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
         private const val BAND_PEAK_FLOOR = 1e-4
-        private const val BAND_CURVE = 0.65
+
+        /**
+         * Expansion exponent, deliberately ABOVE 1.
+         *
+         * The old 0.65 was a compression curve -- it pushed everything UP, on the theory that
+         * normalised RMS clusters low. With the peak bug above it did the opposite of what was
+         * wanted: values already pinned near the top got pushed harder into the ceiling. Above 1
+         * pulls the middle of the range down (0.7 -> 0.59, 0.5 -> 0.35) so loud moments stand out
+         * against quiet ones instead of everything reading as loud.
+         */
+        private const val BAND_CURVE = 1.5
+
+        /**
+         * Fraction of the reference peak treated as silence. Room tone and codec noise otherwise
+         * keep a band a few percent off zero forever, which the expansion curve then lifts back into
+         * visible glow on a track that has stopped.
+         */
+        private const val BAND_NOISE_FLOOR = 0.06
         private const val BAND_LOG_INTERVAL_MS = 2000L
 
         private const val ONSET_SIGMA = 1.5
