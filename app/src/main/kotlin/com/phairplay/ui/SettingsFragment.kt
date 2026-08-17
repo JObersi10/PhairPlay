@@ -1,6 +1,7 @@
 package com.phairplay.ui
 
 import android.app.AlertDialog
+import com.phairplay.util.SystemPermissions
 import com.phairplay.MainActivity
 import android.os.Bundle
 import com.phairplay.service.ServiceController
@@ -50,6 +51,7 @@ class SettingsFragment : Fragment() {
     private lateinit var headerService: TextView
     private lateinit var headerDeveloper: TextView
     private lateinit var headerAbout: TextView
+    private lateinit var headerPermissions: TextView
 
     // Settings rows
     private lateinit var rowDisplayName: LinearLayout
@@ -77,12 +79,20 @@ class SettingsFragment : Fragment() {
     private lateinit var rowInputApps: LinearLayout
     private lateinit var textInputAppsValue: TextView
     private lateinit var rowForgetPairings: LinearLayout
+    private lateinit var rowPermRemote: LinearLayout
+    private lateinit var rowPermSleep: LinearLayout
+    private lateinit var textPermRemoteValue: TextView
+    private lateinit var textPermSleepValue: TextView
     private lateinit var rowSenderVolume: LinearLayout
     private lateinit var textSenderVolumeValue: TextView
     private lateinit var rowScreensaver: View
     private lateinit var rowScreensaverTimeout: LinearLayout
     private lateinit var textScreensaverTimeoutValue: TextView
     private lateinit var textVersionValue: TextView
+    private lateinit var rowAudioBuffer: LinearLayout
+    private lateinit var textAudioBufferValue: TextView
+    private lateinit var rowUpdate: LinearLayout
+    private lateinit var textUpdateValue: TextView
     private lateinit var rowReset: LinearLayout
     private lateinit var rowQuit: LinearLayout
 
@@ -106,6 +116,7 @@ class SettingsFragment : Fragment() {
         // directly — no nested lookup.
         headerDisplay   = view.findViewById(R.id.header_display)
         headerProtocols = view.findViewById(R.id.header_protocols)
+        headerPermissions = view.findViewById(R.id.header_permissions)
         headerAirPlay   = view.findViewById(R.id.header_airplay)
         headerNowPlaying = view.findViewById(R.id.header_now_playing)
         headerService   = view.findViewById(R.id.header_service)
@@ -137,12 +148,20 @@ class SettingsFragment : Fragment() {
         rowInputApps        = view.findViewById(R.id.row_input_apps)
         textInputAppsValue  = view.findViewById(R.id.text_input_apps_value)
         rowForgetPairings   = view.findViewById(R.id.row_forget_pairings)
+        rowPermRemote       = view.findViewById(R.id.row_perm_remote)
+        rowPermSleep        = view.findViewById(R.id.row_perm_sleep)
+        textPermRemoteValue = view.findViewById(R.id.text_perm_remote_value)
+        textPermSleepValue  = view.findViewById(R.id.text_perm_sleep_value)
         rowSenderVolume     = view.findViewById(R.id.row_sender_volume)
         textSenderVolumeValue = view.findViewById(R.id.text_sender_volume_value)
         rowScreensaver      = view.findViewById(R.id.row_screensaver)
         rowScreensaverTimeout = view.findViewById(R.id.row_screensaver_timeout)
         textScreensaverTimeoutValue = view.findViewById(R.id.text_screensaver_timeout_value)
         textVersionValue    = view.findViewById(R.id.text_version_value)
+        rowAudioBuffer      = view.findViewById(R.id.row_audio_buffer)
+        textAudioBufferValue = view.findViewById(R.id.text_audio_buffer_value)
+        rowUpdate           = view.findViewById(R.id.row_update)
+        textUpdateValue     = view.findViewById(R.id.text_update_value)
         rowReset            = view.findViewById(R.id.row_reset)
         rowQuit             = view.findViewById(R.id.row_quit)
     }
@@ -156,6 +175,7 @@ class SettingsFragment : Fragment() {
         headerService.setText(R.string.settings_section_service)
         headerDeveloper.setText(R.string.settings_section_developer)
         headerAbout.setText(R.string.settings_section_about)
+        headerPermissions.setText(R.string.settings_section_permissions)
     }
 
     /** Sets all row labels and subtitles from string resources. */
@@ -254,6 +274,7 @@ class SettingsFragment : Fragment() {
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
+        showAudioBuffer(settings.audioBufferMs)
         showBeatPulse(settings.beatPulse)
         showBeatDelay(settings.beatDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
@@ -336,6 +357,7 @@ class SettingsFragment : Fragment() {
         rowBackAction.setOnClickListener { pickBackAction() }
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
+        rowAudioBuffer.setOnClickListener { pickAudioBuffer() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
         rowBeatDelay.setOnClickListener { pickBeatDelay() }
         // Restart, not a plain save: the resolution is baked into the /info response and the mirror
@@ -348,7 +370,10 @@ class SettingsFragment : Fragment() {
         rowSenderVolume.setOnClickListener { showSenderVolumeDialog() }
         setToggleListener(rowRememberPin) { enabled -> saveAndRestart { it.copy(rememberPinPairing = enabled) } }
         rowForgetPairings.setOnClickListener { forgetPairings() }
+        rowPermRemote.setOnClickListener { grantRemoteControl() }
+        rowPermSleep.setOnClickListener { grantSleep() }
 
+        rowUpdate.setOnClickListener { checkForUpdate() }
         rowReset.setOnClickListener { confirmResetSettings() }
         rowQuit.setOnClickListener { confirmQuit() }
     }
@@ -561,6 +586,39 @@ class SettingsFragment : Fragment() {
      * the sender, the codec and the output path — Bluetooth in particular adds its own delay that
      * no amount of protocol correctness can predict. A dial beats a guessed constant.
      */
+    private fun showAudioBuffer(ms: Int) {
+        textAudioBufferValue.text =
+            if (ms == AppSettings.DEFAULT_AUDIO_BUFFER_MS) getString(R.string.setting_audio_buffer_default, ms)
+            else "$ms ms"
+    }
+
+    /**
+     * Sets the AudioTrack hardware buffer.
+     *
+     * This is a real trade, not a "bigger is better" dial: the buffer and the packet queue are both
+     * charged against the latency the sender asks for, so every millisecond added here is taken off
+     * the queue, and the delay you hear barely moves. What changes is WHICH failure you get -- a
+     * small buffer clicks when the CPU is busy, a large one leaves the queue too shallow to ride out
+     * Wi-Fi jitter. Restart is required because the buffer is sized once when the track is created.
+     */
+    private fun pickAudioBuffer() {
+        val labels = AppSettings.AUDIO_BUFFER_CHOICES.map {
+            if (it == AppSettings.DEFAULT_AUDIO_BUFFER_MS) getString(R.string.setting_audio_buffer_default, it)
+            else "$it ms"
+        }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_audio_buffer)
+            .setItems(labels) { _, which ->
+                val ms = AppSettings.AUDIO_BUFFER_CHOICES[which]
+                save { it.copy(audioBufferMs = ms) }
+                showAudioBuffer(ms)
+                Logger.i("Audio buffer set to $ms ms — restarting receivers to apply")
+                ServiceController.restart(requireContext())
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun pickAudioDelay() {
         val labels = AUDIO_DELAY_CHOICES.map {
             if (it == 0) getString(R.string.setting_audio_delay_none) else "+$it ms"
@@ -676,16 +734,17 @@ class SettingsFragment : Fragment() {
         val intent = android.content.Intent(android.content.Intent.ACTION_MAIN)
             .addCategory(android.content.Intent.CATEGORY_LEANBACK_LAUNCHER)
         val leanback = pm.queryIntentActivities(intent, 0)
-        val resolved = leanback.ifEmpty {
-            // Not a TV build, or a device that does not use the leanback category — fall back so the
-            // picker is never simply empty.
-            pm.queryIntentActivities(
-                android.content.Intent(android.content.Intent.ACTION_MAIN)
-                    .addCategory(android.content.Intent.CATEGORY_LAUNCHER),
-                0,
-            )
-        }
-        return resolved
+        // BOTH categories, unioned -- this used to fall back to CATEGORY_LAUNCHER only when the
+        // leanback query came back completely empty. Sideloaded apps routinely ship a plain
+        // LAUNCHER entry and no leanback one (Apple Music TV is exactly this), so as long as ONE
+        // proper TV app was installed the list looked healthy while silently omitting every
+        // sideloaded app the user most likely wanted a shortcut to.
+        val plain = pm.queryIntentActivities(
+            android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER),
+            0,
+        )
+        return (leanback + plain)
             .map { it.activityInfo.packageName to it.loadLabel(pm).toString() }
             .filter { it.first != requireContext().packageName }   // opening ourselves is not a shortcut
             .distinctBy { it.first }
@@ -761,6 +820,183 @@ class SettingsFragment : Fragment() {
             service.isHomeKitPaired() -> getString(R.string.setting_homekit_paired)
             else -> getString(R.string.setting_homekit_code, code)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Granting either permission means leaving for a system screen and returning, so the status
+        // has to be re-read here — reading it once at bind shows a stale value at the exact moment
+        // the user comes back to check whether it worked.
+        renderPermissionStatus()
+    }
+
+    /**
+     * Shows whether each privileged capability is currently granted.
+     *
+     * Refreshed from [onResume] rather than once at bind: granting either one means leaving for a
+     * system screen and coming back, so a value read at bind time is stale exactly when the user is
+     * looking at it.
+     */
+    private fun renderPermissionStatus() {
+        val ctx = context ?: return
+        textPermRemoteValue.setText(
+            if (SystemPermissions.isAccessibilityGranted(ctx)) R.string.setting_perm_on
+            else R.string.setting_perm_off,
+        )
+        textPermSleepValue.setText(
+            if (SystemPermissions.isDeviceAdminGranted(ctx)) R.string.setting_perm_on
+            else R.string.setting_perm_off,
+        )
+    }
+
+    /**
+     * Sends the user to the system Accessibility screen to enable PhairPlay's service.
+     *
+     * There is no self-grant for this one: switching an accessibility service on requires
+     * WRITE_SECURE_SETTINGS, which is signature-level. Opening the screen is the whole of what an
+     * app may do, and some Fire OS builds do not list third-party services there at all — so the
+     * adb command stays reachable rather than being replaced by a button that might lead nowhere.
+     */
+    private fun grantRemoteControl() {
+        val ctx = context ?: return
+        if (SystemPermissions.isAccessibilityGranted(ctx)) {
+            showPermissionInfo(
+                R.string.setting_perm_remote,
+                getString(R.string.setting_perm_remote_granted),
+            )
+            return
+        }
+        // Fire TV does not list third-party accessibility services in its Settings menu at all, so
+        // opening that screen sends the user somewhere PhairPlay will never appear. Show the adb
+        // command as the primary instruction on Fire TV and offer the screen only as a second
+        // option, rather than the other way round.
+        AlertDialog.Builder(ctx)
+            .setTitle(R.string.setting_perm_remote)
+            .setMessage(
+                getString(
+                    R.string.setting_perm_remote_adb,
+                    SystemPermissions.accessibilityAdbCommand(ctx),
+                ),
+            )
+            .setPositiveButton(android.R.string.ok, null)
+            .setNeutralButton(R.string.setting_perm_open_settings) { _, _ ->
+                SystemPermissions.openAccessibilitySettings(ctx)
+            }
+            .show()
+    }
+
+    /**
+     * Asks for device admin so HomeKit "off" can actually blank the display.
+     *
+     * This one WAS self-grantable the whole time. PhairPlay told users to run `dpm set-active-admin`
+     * from a computer for a permission that ACTION_ADD_DEVICE_ADMIN grants with one button on the
+     * device.
+     */
+    /**
+     * Asks GitHub for the latest release and offers to install it.
+     *
+     * Only ever runs on a click. There is no background check and no automatic install: a sideloaded
+     * app that silently replaces itself on someone's television is not a feature.
+     */
+    private fun checkForUpdate() {
+        val ctx = context ?: return
+        textUpdateValue.setText(R.string.setting_update_checking)
+        rowUpdate.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            val result = com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME)
+            rowUpdate.isEnabled = true
+            when (result) {
+                is com.phairplay.util.UpdateChecker.Result.UpToDate ->
+                    textUpdateValue.text = getString(R.string.setting_update_uptodate, result.tag)
+
+                is com.phairplay.util.UpdateChecker.Result.Failed -> {
+                    // Shown, not swallowed -- "Check failed" with no reason is what makes people
+                    // assume the app is broken rather than that the network is.
+                    textUpdateValue.setText(R.string.setting_update_failed)
+                    AlertDialog.Builder(ctx)
+                        .setTitle(R.string.setting_update)
+                        .setMessage(result.reason)
+                        .setPositiveButton(android.R.string.ok, null)
+                        .show()
+                }
+
+                is com.phairplay.util.UpdateChecker.Result.Available -> {
+                    textUpdateValue.text = getString(R.string.setting_update_available, result.tag)
+                    val asset = result.assetUrl
+                    val dialog = AlertDialog.Builder(ctx)
+                        .setTitle(getString(R.string.setting_update_available, result.tag))
+                        .setMessage(
+                            if (asset == null) getString(R.string.setting_update_no_asset, result.tag)
+                            else result.notes,
+                        )
+                    if (asset == null) {
+                        dialog.setPositiveButton(android.R.string.ok, null)
+                    } else {
+                        dialog.setPositiveButton(R.string.setting_update_install) { _, _ ->
+                            installUpdate(asset)
+                        }
+                        dialog.setNegativeButton(android.R.string.cancel, null)
+                    }
+                    dialog.show()
+                }
+            }
+        }
+    }
+
+    private fun installUpdate(assetUrl: String) {
+        val ctx = context ?: return
+        textUpdateValue.setText(R.string.setting_update_downloading)
+        viewLifecycleOwner.lifecycleScope.launch {
+            val intent = com.phairplay.util.UpdateChecker.download(ctx, assetUrl)
+            if (intent == null) {
+                textUpdateValue.setText(R.string.setting_update_failed)
+                showPermissionInfo(
+                    R.string.setting_update,
+                    getString(R.string.setting_update_download_failed),
+                )
+                return@launch
+            }
+            // The system installer takes it from here, including asking the user to allow installs
+            // from this app the first time.
+            runCatching { startActivity(intent) }
+                .onFailure { Logger.w("No installer on this device — ${it.message}") }
+        }
+    }
+
+    private fun grantSleep() {
+        val ctx = context ?: return
+        if (SystemPermissions.isDeviceAdminGranted(ctx)) {
+            // Offer to hand it back. Granting device admin blocks uninstall, and the failure a user
+            // hits then (DELETE_FAILED_DEVICE_POLICY_MANAGER) does not mention PhairPlay at all.
+            AlertDialog.Builder(ctx)
+                .setTitle(R.string.setting_perm_sleep)
+                .setMessage(R.string.setting_perm_sleep_granted)
+                .setPositiveButton(R.string.setting_perm_revoke) { _, _ ->
+                    SystemPermissions.revokeDeviceAdmin(ctx)
+                    renderPermissionStatus()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            return
+        }
+        val explanation = getString(R.string.setting_perm_sleep_explanation)
+        if (!SystemPermissions.requestDeviceAdmin(ctx, explanation)) {
+            showPermissionInfo(
+                R.string.setting_perm_sleep,
+                getString(
+                    R.string.setting_perm_no_screen,
+                    SystemPermissions.deviceAdminAdbCommand(ctx),
+                ),
+            )
+        }
+    }
+
+    private fun showPermissionInfo(titleRes: Int, message: String) {
+        AlertDialog.Builder(requireContext())
+            .setTitle(titleRes)
+            .setMessage(message)
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
     }
 
     private fun confirmResetHomeKit() {

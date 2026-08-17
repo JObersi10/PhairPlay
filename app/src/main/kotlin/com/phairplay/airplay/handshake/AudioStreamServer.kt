@@ -57,6 +57,12 @@ class AudioStreamServer(
     private val latencyMinSamples: Int = 11025,
     /** User A/V trim, also applied to the beat pulse so the visual matches what is heard. */
     private val extraDelayMs: Long = 0,
+    /**
+     * AudioTrack hardware buffer in ms (AppSettings.audioBufferMs). Charged against the sender's
+     * latency budget, so raising it shortens the packet queue by the same amount — see
+     * [targetDepthFrames].
+     */
+    private val trackBufferMs: Int = TARGET_BUFFER_MS,
     /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
     private val beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
@@ -110,7 +116,7 @@ class AudioStreamServer(
         // which adds its own ~150ms — the total landed near a second.
         //
         // Charge the AudioTrack buffer against the budget and prime the queue with the remainder.
-        val trackSamples = sampleRate * TARGET_BUFFER_MS / 1000
+        val trackSamples = sampleRate * trackBufferMs / 1000
         val queueSamples = (latencyMinSamples - trackSamples).coerceAtLeast(0)
         (queueSamples / framesPerPacket.coerceAtLeast(1))
             .coerceIn(MIN_QUEUE_FRAMES, AUDIO_QUEUE_CAPACITY / 2)
@@ -249,7 +255,6 @@ class AudioStreamServer(
                     continue
                 }
                 if (audioIdle) { audioIdle = false; onAudioIdle(false) }
-                lastPacketAtMs = System.currentTimeMillis()
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
@@ -294,28 +299,35 @@ class AudioStreamServer(
         }
         keepaliveRun = 0
         if (audioIdle) { audioIdle = false; onAudioIdle(false) }
+        // Counted here rather than in the data-socket loop. Retransmitted packets arrive on the
+        // CONTROL channel and reach playback through this same function, so a stream being carried
+        // by resends looked completely silent to the session watchdog even while it was playing.
+        lastPacketAtMs = System.currentTimeMillis()
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
-        // RTP timestamp (bytes 4..7) is the sender's own playback clock. When a sender re-syncs
-        // mid-stream — an iPad "correcting itself" — it jumps, and everything already queued
-        // belongs to the old timeline. Playing it out drifts us permanently off. Drop the stale
-        // audio and re-prime so we line up with the new clock instead.
+        // RTP timestamp (bytes 4..7) is the sender's own playback clock.
         val rtpTs = ((src[offset + 4].toInt() and 0xFF).toLong() shl 24) or
                     ((src[offset + 5].toInt() and 0xFF).toLong() shl 16) or
                     ((src[offset + 6].toInt() and 0xFF).toLong() shl 8) or
                     (src[offset + 7].toInt() and 0xFF).toLong()
-        if (lastRtpTs >= 0) {
-            val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
-            val drift = Math.abs(rtpTs - expected)
-            if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
-                Logger.i("Audio: sender clock jumped ${drift} samples — reprimimg")
-                frameQueue.clear()
-                synchronized(reorderLock) { reorder.clear(); nextSeq = -1; maxSeq = -1 }
+        // A timestamp discontinuity USED TO clear the queue and re-prime here. That was my change and
+        // it made playback worse, not better: the reorder buffer already absorbs out-of-order and
+        // resent packets, so the only thing the reset added was an audible gap every time it fired --
+        // and it fired constantly, because a resend arriving off the control channel legitimately
+        // carries an old timestamp. Detection stays, purely as a log line; the buffer is left alone.
+        synchronized(reorderLock) {
+            val inSequence = nextSeq < 0 || seq == nextSeq
+            if (lastRtpTs >= 0 && inSequence) {
+                val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
+                val drift = Math.abs(rtpTs - expected)
+                if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
+                    Logger.i("Audio: sender timestamp jumped $drift samples (buffer left intact)")
+                }
             }
+            if (inSequence) lastRtpTs = rtpTs
         }
-        lastRtpTs = rtpTs
         // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted audio payload (copied out of src).
         val payload = src.copyOfRange(offset + RTP_HEADER, offset + length)
-        var resend: IntArray? = null
+        var resend: IntArray?
         synchronized(reorderLock) {
             if (isDuplicateSeq(seq)) { dupCount++; return }
             resend = enqueueInOrder(seq, payload)
@@ -389,6 +401,16 @@ class AudioStreamServer(
      */
     private fun runPlayback() {
         try {
+            // Audio priority, so the UI cannot starve playback.
+            //
+            // Playback already runs on its own thread, which is why it survives most main-thread
+            // work -- but a PiP transition resizes the window and saturates the CPU on a stick that
+            // is also decoding ALAC, and a default-priority thread loses that fight. The device log
+            // shows exactly that: entering PiP takes the queue from 21 to 132 in two seconds with
+            // underrun climbing, meaning the writer stopped being scheduled while packets kept
+            // arriving. URGENT_AUDIO is the priority the platform's own audio paths use, and it is
+            // what stops a redraw from outranking the thread feeding the speakers.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             initDecoder()
             initAudioTrack()
             awaitPrimedQueue()
@@ -401,6 +423,7 @@ class AudioStreamServer(
                     if (running) Logger.e("Audio: frame decode error", e)
                 }
                 resyncIfBacklogged()
+                logHealth()
             }
         } catch (e: Exception) {
             if (running) Logger.e("Audio playback error", e)
@@ -602,11 +625,93 @@ class AudioStreamServer(
      * overflow eviction becomes the only relief — one audible glitch per dropped frame, forever.
      * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
      */
+    /**
+     * One line a second saying whether WE are the problem or the sender is.
+     *
+     * Every audio complaint so far has been diagnosed by inference, and the Mac path in particular
+     * has had two contradictory explanations (our buffer vs the sender's timing) with no measurement
+     * to settle it. These four numbers separate them:
+     *
+     *  - `queue` far below target and `underrun` climbing → the sender is not feeding us fast
+     *    enough. Nothing on this side can fix that.
+     *  - `queue` at the ceiling with `qDrop` climbing → we are not draining fast enough, which is
+     *    ours to fix.
+     *  - `underrun` flat with both mid-range → the path is healthy and the lag is presentation
+     *    latency, i.e. a buffer-size question, not a bug.
+     *
+     * `getUnderrunCount` is the platform's own count of times the track ran dry, which is the one
+     * number that cannot be argued with. Logged at info because Fire OS drops debug for this package.
+     */
+    private fun logHealth() {
+        val now = System.currentTimeMillis()
+        if (now - lastHealthLogMs < HEALTH_LOG_INTERVAL_MS) return
+        lastHealthLogMs = now
+        val underruns = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+        Logger.i(
+            "Audio health: queue=${frameQueue.size}/$targetDepthFrames " +
+                "underrun=$underruns (+${underruns - lastUnderrunCount}) " +
+                "qDrop=$qDropCount resendReq=$resendReqCount resendFill=$resendFillCount",
+        )
+        lastUnderrunCount = underruns
+    }
+
+    /** When the queue first went over the backlog threshold, or 0 while it is healthy. */
+    private var backloggedSinceMs = 0L
+    /** Underrun count when the backlog timer armed — see [resyncIfBacklogged]. */
+    private var underrunsAtBacklogStart = 0
+    private var lastHealthLogMs = 0L
+    private var lastUnderrunCount = 0
+
     private fun resyncIfBacklogged() {
         // Only step in for a backlog well clear of normal jitter. At 2x the target this triggered
         // constantly and the "cure" — one artefact per resync — was worse than the latency it was
         // treating.
-        if (frameQueue.size < targetDepthFrames * RESYNC_TRIGGER_MULTIPLE) return
+        // SUSTAINED backlog, not instantaneous. The 4x trigger never fired in practice: the device
+        // log shows the queue parking at 58-61 against a target of 18 for minute after minute with
+        // qDrop=0, because 4x18 is 72 and it never quite got there. Forty extra frames is ~320ms of
+        // permanent added latency -- exactly the "laggy over Mac" complaint, and the resync that was
+        // supposed to relieve it sat one frame under its own threshold the entire time.
+        //
+        // Lowering the multiple alone would bring back what it was raised to fix: a 2x trigger fires
+        // on ordinary jitter and each firing is an audible artefact. Requiring the backlog to PERSIST
+        // separates the two cases — a jitter spike drains on its own within a second, a real backlog
+        // does not drain at all, because WRITE_BLOCKING paces playback at exactly realtime.
+        // Two thresholds, not one. The first version armed and disarmed on the same number, so a
+        // backlog hovering around it reset the timer on every dip and the trim never happened:
+        // the device log shows the queue sitting at 27-37 against a 36 threshold for NINETEEN
+        // seconds -- audible lag the whole time -- and only firing once a second spike pushed it to
+        // 97 and held it there. Disarming only when the queue is genuinely healthy again means a
+        // backlog that hovers still gets trimmed on schedule.
+        val depth = frameQueue.size
+        if (depth < targetDepthFrames * RESYNC_CLEAR_MULTIPLE) {
+            backloggedSinceMs = 0L
+            return
+        }
+        if (depth < targetDepthFrames * RESYNC_TRIGGER_MULTIPLE && backloggedSinceMs == 0L) return
+        val now = System.currentTimeMillis()
+        if (backloggedSinceMs == 0L) {
+            backloggedSinceMs = now
+            underrunsAtBacklogStart = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+            return
+        }
+        if (now - backloggedSinceMs < RESYNC_SUSTAIN_MS) return
+
+        // Do not trim a queue that is OSCILLATING. The device log shows this stream swinging
+        // 0 -> 50 -> 0 -> 70 with underruns climbing the whole time and resendFill in the hundreds:
+        // heavy packet loss, with retransmits arriving in bursts. That is not a standing backlog,
+        // it is the buffer doing its job. Dropping frames off the peak guarantees the next trough
+        // underruns, so trimming here actively makes the audio worse -- 300+ frames had been
+        // dropped by the end of that log and the underrun count still climbed.
+        //
+        // A genuine backlog is high AND quiet. If the track ran dry even once while the timer was
+        // running, the depth is oscillation, so leave it alone and start the clock over.
+        val underruns = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+        if (underruns > underrunsAtBacklogStart) {
+            Logger.i("Audio: queue is high but oscillating (underrun +${underruns - underrunsAtBacklogStart}) — not trimming")
+            backloggedSinceMs = 0L
+            return
+        }
+        backloggedSinceMs = 0L
         var dropped = 0
         while (frameQueue.size > targetDepthFrames && frameQueue.poll() != null) dropped++
         if (dropped > 0) {
@@ -685,7 +790,7 @@ class AudioStreamServer(
         // hits its 96-frame ceiling and evicts (observed queue=89, qDrop=10 — audible glitches).
         // The sender advertises latencyMin=11025 (250ms), so it expects far more buffering than the
         // ~40ms floor. Take the larger of the floor and TARGET_BUFFER_MS.
-        val targetBytes = bytesPerSec * TARGET_BUFFER_MS / 1000
+        val targetBytes = bytesPerSec * trackBufferMs / 1000
         val bufferBytes = maxOf(minBuf, targetBytes)
         Logger.i("AudioTrack: minBuf=${minBuf}B (~${minBuf * 1000 / bytesPerSec}ms), " +
             "buffer=${bufferBytes}B (~${bufferBytes * 1000 / bytesPerSec}ms latency)")
@@ -730,7 +835,25 @@ class AudioStreamServer(
         private const val MAX_REORDER_HOLD = 32
 
         /** How far past the target the queue must run before a resync is worth its artefact. */
-        private const val RESYNC_TRIGGER_MULTIPLE = 4
+        /**
+         * Backlog multiple that starts the clock.
+         *
+         * Was 4 (never reached), then 2 -- and 2 was still too high. The device log shows the queue
+         * parking at 26-34 against a target of 18 for fifteen seconds during PiP: above the clear
+         * point so it never disarmed, below the 36 trigger so it never armed either. Ten extra
+         * frames is ~80ms of latency that simply lived there. 1.5x arms on that.
+         */
+        private const val RESYNC_TRIGGER_MULTIPLE = 1.5f
+
+        /**
+         * Backlog multiple the queue must fall back to before the timer disarms.
+         *
+         * Below the trigger, so the arm and disarm points differ — see [resyncIfBacklogged].
+         */
+        private const val RESYNC_CLEAR_MULTIPLE = 1.15f
+
+        /** How long a backlog must persist before it counts as real rather than jitter. */
+        private const val RESYNC_SUSTAIN_MS = 3_000L
 
         // Don't ask for an absurd resend range (a huge gap = a real stall, not a few lost packets).
         private const val MAX_RESEND_RANGE = 128
@@ -763,6 +886,9 @@ class AudioStreamServer(
         private const val TARGET_BUFFER_MS = 100
 
         private const val PRIME_TIMEOUT_MS = 700L
+
+        /** One health line a second — frequent enough to see a glitch, quiet enough to read. */
+        private const val HEALTH_LOG_INTERVAL_MS = 1_000L
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
         // Backstop only: a sender that goes completely silent (disconnect, sleep) rather than

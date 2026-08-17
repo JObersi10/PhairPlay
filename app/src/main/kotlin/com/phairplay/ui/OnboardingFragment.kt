@@ -286,7 +286,7 @@ class OnboardingFragment : Fragment() {
      * Settings, so this is about surfacing the choices rather than being the only way to make them.
      */
     private fun renderPrefs() {
-        val d = draft ?: return
+        if (draft == null) return
 
         addSectionLabel(R.string.onboarding_prefs_pin)
         // Three states rather than a toggle, because "PIN on" hides a real trade-off: asked once and

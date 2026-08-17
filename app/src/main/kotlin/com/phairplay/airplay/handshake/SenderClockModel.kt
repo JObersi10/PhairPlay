@@ -140,10 +140,30 @@ class SenderClockModel(private val capacity: Int = DEFAULT_CAPACITY) {
         private const val DEFAULT_CAPACITY = 64
         private const val MIN_SAMPLES = 8
 
-        /** Below a few seconds of span, the slope is jitter rather than skew. */
-        private const val MIN_SPAN_NANOS = 5_000_000_000L
+        /**
+         * How long the samples must span before a slope means anything.
+         *
+         * Was 5s, and the arithmetic says that was never enough. Each NTP sample carries an offset
+         * error up to half its round trip, and the measured round trips here swing between 4ms and
+         * 31ms — so roughly 15ms of uncertainty at the ends of the window. Fitting a line through
+         * points that uncertain over a 5s span admits slope errors on the order of 3000ppm, which is
+         * two orders of magnitude larger than any crystal difference being measured. The device log
+         * showed the consequence directly: −16.5ppm in one session and +115.6ppm in the next, both
+         * reported with the same confidence, when consumer crystals sit within about ±50ppm.
+         *
+         * At 60s the same 15ms of endpoint noise contributes about 250ppm — still not tight, but the
+         * fit is now dominated by real drift rather than by jitter, and the estimate stops swinging.
+         */
+        private const val MIN_SPAN_NANOS = 60_000_000_000L
 
-        /** 500ppm — far beyond any real crystal, so anything past it is a bad fit. */
-        private const val MAX_SKEW = 0.0005
+        /**
+         * 100ppm. Consumer crystals are specified within roughly ±50ppm, so a fit beyond this is
+         * reporting network jitter, not a clock.
+         *
+         * The old bound was 500ppm, which is wide enough to pass a jitter-dominated fit through
+         * untouched — the clamp only caught fits that were already absurd, so the plainly wrong
+         * 115.6ppm went straight to playback as if measured.
+         */
+        private const val MAX_SKEW = 0.0001
     }
 }

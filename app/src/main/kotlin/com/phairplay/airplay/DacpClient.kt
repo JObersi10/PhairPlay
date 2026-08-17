@@ -57,6 +57,13 @@ class DacpClient(context: Context) {
     /** True once we have a sender identity (so the UI can know remote control is available). */
     val isAvailable: Boolean get() = activeRemote != null
 
+    /**
+     * Called when the sender answers a DACP command with a non-2xx status.
+     *
+     * Exists because "has a DACP identity" and "honours DACP" turned out to be different things.
+     */
+    var onCommandRejected: ((command: String, httpCode: Int) -> Unit)? = null
+
     /** Sends a DACP command (e.g. "playpause", "nextitem"). Queues if not yet resolved. */
     fun sendCommand(command: String) {
         val token = activeRemote ?: run { Logger.d("DACP '$command' ignored — no sender"); return }
@@ -81,6 +88,11 @@ class DacpClient(context: Context) {
                 val code = conn.responseCode
                 conn.disconnect()
                 Logger.i("DACP $command → HTTP $code")
+                // A DACP identity is not a promise that DACP works. iOS 26 senders advertise one,
+                // resolve, accept the connection and then answer 501 Not Implemented to every
+                // transport command -- observed on every key press in the device log. Reporting
+                // that lets the caller retry over MediaRemote instead of silently doing nothing.
+                if (code !in 200..299) onCommandRejected?.invoke(command, code)
             }.onFailure { Logger.e("DACP $command failed", it) }
         }
     }

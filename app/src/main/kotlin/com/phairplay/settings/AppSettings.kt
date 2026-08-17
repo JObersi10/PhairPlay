@@ -143,6 +143,21 @@ data class AppSettings(
     val audioDelayMs: Int = 0,
 
     /**
+     * AudioTrack hardware buffer, in milliseconds. Exposed because the right value is a property of
+     * the output, not of the app.
+     *
+     * This buffer only has to survive a scheduling hiccup between writes -- network jitter is the
+     * packet queue's job, and the two are charged against the SAME latency budget the sender asks
+     * for. So raising this does not add headroom for free: every millisecond here is a millisecond
+     * the queue does not get, and the total is audible delay either way.
+     *
+     * Low (40-60) suits HDMI out on a quiet network: least delay, but an underrun becomes a click.
+     * High (200+) rides out a busy Wi-Fi or a Bluetooth speaker at the cost of lip-sync. 100 is the
+     * default because it measured as the point where glitches stopped on HDMI.
+     */
+    val audioBufferMs: Int = DEFAULT_AUDIO_BUFFER_MS,
+
+    /**
      * Whether leaving the app during a video stream enters picture-in-picture instead of simply
      * backgrounding. Only affects mirroring — audio-only sessions have no video to shrink.
      */
@@ -215,6 +230,12 @@ data class AppSettings(
     companion object {
         /** The default settings instance used on first launch. */
         val DEFAULT = AppSettings()
+
+        /** Default AudioTrack buffer, in ms — see [audioBufferMs]. */
+        const val DEFAULT_AUDIO_BUFFER_MS = 100
+
+        /** The buffer sizes offered in Settings, in ms. */
+        val AUDIO_BUFFER_CHOICES = listOf(40, 60, 100, 150, 200, 300)
 
         /** How many app shortcuts the HomeKit input list offers. */
         const val INPUT_APP_SLOTS = 3

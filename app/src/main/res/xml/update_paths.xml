@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Only the cache directory is shared, and only the downloaded update APK ever lands there.
+    Nothing else in the app's storage is reachable through this provider.
+-->
+<paths>
+    <cache-path name="updates" path="." />
+</paths>

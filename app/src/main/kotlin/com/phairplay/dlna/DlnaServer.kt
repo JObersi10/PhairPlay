@@ -152,7 +152,7 @@ class DlnaServer(
                     headers["callback"]
                         ?.substringAfter('<')?.substringBefore('>')
                         ?.takeIf { it.startsWith("http") }
-                        ?.let { sendInitialEvent(it, subscribeSid!!, path) }
+                        ?.let { sendInitialEvent(it, subscribeSid, path) }
                     Triple(200, "text/plain", "")
                 }
                 else -> Triple(404, "text/plain", "Not Found")
@@ -264,6 +264,11 @@ class DlnaServer(
         }
     }
 
+    // `body` is unread on purpose-for-now: SetVolume carries the requested level in its SOAP body and
+    // this handler acknowledges it without applying it, so the control point sees success and no
+    // volume change. Kept in the signature because fixing that means parsing this body, not removing
+    // it. Same shape as the AVTransport handler above.
+    @Suppress("UNUSED_PARAMETER")
     private fun handleRc(action: String, body: String): String = when (action) {
         "SetVolume" -> soapOk("RenderingControl", "SetVolumeResponse")
         "GetVolume" -> soapResponse("RenderingControl", "GetVolumeResponse", "<CurrentVolume>100</CurrentVolume>")

@@ -60,7 +60,12 @@ class HomeKitBridge(
             // So: wake the screen always, but only take over the foreground when we have no other
             // way to reach the system. With the accessibility service connected the keys land
             // wherever the user actually is, which is the whole point of it.
-            if (PhairPlayAccessibilityService.isConnected) {
+            // A screensaver is a foreground activity belonging to another app, so waking the display
+            // only reveals the screensaver -- the TV lights up and PhairPlay is still not there.
+            // That is the "it won't open immediately when screensavering" case: nothing was broken,
+            // we simply never asked to come forward. Coming forward is right here even with the
+            // accessibility service connected, because there is no user navigation to interrupt.
+            if (PhairPlayAccessibilityService.isConnected && !isScreensaverShowing()) {
                 Logger.i("HomeKit: turning on — waking display (leaving foreground alone)")
                 onWakeDisplay()
                 return
@@ -86,6 +91,20 @@ class HomeKitBridge(
             )
         }
     }
+
+    /**
+     * True when a screensaver (Android "dream") is on screen.
+     *
+     * Fire OS runs its own screensaver as an ordinary foreground activity, so a wake alone leaves it
+     * in front of everything. There is no public API for this, and the reflective one is best-effort
+     * -- a false answer costs only the old behaviour, so it defaults to false rather than throwing.
+     */
+    private fun isScreensaverShowing(): Boolean = runCatching {
+        val dream = context.getSystemService("dreams") ?: return false
+        val method = dream.javaClass.getMethod("isDreaming")
+        method.isAccessible = true
+        method.invoke(dream) as? Boolean ?: false
+    }.getOrElse { false }
 
     /**
      * Blanks the display via device admin.

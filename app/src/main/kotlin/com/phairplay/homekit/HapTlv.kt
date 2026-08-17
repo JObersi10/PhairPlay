@@ -39,6 +39,20 @@ object HapTlv {
     const val STATE = 0x06
     const val ERROR = 0x07
     const val PERMISSIONS = 0x0B
+
+    /**
+     * kTLVType_Flags. Carries the pairing-type bits a controller asks for in M1.
+     *
+     * Only [FLAG_TRANSIENT] matters here, and only to report it: transient pairing stops after M4
+     * and derives the session keys straight from the SRP shared secret, which needs HKDF salt/info
+     * strings PhairPlay has no verified reference for. Rather than guess them and produce a
+     * handshake that completes with a wrong key -- the exact failure mode FairPlay v2 already has --
+     * the request is logged so the device log can answer whether any real sender asks for it.
+     */
+    const val FLAGS = 0x13
+
+    /** kPairingFlag_Transient (1 << 4). */
+    const val FLAG_TRANSIENT = 0x10
     const val SEPARATOR = 0xFF
 
     // Error codes (HAP spec table 5-7).

@@ -67,6 +67,8 @@ class AirPlayReceiver(
     private val rememberPinPairing: Boolean = true,
     /** User A/V-sync trim added on top of the sender's requested latency (AppSettings.audioDelayMs). */
     private val audioDelayMs: Int = 0,
+    /** AudioTrack hardware buffer in ms (AppSettings.audioBufferMs). */
+    private val audioBufferMs: Int = com.phairplay.settings.AppSettings.DEFAULT_AUDIO_BUFFER_MS,
     /** Extra delay for the beat animation only (AppSettings.beatDelayMs). */
     private val beatDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
@@ -150,8 +152,27 @@ class AirPlayReceiver(
     @Volatile private var urlVideoPlayer: AirPlayVideoPlayer? = null
 
     // Reverse remote control (TV → sender). Created lazily once a sender advertises DACP-ID.
-    private val dacpClient = DacpClient(context)
+    private val dacpClient = DacpClient(context).apply {
+        onCommandRejected = { command, code ->
+            // One rejection is enough to stop trying: a sender that answers 501 to playpause
+            // answers 501 to all of them, and re-asking costs a 2s HTTP round trip per key press.
+            if (!dacpRejectsCommands) {
+                Logger.i("DACP rejected '$command' with HTTP $code — switching to MediaRemote")
+                dacpRejectsCommands = true
+            }
+            DACP_TO_MEDIA_REMOTE[command]?.let { sendMediaRemoteCommand(it) }
+        }
+    }
+
+    /**
+     * True once the sender has rejected a DACP command.
+     *
+     * iOS 26 advertises a DACP identity, resolves cleanly, and then answers 501 to every transport
+     * command -- so [DacpClient.isAvailable] alone routed every key press into a dead end.
+     */
+    @Volatile private var dacpRejectsCommands = false
     @Volatile private var ntpClient: AirPlayNtpClient? = null
+
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
     /** Deferred end-of-video, pending a possible renegotiation. See [scheduleMirrorVideoStop]. */
@@ -278,12 +299,13 @@ class AirPlayReceiver(
      * has advertised a DACP identity yet.
      */
     fun sendRemoteCommand(command: String) {
-        if (dacpClient.isAvailable) {
+        if (dacpClient.isAvailable && !dacpRejectsCommands) {
             dacpClient.sendCommand(command)
             return
         }
-        // AirPlay 2 senders never advertise a DACP identity, so there is no legacy address to call.
-        // Their control path is MediaRemote over the event channel.
+        // Reached either because the sender never advertised a DACP identity, or because it did and
+        // then rejected everything (see [dacpRejectsCommands]). Either way MediaRemote over the
+        // event channel is the remaining path.
         val mrp = DACP_TO_MEDIA_REMOTE[command]
         if (mrp == null) {
             Logger.i("Remote '$command' ignored — no DACP sender and no MediaRemote equivalent")
@@ -764,6 +786,7 @@ class AirPlayReceiver(
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
             extraDelayMs = audioDelayMs.toLong(),
+            trackBufferMs = audioBufferMs,
             beatDelayMs = beatDelayMs.toLong(),
             onEnergy = { e -> onEnergyChanged(e) },
             // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
@@ -1058,7 +1081,19 @@ class AirPlayReceiver(
         private const val AUDIO_SILENCE_POLL_MS = 2_000L
 
         /** Total silence for this long means the sender is gone, not paused or briefly stalled. */
-        private const val AUDIO_SILENCE_TIMEOUT_MS = 15_000L
+        /**
+         * How long an audio stream may go silent before the session is torn down.
+         *
+         * Was 15s, which killed sessions that were merely PAUSED. The device log caught it exactly:
+         * PiP entered at 00:26:13, "Sender silent for 16181ms with no TEARDOWN — ending session" at
+         * 00:26:56 — a healthy paused stream dropped while the user was looking at it.
+         *
+         * A paused sender and a vanished sender look identical from here: both stop sending audio
+         * and neither says why. Since the cost of waiting is only a delayed cleanup of an already
+         * dead session, while the cost of firing early is disconnecting someone mid-listen, this is
+         * long enough that no realistic pause reaches it.
+         */
+        private const val AUDIO_SILENCE_TIMEOUT_MS = 300_000L
 
         /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
         private const val EVENT_MAX_BYTES = 256 * 1024

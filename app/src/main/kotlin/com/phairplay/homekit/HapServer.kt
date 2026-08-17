@@ -37,6 +37,18 @@ class HapServer(
 
     val port: Int get() = serverSocket?.localPort ?: 0
 
+    /**
+     * Concurrent HAP connections allowed.
+     *
+     * The spec asks accessories to support at least 8 simultaneous controller connections, so this
+     * sits at that floor: high enough for every real controller in a household, low enough that
+     * leaked sockets are reclaimed within a few reconnects instead of accumulating for days.
+     */
+    private val MAX_CONNECTIONS = 8
+
+    /** Monotonic id so a connection's open and close lines can be paired up in the log. */
+    private var nextConnectionId = 1
+
     fun start(): Int {
         val ss = ServerSocket(0)
         serverSocket = ss
@@ -44,13 +56,52 @@ class HapServer(
         thread(name = "hap-accept", isDaemon = true) {
             while (running) {
                 val socket = runCatching { ss.accept() }.getOrNull() ?: break
+
+                // Let the OS reap peers that vanished without closing.
+                //
+                // A HAP controller keeps its event connection open indefinitely and legitimately
+                // sends nothing for long stretches, so an idle timeout would break notifications.
+                // Keepalive is the right tool: it detects a phone that left the network or slept,
+                // rather than one that is simply quiet.
+                runCatching { socket.keepAlive = true }
+
                 val conn = Connection(socket)
                 connections += conn
+
+                // Cap the pool, oldest out first.
+                //
+                // After two days the device log showed "HAP conn #186 opened (7 open)" with six
+                // still open afterwards -- connections were accumulating across the whole uptime,
+                // each holding a thread, and the Home app had started reporting "No response".
+                // Nothing here ever closed a connection that the controller abandoned without a
+                // FIN, so they simply piled up.
+                while (connections.size > MAX_CONNECTIONS) {
+                    val oldest = connections.firstOrNull() ?: break
+                    connections -= oldest
+                    Logger.i("HAP connection pool full — dropping the oldest")
+                    runCatching { oldest.close() }
+                }
                 thread(name = "hap-conn", isDaemon = true) {
+                    // Instrumented because the Home app re-runs pair-verify constantly -- roughly
+                    // twenty times in eight minutes in the device log -- and the tile is slow to
+                    // respond. Whether that is the controller hanging up or us dropping the socket
+                    // cannot be told apart from the pairing logs alone, so record how long each
+                    // connection lived and how it ended.
+                    val openedAt = System.currentTimeMillis()
+                    val id = nextConnectionId++
+                    Logger.i("HAP conn #$id opened (${connections.size} open)")
+                    var ending = "clean EOF"
                     runCatching { conn.run() }
-                        .onFailure { if (running) Logger.w("HAP connection error: ${it.message}") }
+                        .onFailure {
+                            ending = "error: ${it.message}"
+                            if (running) Logger.w("HAP connection error: ${it.message}")
+                        }
                     connections -= conn
                     runCatching { socket.close() }
+                    Logger.i(
+                        "HAP conn #$id closed after ${System.currentTimeMillis() - openedAt}ms " +
+                            "($ending, ${connections.size} still open)",
+                    )
                 }
             }
         }

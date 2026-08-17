@@ -69,7 +69,7 @@ class HapPairing(
         val tlv = HapTlv.decode(body)
         val state = tlv[HapTlv.STATE]?.firstOrNull()?.toInt()
         return when (state) {
-            1 -> setupM1()
+            1 -> setupM1(tlv)
             3 -> setupM3(tlv)
             5 -> setupM5(tlv)
             else -> {
@@ -79,7 +79,15 @@ class HapPairing(
         }
     }
 
-    private fun setupM1(): ByteArray {
+    private fun setupM1(tlv: Map<Int, ByteArray>): ByteArray {
+        // Transient pairing (feature bit 48) is not implemented -- see HapTlv.FLAGS. Report it
+        // rather than ignoring it, because whether it is worth implementing depends entirely on
+        // whether anything actually asks, and nothing in the logs has ever said either way.
+        val flags = tlv[HapTlv.FLAGS]?.lastOrNull()?.toInt() ?: 0
+        if (flags and HapTlv.FLAG_TRANSIENT != 0) {
+            Logger.i("HAP pair-setup M1 requested TRANSIENT pairing (flags=0x${flags.toString(16)}) " +
+                "-- not implemented, continuing with the normal persistent pairing")
+        }
         // An already-paired accessory that still answered M1 would let anyone holding the code
         // pair again at will. HomeKit's model is: pair once, then manage pairings over a verified
         // session. Refuse here instead.

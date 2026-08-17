@@ -159,7 +159,19 @@
     <string name="back_action_exit_app_detail">Ends the stream and stops receiving entirely</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>
     <string name="setting_force_high_res_subtitle">Sharper mirroring; uses more CPU. Off = 1080p</string>
+    <string name="setting_audio_buffer">Audio buffer</string>
+    <string name="setting_audio_buffer_subtitle">Lower = less delay, higher = fewer glitches</string>
+    <string name="setting_audio_buffer_default">%1$d ms (default)</string>
     <string name="setting_version">Version</string>
+    <string name="setting_update">Check for updates</string>
+    <string name="setting_update_checking">Checking…</string>
+    <string name="setting_update_uptodate">Up to date (%1$s)</string>
+    <string name="setting_update_available">%1$s available</string>
+    <string name="setting_update_failed">Check failed</string>
+    <string name="setting_update_no_asset">Release %1$s has no APK attached, so there is nothing to install from here.</string>
+    <string name="setting_update_download_failed">Download failed. Nothing was installed.</string>
+    <string name="setting_update_install">Download and install</string>
+    <string name="setting_update_downloading">Downloading…</string>
     <string name="setting_reset_defaults">Reset to defaults</string>
     <string name="setting_reset_confirm">This clears every setting and replays the first-run setup on the next launch.</string>
 
@@ -268,4 +280,18 @@
     <string name="audio_from_sender">Audio from %1$s</string>
     <string name="onboarding_step">STEP %1$d OF %2$d</string>
     <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  Tail: http://%2$s:%4$s</string>
+
+    <!-- Permissions section -->
+    <string name="settings_section_permissions">Permissions</string>
+    <string name="setting_perm_on">Granted</string>
+    <string name="setting_perm_off">Not granted</string>
+    <string name="setting_perm_remote">Remote control outside PhairPlay</string>
+    <string name="setting_perm_remote_granted">Already granted. The HomeKit and iPhone remotes can navigate the whole Fire TV, not just PhairPlay.</string>
+    <string name="setting_perm_sleep">Turn the display off</string>
+    <string name="setting_perm_sleep_granted">Granted. Turning PhairPlay off in the Home app blanks the display.\n\nNote: while this is on, PhairPlay cannot be uninstalled — Android blocks it for device admins. Revoke first if you want to remove the app.</string>
+    <string name="setting_perm_revoke">Revoke</string>
+    <string name="setting_perm_open_settings">Open Settings anyway</string>
+    <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nNote: even once granted, arrow keys cannot navigate other apps on Fire TV — that needs Android 13. Back and Home do work.</string>
+    <string name="setting_perm_sleep_explanation">Lets PhairPlay blank the display when you turn it off from the Home app. Nothing else uses this.</string>
+    <string name="setting_perm_no_screen">This Fire TV has no screen for that permission. Grant it from a computer instead:\n\n%1$s</string>
 </resources>

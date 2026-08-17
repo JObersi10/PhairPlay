@@ -22,7 +22,9 @@ import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.fragment.app.Fragment
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.PhotoFrame
 import com.phairplay.service.ProtocolState
@@ -319,7 +321,7 @@ class MainActivity : AppCompatActivity() {
             builder.setSourceRectHint(bounds)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            builder.setAutoEnterEnabled(pipEnabled && currentVideoPlaying)
+            builder.setAutoEnterEnabled(pipEnabled && pipHasContent())
         }
         return builder.build()
     }
@@ -351,11 +353,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun enterPip(reason: String) {
         if (!pipSupported()) return
-        if (!currentVideoPlaying) {
-            // PiP shows the video Surface. An audio-only AirPlay session has none, so there would
-            // be nothing in the window — worth saying, because "PiP doesn't work" while listening
-            // to music is this, not a failure.
-            Logger.i("PiP skipped ($reason): no video stream on screen")
+        if (!pipHasContent()) {
+            Logger.i("PiP skipped ($reason): no active session to show")
             return
         }
         // Repeated inline rather than left to pipSupported(): lint cannot follow the version check
@@ -364,6 +363,38 @@ class MainActivity : AppCompatActivity() {
         runCatching { enterPictureInPictureMode(pipParams()) }
             .onSuccess { Logger.i("PiP entered ($reason)") }
             .onFailure { Logger.w("PiP entry refused ($reason): ${it.message}") }
+    }
+
+    /**
+     * True when there is something worth putting in a PiP window.
+     *
+     * This used to require [currentVideoPlaying], on the reasoning that PiP shows the video Surface
+     * and an audio-only session has none. That reasoning is wrong: PiP renders the whole Activity
+     * window, so an audio session shows the now-playing card -- artwork, title, progress -- which is
+     * exactly what someone listening to music while using another app wants to keep on screen.
+     * Requiring video is why "PiP doesn't work" during AirPlay audio, and the log said so plainly
+     * every time ("no video stream on screen").
+     *
+     * Matches the predicate Back already uses to decide a session is on screen, so the two cannot
+     * disagree about whether something is playing.
+     */
+    private fun pipHasContent(): Boolean =
+        currentVideoPlaying || currentNowPlaying != null ||
+            currentAirPlayState == ProtocolState.CONNECTED
+
+    /**
+     * Swaps the now-playing screen between full and compact when the window becomes a PiP.
+     *
+     * Without this the PiP window was the whole full-screen layout scaled down -- every text size
+     * chosen for a television, rendered into a thumbnail. The content was correct and unreadable.
+     */
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+        Logger.i("PiP mode changed → $isInPictureInPictureMode")
+        nowPlayingScreen.setCompact(isInPictureInPictureMode)
+        // The mirror control bar is driven by D-pad presses that cannot reach a PiP window, and it
+        // would cover most of one.
+        if (isInPictureInPictureMode) mirrorControls.hideBar()
     }
 
     /** Re-publishes PiP params whenever the thing they describe changes. */
@@ -727,6 +758,23 @@ class MainActivity : AppCompatActivity() {
         // Activity sees it — which is why both Back settings appeared to do nothing.
         // Onboarding owns the remote outright. Its pages are ordinary focusable views and need
         // Center and the D-pad to reach them untouched.
+        // "The media buttons do nothing" has two completely different causes — the key never
+        // reaching this Activity, or the command being sent and the sender ignoring it — and they
+        // are indistinguishable in a log that records neither. One line here separates them: if the
+        // key appears and no DACP send follows, the mapping is wrong; if no key appears at all, the
+        // press never left the system.
+        Logger.i("Key ${android.view.KeyEvent.keyCodeToString(keyCode)} mode=$sessionMode")
+
+        // Ignore auto-repeat. TV remotes repeat a held key roughly every 50ms, and every repeat was
+        // being turned into another transport command: the device log shows one press of REWIND
+        // producing five PreviousTrack messages inside 200ms, after which the iPhone dropped the
+        // session outright. Transport commands are edge-triggered by nature -- "next track" five
+        // times is not what any user pressing it once meant -- so only the initial press counts.
+        // Navigation keys are exempt because holding a direction to scroll IS meaningful.
+        if (event != null && event.repeatCount > 0 && !isNavigationKey(keyCode)) {
+            return true
+        }
+
         if (onboardingVisible) return super.onKeyDown(keyCode, event)
 
         if (keyCode == android.view.KeyEvent.KEYCODE_BACK) {
@@ -991,54 +1039,70 @@ class MainActivity : AppCompatActivity() {
      * Observes [PhairPlayService.airPlayState] and [PhairPlayService.photoFrame]
      * and shows the appropriate full-screen overlay.
      *
-     * Called once after the service is bound. The coroutine is automatically cancelled
-     * by [lifecycleScope] when the Activity stops.
+     * Called once after the service is bound.
+     *
+     * Every collector is gated on [Lifecycle.State.STARTED] rather than merely launched in
+     * [lifecycleScope]. The distinction matters: lifecycleScope is cancelled at DESTROY, not at
+     * STOP, so plain `lifecycleScope.launch { flow.collect { … } }` keeps running the whole time the
+     * Activity is backgrounded — behind the Fire TV launcher, with the screen off, during a PiP
+     * transition. `audioEnergy` alone emits about ten times a second, so that was a continuous
+     * stream of view mutations against a window nobody was looking at, and view work between onStop
+     * and the next onStart is exactly where lifecycle crashes come from.
+     *
+     * [repeatOnLifecycle] suspends the collection at STOP and restarts it at START, which is what
+     * the old doc comment on this method already claimed was happening.
      */
     private fun observeOverlayState() {
         val svc = service ?: return
         lifecycleScope.launch {
-            svc.airPlayState.collectLatest { state ->
-                currentAirPlayState = state
-                updateOverlay()
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    svc.airPlayState.collectLatest { state ->
+                        currentAirPlayState = state
+                        updateOverlay()
+                    }
+                }
+                launch {
+                    svc.photoFrame.collectLatest { frame ->
+                        currentPhotoFrame = frame
+                        updateOverlay()
+                    }
+                }
+                launch {
+                    svc.nowPlaying.collect { info ->
+                        currentNowPlaying = info
+                        updateOverlay()
+                    }
+                }
+                // The HomeKit remote's D-pad. Delivered as a real KeyEvent pair through the window
+                // rather than by calling onKeyDown directly, so it travels the same path as the
+                // physical remote -- focus search, fragment handling, the mirror control bar, all of
+                // it -- instead of hitting only the branches the Activity happens to implement
+                // itself. Gated with the rest: injecting a key into a stopped window does nothing
+                // useful anyway.
+                launch {
+                    svc.remoteKeys.collect { keyCode -> injectKey(keyCode) }
+                }
+                launch {
+                    svc.videoPlaying.collectLatest { playing ->
+                        currentVideoPlaying = playing
+                        refreshPipParams()
+                        updateOverlay()
+                    }
+                }
+                launch {
+                    svc.pairingPin.collectLatest { pin ->
+                        currentPin = pin
+                        updateOverlay()
+                    }
+                }
+                launch {
+                    svc.audioEnergy.collect { e -> nowPlayingScreen.setEnergy(e) }
+                }
+                launch {
+                    svc.volumeReport.collect { r -> nowPlayingScreen.setVolumeReport(r?.display) }
+                }
             }
-        }
-        lifecycleScope.launch {
-            svc.photoFrame.collectLatest { frame ->
-                currentPhotoFrame = frame
-                updateOverlay()
-            }
-        }
-        lifecycleScope.launch {
-            svc.nowPlaying.collect { info ->
-                currentNowPlaying = info
-                updateOverlay()
-            }
-        }
-        // The HomeKit remote's D-pad. Delivered as a real KeyEvent pair through the window rather
-        // than by calling onKeyDown directly, so it travels the same path as the physical remote --
-        // focus search, fragment handling, the mirror control bar, all of it -- instead of hitting
-        // only the branches the Activity happens to implement itself.
-        lifecycleScope.launch {
-            svc.remoteKeys.collect { keyCode -> injectKey(keyCode) }
-        }
-        lifecycleScope.launch {
-            svc.videoPlaying.collectLatest { playing ->
-                currentVideoPlaying = playing
-                refreshPipParams()
-                updateOverlay()
-            }
-        }
-        lifecycleScope.launch {
-            svc.pairingPin.collectLatest { pin ->
-                currentPin = pin
-                updateOverlay()
-            }
-        }
-        lifecycleScope.launch {
-            svc.audioEnergy.collect { e -> nowPlayingScreen.setEnergy(e) }
-        }
-        lifecycleScope.launch {
-            svc.volumeReport.collect { r -> nowPlayingScreen.setVolumeReport(r?.display) }
         }
     }
 

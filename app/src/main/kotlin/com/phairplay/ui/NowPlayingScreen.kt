@@ -30,6 +30,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
 import com.phairplay.R
+import com.phairplay.util.Logger
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.airplay.SenderDeviceType
 import timber.log.Timber
@@ -147,17 +148,42 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Updates the PiP progress bar once a second.
+     *
+     * Separate from [positionTick], which runs at 4Hz to animate a full-size bar and format two
+     * timestamps. In a window this size a bar moves by well under a pixel per second, so 4Hz would
+     * be three wasted wakeups out of four on hardware that is also decoding audio.
+     */
+    private val compactTick = object : Runnable {
+        override fun run() {
+            if (durationMs > 0L) {
+                val elapsed = if (positionBaseEpoch > 0L)
+                    (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier else 0f
+                val now = (positionBaseMs + elapsed.toLong()).coerceAtMost(durationMs)
+                compactProgress.setValue(((now.toFloat() / durationMs) * 10000).toInt())
+            }
+            handler.postDelayed(this, COMPACT_TICK_MS)
+        }
+    }
+
     override fun onAttachedToWindow() { super.onAttachedToWindow(); handler.post(positionTick) }
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         handler.removeCallbacks(positionTick)
+        handler.removeCallbacks(compactTick)
         handler.removeCallbacks(stopSeekRunnable)
         cancelScreensaver()
     }
 
     // ── Dynamic blob background ───────────────────────────────────────────────
     private val dynamicBg: DynamicBackground
-    fun setEnergy(e: Float) = dynamicBg.setEnergy(e)
+    fun setEnergy(e: Float) {
+        // Dropped while compact: the beat-reactive background cannot be seen in a PiP window, and
+        // repainting for it burns CPU the audio decoder needs more.
+        if (isCompact) return
+        dynamicBg.setEnergy(e)
+    }
 
     // ── Views ────────────────────────────────────────────────────────────────
     private val artworkView: ImageView
@@ -172,7 +198,28 @@ class NowPlayingScreen @JvmOverloads constructor(
     private val pillLabel: TextView
 
     /** The whole art + text block. Held as a field so the screensaver can drift and dim it. */
+    /**
+     * The artwork, full-bleed and darkened, shown ONLY in PiP.
+     *
+     * At full size the artwork is a framed tile and the backdrop is the colour-blob view. A PiP
+     * window has no room for a tile, so the art becomes the background instead -- which is what
+     * makes the compact view read as artwork-plus-title rather than as a shrunken screen.
+     */
+    /**
+     * A progress bar pinned to the bottom edge, for PiP only.
+     *
+     * The full-size progress bar lives inside the text column, so in a PiP window it sits directly
+     * under the artist with the whole lower half of the window empty below it. This one is a child
+     * of the root frame instead, so it can hold the bottom edge while the title and artist stay
+     * centred -- which is what actually fills the window.
+     */
+    private val compactProgress: ProgressView
+    private val compactArtBg: ImageView
     private val contentGroup: LinearLayout
+    /** The 340dp artwork tile. Held so PiP can drop it — it alone is wider than a PiP window. */
+    private val artWrapper: FrameLayout
+    /** The title/artist/progress column. Held so PiP can centre it. */
+    private val textColumn: LinearLayout
     private val pillWrapper: FrameLayout
 
     /** "Back of the record sleeve" — the extended credits panel toggled with the Menu key. */
@@ -192,6 +239,22 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
         addView(dynamicBg)
 
+        compactArtBg = ImageView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            // Darkened so white text stays readable over any album cover, however bright.
+            setColorFilter(Color.argb(150, 0, 0, 0), android.graphics.PorterDuff.Mode.SRC_ATOP)
+            visibility = GONE
+        }
+        addView(compactArtBg)
+
+        compactProgress = ProgressView(context).apply {
+            visibility = GONE
+        }
+        addView(compactProgress, LayoutParams(LayoutParams.MATCH_PARENT, dp(4)).also {
+            it.gravity = Gravity.BOTTOM
+        })
+
         // ── Content ──────────────────────────────────────────────────────────
         contentGroup = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -201,7 +264,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
 
         // Album art
-        val artWrapper = FrameLayout(context).apply {
+        artWrapper = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(dp(340), dp(340)).also { it.rightMargin = dp(64) }
             elevation = dp(24).toFloat()
         }
@@ -297,6 +360,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         right.addView(progressBar)
         right.addView(timeRow)
 
+        textColumn = right
         contentGroup.addView(right)
         addView(contentGroup)
 
@@ -376,6 +440,16 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun runScrollPass(view: TextView) {
         scrollAnimators.remove(view)?.cancel()
         view.scrollTo(0, 0)
+        // No scrolling in a PiP window. The pass is computed from the view's width, and a PiP window
+        // both starts narrow and gets resized while it is open, so a long title spent its time
+        // sliding around and re-measuring -- which is the compact "glitching" rather than any
+        // rendering fault. Ellipsis is the honest treatment at this size: it does not move, and a
+        // truncated title in a thumbnail is readable in a way a moving one is not.
+        if (isCompact) {
+            view.ellipsize = android.text.TextUtils.TruncateAt.END
+            return
+        }
+        view.ellipsize = null
         val overflow = (view.layout?.getLineWidth(0)?.toInt() ?: 0) -
             (view.width - view.paddingLeft - view.paddingRight)
         if (overflow <= 0 || view.visibility != View.VISIBLE) return
@@ -397,12 +471,9 @@ class NowPlayingScreen @JvmOverloads constructor(
                 if (view.isAttachedToWindow) { scrollAnimators[view] = back; back.start() }
             }
         })
-        back.addListener(object : android.animation.AnimatorListenerAdapter() {
-            override fun onAnimationEnd(animation: android.animation.Animator) {
-                // Rest at the start for a beat, then read it through again.
-                if (view.isAttachedToWindow) view.postDelayed({ runScrollPass(view) }, SCROLL_REST_MS)
-            }
-        })
+        // Out, back, done. It used to loop forever after a rest, which is movement on screen for the
+        // whole length of a track with nothing new to show -- the text has already been read once.
+        // A new pass only happens when the text itself changes, via restartScrolls().
         scrollAnimators[view] = out
         out.start()
     }
@@ -576,12 +647,21 @@ class NowPlayingScreen @JvmOverloads constructor(
             text = info.artist ?: ""; visibility = if (info.artist.isNullOrBlank()) View.GONE else View.VISIBLE
         }
         albumView.apply {
-            text = info.album ?: ""; visibility = if (info.album.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = info.album ?: ""
+            // `&& !isCompact` is the whole fix for "the album name is still there in PiP". Senders
+            // push now-playing several times a second, and each push re-ran this line and undid what
+            // setCompact had just hidden -- so the album and the composer/year row came back, took
+            // the space in a 384px window, and pushed the title out of view entirely.
+            visibility = if (info.album.isNullOrBlank() || isCompact) View.GONE else View.VISIBLE
         }
+        // Re-assert compact AFTER the render below has had its say. Senders push now-playing
+        // several times a second and each push rewrites visibility and text; anything compact had
+        // hidden came straight back. Rather than sprinkle `&& !isCompact` through every line and
+        // hope none is ever missed, the state is simply applied again at the end of the render.
         val secondaryParts = listOfNotNull(info.year?.toString(), info.genre?.takeIf { it.isNotBlank() })
         metaSecondaryView.apply {
             text = secondaryParts.joinToString(" · ")
-            visibility = if (secondaryParts.isEmpty()) View.GONE else View.VISIBLE
+            visibility = if (secondaryParts.isEmpty() || isCompact) View.GONE else View.VISIBLE
         }
 
         Timber.d("NowPlaying senderType=${info.senderDeviceType} name=${info.senderName}")
@@ -648,6 +728,17 @@ class NowPlayingScreen @JvmOverloads constructor(
         progressBar.visibility   = if (timerRunning && durationMs > 0L) View.VISIBLE else View.GONE
         timeElapsed.visibility   = if (timerRunning) View.VISIBLE else View.GONE
         timeRemaining.visibility = if (timerRunning && durationMs > 0L) View.VISIBLE else View.GONE
+
+        // THE remaining compact glitch was right here. These three lines run on every metadata push
+        // -- several a second -- and two of them had no compact check at all, so the progress bar
+        // and elapsed time reappeared inside the PiP window seconds after setCompact hid them,
+        // shoving the title around as the column re-laid itself out.
+        //
+        // Adding a third `&& !isCompact` would have fixed these three and left the next author to
+        // trip over the same thing. Re-applying the whole compact state after the render is what
+        // actually makes the bug class impossible: the render says what it wants, then compact has
+        // the final word.
+        applyCompactState()
     }
 
     /**
@@ -705,6 +796,11 @@ class NowPlayingScreen @JvmOverloads constructor(
             fade.startTransition(ARTWORK_FADE_MS)
         }
         currentArtDrawable = next
+        // A SEPARATE drawable instance, not the same one the tile shows. ImageView.setColorFilter
+        // writes the filter into the Drawable, and Drawables share state until mutated -- so the
+        // backdrop's darkening filter followed the artwork onto the full-size tile and it never came
+        // back to normal brightness after leaving PiP.
+        compactArtBg.setImageDrawable(next?.constantState?.newDrawable()?.mutate() ?: next)
     }
 
     /**
@@ -867,6 +963,24 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        // Text sizes for the PiP-compact swap. See [setCompact].
+        //
+        // FULL_* must match the sizes the views are CONSTRUCTED with, or the first exit from PiP
+        // silently restyles a screen the user never asked to change. Title is built at 36sp.
+        //
+        // COMPACT_* are small because a PiP window is a real window a few hundred pixels wide, not a
+        // scaled-down screenshot of the full one.
+        /** A window narrower than this is a PiP window, not a television. */
+        private const val COMPACT_MAX_WIDTH_DP = 500
+
+        /** The PiP progress bar moves imperceptibly, so it does not need the 4Hz treatment. */
+        private const val COMPACT_TICK_MS = 1_000L
+
+        private const val FULL_TITLE_SP = 36f
+        private const val FULL_ARTIST_SP = 22f
+        private const val COMPACT_TITLE_SP = 21f
+        private const val COMPACT_ARTIST_SP = 14f
+
         // Info-panel row labels. These double as the keys of `infoRows`, so they are plain
         // constants rather than string resources — a locale switch must not orphan the map.
         private const val FIELD_TRACK    = "TRACK"
@@ -895,9 +1009,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val BREATHE_MS = 7000L
 
         /** Overflow scroll pacing: speed, the pause at each end, and the rest before repeating. */
-        private const val SCROLL_MS_PER_PX = 14f
-        private const val SCROLL_HOLD_MS = 1_500L
-        private const val SCROLL_REST_MS = 4_000L
+        /** Slow enough to read while it moves. Was 14f, which scrolled faster than you could follow. */
+        private const val SCROLL_MS_PER_PX = 30f
+        private const val SCROLL_HOLD_MS = 2_000L
 
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
@@ -912,4 +1026,184 @@ class NowPlayingScreen @JvmOverloads constructor(
             -1f to 1f, -1f to 0f, -1f to -1f, 0f to -1f, 1f to -1f,
         )
     }
+
+    /**
+     * Switches between the full-screen layout and the compact one used inside a PiP window.
+     *
+     * PiP renders the whole Activity scaled down, so without this the user got the entire
+     * now-playing screen shrunk to thumbnail size -- album art, progress bar, elapsed/remaining
+     * times, the info pill and the secondary metadata all fighting for a window a few hundred pixels
+     * wide, with every text size chosen for a television. Legible at 1080p, unreadable at PiP size.
+     *
+     * A PiP window is glanceable, not interactive: the useful content is artwork plus what is
+     * playing. Everything that exists to be read from across a room, or pressed, is hidden and the
+     * remaining text is scaled up relative to the window. The screensaver is suspended too -- a PiP
+     * window dimming itself to a screensaver would be absurd, and the idle timer has no idea the
+     * window shrank.
+     */
+    /**
+     * Switches on the window actually being small, rather than trusting the PiP callback alone.
+     *
+     * The callback fires on the Activity, and every failure of this feature so far has come from
+     * something between that callback and these views -- ordering, a screen that was not the visible
+     * one, a size that had not been applied yet. The window's own width cannot be wrong about
+     * whether it is small, so it is the trigger, and [setCompact] stays idempotent.
+     */
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w <= 0) return
+        val small = w < COMPACT_MAX_WIDTH_DP * resources.displayMetrics.density
+        Logger.i("NowPlaying window ${w}x$h — compact=$small")
+        setCompact(small)
+        // Every resize, not only the compact transition. A PiP window can be resized by the user
+        // while it stays a PiP window (the log shows 384x216 → 728x410 → 384x216), and setCompact
+        // early-returns on those because compact has not changed -- so the marquee kept a scroll
+        // offset computed for the old width and the title sat parked off its own edge. That is the
+        // title "disappearing" that survived the last two fixes.
+        restartScrolls()
+    }
+
+    /**
+     * Records the compact state and re-applies the layout.
+     *
+     * Split from [applyCompactState] deliberately. The old version did both here AND early-returned
+     * when the flag had not changed, which made compact a one-shot transition: anything that ran
+     * afterwards and touched these views won, permanently. That is the same bug three times over --
+     * the album row reappearing on every metadata push, the title parked off-screen after a PiP
+     * resize, styles from one branch never undone. State changes are rare; re-applying is cheap and
+     * idempotent, so the apply is now something anything can call whenever it might have been
+     * disturbed.
+     */
+    fun setCompact(compact: Boolean) {
+        if (isCompact != compact) {
+            Logger.i("NowPlaying compact → $compact")
+            isCompact = compact
+            // Only on a real transition: the marquee has to recompute against the new width, and
+            // restarting it on every metadata push would make the title jump constantly.
+            restartScrolls()
+        }
+        applyCompactState()
+    }
+
+    /**
+     * Puts every view into the state [isCompact] implies. Safe to call at any time, any number of
+     * times -- both branches of every property are set explicitly, so nothing can be left behind.
+     */
+    private fun applyCompactState() {
+        val compact = isCompact
+
+        // THIS is what was actually wrong, and no amount of text sizing was ever going to fix it.
+        //
+        // The layout is a horizontal row: a 340dp artwork tile, a 64dp gap, then the text column on
+        // weight=1, inside 72dp of padding. The device log measured the PiP window at 384x216 px --
+        // about 192dp wide. The artwork tile alone is nearly twice that, so it consumed the entire
+        // row and the text column was laid out at ZERO width. Every field was VISIBLE, correctly
+        // styled, and had no space to occupy. That reads exactly like "compact mode does nothing".
+        //
+        // In a window this size the artwork cannot be shown as a tile at all, which is fine: the
+        // dark album-art backdrop is already behind everything and carries the artwork on its own.
+        artWrapper.visibility = if (compact) GONE else VISIBLE
+        compactArtBg.visibility = if (compact && currentArtDrawable != null) VISIBLE else GONE
+        val pad = if (compact) dp(12) else dp(72)
+        val padV = if (compact) dp(8) else dp(60)
+        contentGroup.setPadding(pad, padV, pad, padV)
+        contentGroup.gravity = if (compact) android.view.Gravity.CENTER else android.view.Gravity.CENTER_VERTICAL
+        textColumn.gravity =
+            if (compact) android.view.Gravity.CENTER
+            else android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.START
+
+        // Compact shows the song and who made it, and nothing else.
+        albumView.visibility = if (compact) GONE else VISIBLE
+        metaSecondaryView.visibility = if (compact) GONE else VISIBLE
+        progressBar.visibility = if (compact) GONE else VISIBLE
+        timeElapsed.visibility = if (compact) GONE else VISIBLE
+        timeRemaining.visibility = if (compact) GONE else VISIBLE
+        pillWrapper.visibility = if (compact) GONE else VISIBLE
+        debugView.visibility = if (compact) GONE else debugView.visibility
+
+        // The info panel is opened by a key press, which cannot happen in PiP -- but it can already
+        // be open when the window shrinks, and it would cover the artwork entirely.
+        if (compact) infoPanel.visibility = GONE
+
+        // SIZES GO DOWN, NOT UP. The previous attempt set 96sp here on the theory that PiP scales the
+        // rendered activity like a thumbnail, so text had to be made larger to survive the shrink.
+        // That theory was wrong. PiP is a real window resize -- the activity is re-laid-out at a few
+        // hundred pixels wide, which is exactly why `configChanges` covers screenSize -- so 96sp text
+        // simply overflowed the window and nothing was visible. Television sizes are too big for a
+        // PiP window, not too small.
+        titleView.textSize = if (compact) COMPACT_TITLE_SP else FULL_TITLE_SP
+        artistView.textSize = if (compact) COMPACT_ARTIST_SP else FULL_ARTIST_SP
+
+        // Long titles already scroll: enableMarquee() set up a custom single-line side-scroll at
+        // construction. The earlier code fought it here, switching on Android's own looping MARQUEE
+        // ellipsize and then trying to undo that on the way out -- which is how the full-size title
+        // ended up centred and wrapping to two lines instead of scrolling. Nothing about the marquee
+        // needs to change for PiP, so this now only touches alignment.
+        titleView.gravity = if (compact) android.view.Gravity.CENTER else android.view.Gravity.START
+        artistView.gravity = titleView.gravity
+
+        // Compact polish: the title carries the whole window, so it goes heavier and tighter, and
+        // the artist steps back rather than competing with it. Restored explicitly on the way out --
+        // a style set only in one branch is the bug that made the title vanish the first time.
+        titleView.letterSpacing = if (compact) -0.01f else -0.02f
+        titleView.setShadowLayer(
+            if (compact) dp(3).toFloat() else 0f, 0f, dp(1).toFloat(), Color.argb(180, 0, 0, 0))
+        artistView.setTextColor(Color.argb(if (compact) 200 else 180, 255, 255, 255))
+
+        // The dynamic background samples audio energy and repaints continuously. In a thumbnail it
+        // is invisible and still costs the same CPU, which is exactly the wrong trade on a Fire TV
+        // stick that is also decoding audio. Artwork alone carries the look at this size.
+        // GONE, not just idle. setEnergy(0f) stopped it REACTING but it kept animating: three
+        // infinite ValueAnimators driving an onDraw that repaints a full-window gradient every
+        // frame. In PiP it is completely hidden behind the artwork backdrop, so all of that work
+        // was invisible by definition -- and it was competing with the audio writer on a stick that
+        // is also decoding ALAC. The log shows what that cost: three "backlog resync — dropped 64
+        // frames" inside two seconds of entering PiP, which is the audio cutting out.
+        dynamicBg.setEnergy(0f)
+        dynamicBg.visibility = if (compact) GONE else VISIBLE
+
+        // "It ONLY shows the album art" is the screensaver, not the layout.
+        //
+        // The backdrop is a child of the root frame, but the title and artist live inside
+        // contentGroup -- and the screensaver dims contentGroup to 32% alpha and scales it to 82%.
+        // Restoring that is the job of wakeFromScreensaver(), which early-returns unless it believes
+        // the screensaver is active, and whose restore is an ANIMATION that a window resize can
+        // interrupt. Either path leaves a nearly invisible text column over a perfectly visible
+        // backdrop, which is exactly what a PiP window showing only artwork looks like.
+        //
+        // Set directly rather than animated, and unconditionally rather than through the state
+        // machine: in a PiP window there is no screensaver, so full opacity is simply the truth.
+        if (compact) {
+            contentGroup.animate().cancel()
+            contentGroup.alpha = 1f
+            contentGroup.scaleX = 1f
+            contentGroup.scaleY = 1f
+            contentGroup.translationX = 0f
+            contentGroup.translationY = 0f
+        }
+
+        // A Mac mirroring session sends no now-playing metadata at all -- the log shows artwork
+        // "0B, image/none" and not one now-playing push -- so the title is whatever it was, which on
+        // a fresh session is nothing. At full size the artwork and pill still say something is
+        // playing; in compact those are gone and the window renders completely empty.
+        if (compact && titleView.text.isNullOrBlank()) {
+            titleView.text = context.getString(R.string.now_playing_audio)
+        }
+
+        // Only when the sender told us a duration. A Mac mirroring session does not, and an empty
+        // bar pinned to the bottom of the window is worse than no bar at all.
+        compactProgress.visibility = if (compact && durationMs > 0L) VISIBLE else GONE
+        handler.removeCallbacks(compactTick)
+        if (compact) handler.post(compactTick)
+
+        // The 4Hz position ticker formats two timestamps and repaints the progress bar. All three of
+        // those are GONE in compact, so it was pure main-thread work for something nobody can see.
+        handler.removeCallbacks(positionTick)
+        if (!compact) handler.post(positionTick)
+
+        if (compact) cancelScreensaver() else notifyActivity()
+    }
+
+    private var isCompact = false
+
 }

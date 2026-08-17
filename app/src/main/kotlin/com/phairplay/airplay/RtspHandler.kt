@@ -159,6 +159,9 @@ open class RtspHandler(
     @Volatile
     private var isMirrorSession = false
 
+    /** Consumes the RTCP Sender Reports arriving on the interleaved control channel. */
+    private val senderReports = SenderReportTracker()
+
     /** Mirror stream types currently active (96 = audio, 110 = video). Drives TEARDOWN routing.
      *  `protected` so tests can seed it without driving the full FairPlay SETUP handshake. */
     protected val activeStreamTypes = mutableSetOf<Int>()
@@ -327,7 +330,8 @@ open class RtspHandler(
                     },
                     onStreamEnded = {
                         Logger.i("RTP stream ended")
-                    }
+                    },
+                    onSenderReport = { report -> senderReports.accept(report) },
                 )
             }
         } catch (e: Exception) {

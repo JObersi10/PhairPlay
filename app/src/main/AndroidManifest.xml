@@ -24,6 +24,13 @@
 
     <!-- Network permissions — local LAN only, no internet required -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        REQUEST_INSTALL_PACKAGES — lets the "Check for updates" row hand a downloaded APK to the
+        system installer. It does NOT install anything: the user still confirms on Android's own
+        installer screen. A Fire TV has no usable browser, so linking out to a release page would be
+        a dead end.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Grants the background-activity-launch exemption so PhairPlayService can open
          MainActivity directly when a sender connects. Without this, Android 10+ blocks the
@@ -206,6 +213,17 @@
             </intent-filter>
         </receiver>
 
+
+        <!-- Serves the downloaded update APK to the system installer. Cache dir only. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
     </application>
 
 </manifest>

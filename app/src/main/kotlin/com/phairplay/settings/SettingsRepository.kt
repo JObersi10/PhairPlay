@@ -124,6 +124,7 @@ class SettingsRepository(private val context: Context) {
                 else -> BackAction.STOP_STREAM
             },
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
+        audioBufferMs      = this[Keys.AUDIO_BUFFER_MS]          ?: AppSettings.DEFAULT_AUDIO_BUFFER_MS,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
         beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
@@ -156,6 +157,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
         this[Keys.BACK_ACTION]          = settings.backAction.name
         this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
+        this[Keys.AUDIO_BUFFER_MS]      = settings.audioBufferMs
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
         this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
@@ -190,6 +192,7 @@ class SettingsRepository(private val context: Context) {
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
+        val AUDIO_BUFFER_MS     = intPreferencesKey("audio_buffer_ms")
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")

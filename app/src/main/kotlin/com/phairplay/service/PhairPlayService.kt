@@ -120,9 +120,30 @@ class PhairPlayService : Service() {
         // actually on screen -- the launcher, Netflix, anything -- which is the point of having it.
         // Crucially we must NOT bring PhairPlay forward in that case: yanking the app to the front
         // on every arrow press would make the remote useless for controlling anything else.
+        // adb first. It runs `input keyevent` through the real input pipeline via the device's own
+        // adbd, so unlike accessibility focus traversal it works in EVERY app -- the launcher,
+        // Netflix, games that draw their own UI. Needs "ADB debugging" on and a one-time "Allow
+        // debugging?" prompt; both survive reboots, so this is set up once and then invisible.
+        if (com.phairplay.util.AdbShell.sendKeyEvent(this, keyCode)) return
+
+        // Root first where it exists. It runs the same `input keyevent` adb does, through the real
+        // input pipeline, so it works in apps that ignore accessibility focus -- which is most of the
+        // interesting ones. Unrooted devices (nearly all of them) skip straight past this.
+        if (com.phairplay.util.RootShell.sendKeyEvent(keyCode)) return
+
         if (PhairPlayAccessibilityService.sendKey(keyCode)) return
 
-        // Otherwise the honest scope is our own window, and the app has to be visible for a key
+        // With the accessibility service enabled, a key we could not deliver means the CURRENT app
+        // had nowhere to send it -- not that the user wanted PhairPlay. Falling through used to drag
+        // the app to the front: the log shows OK on the Fire TV home screen landing on
+        // "ServiceController: start()" and PhairPlay taking over the screen. The remote exists to
+        // drive the television, so a press that lands nowhere lands nowhere.
+        if (PhairPlayAccessibilityService.isConnected) {
+            Logger.i("Remote key $keyCode not deliverable to the foreground app — ignoring")
+            return
+        }
+
+        // Without it, the honest scope is our own window, and the app has to be visible for a key
         // aimed at it to mean anything.
         bringAppToFront()
         if (!_remoteKeys.tryEmit(keyCode)) {
@@ -202,6 +223,11 @@ class PhairPlayService : Service() {
         settingsRepository = SettingsRepository(applicationContext)
         createNotificationChannel()
         registerNetworkWatcher()
+        registerDisplayWatcher()
+        // Keep HomeKit's input tile honest when the user opens an app themselves. Only our own
+        // launches used to report, so switching apps with the physical remote left the Home app
+        // showing whatever it last selected.
+        PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
         DiagnosticServer.start(serviceScope)
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
@@ -451,9 +477,91 @@ class PhairPlayService : Service() {
         networkCallback = null
     }
 
+    /**
+     * Mirrors the TV's real power state into HomeKit's Active characteristic.
+     *
+     * Active used to change only when something wrote it — the Home app's own button, or the start
+     * of a stream. So the tile said whatever it had last been told, and a TV that had since gone to
+     * sleep, or been woken with the physical remote, kept reporting the stale value. The Home app
+     * was not wrong; nothing had ever told it.
+     *
+     * ACTION_SCREEN_ON/OFF is the closest thing Fire OS gives a normal app to "is the TV in use".
+     * It tracks the display rather than the panel's backlight, which is the right notion here: a
+     * sleeping Fire TV stick reports screen-off even while the TV itself is on another input.
+     *
+     * These two broadcasts cannot be declared in the manifest — the system only delivers them to
+     * receivers registered at runtime — which is why this lives here rather than in the manifest
+     * alongside the boot receiver.
+     */
+    private fun registerDisplayWatcher() {
+        if (displayWatcher != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                when (intent?.action) {
+                    android.content.Intent.ACTION_SCREEN_ON -> reportDisplayActive(true)
+                    android.content.Intent.ACTION_SCREEN_OFF -> reportDisplayActive(false)
+                }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_SCREEN_ON)
+            addAction(android.content.Intent.ACTION_SCREEN_OFF)
+        }
+        runCatching { registerReceiver(receiver, filter) }
+            .onSuccess {
+                displayWatcher = receiver
+                // Seed from the current state: waiting for the first transition would leave the
+                // tile stale until the user happened to sleep or wake the device.
+                reportDisplayActive(isDisplayInteractive())
+                Logger.i("HomeKit: display watcher registered")
+            }
+            .onFailure { Logger.w("HomeKit: could not watch display state — ${it.message}") }
+    }
+
+    private fun unregisterDisplayWatcher() {
+        displayWatcher?.let { runCatching { unregisterReceiver(it) } }
+        displayWatcher = null
+    }
+
+    private fun isDisplayInteractive(): Boolean = runCatching {
+        (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
+
+    /**
+     * Maps a foregrounded package onto its HomeKit input, if the user mapped one.
+     *
+     * Apps with no slot are ignored rather than guessed at: reporting an identifier HomeKit does not
+     * know about would leave the tile showing nothing at all, which is worse than showing the last
+     * real input.
+     */
+    private fun reportForegroundApp(pkg: String) {
+        val slot = homeKitInputApps.indexOfFirst { it == pkg }
+        if (slot < 0) return
+        val identifier = AppSettings.inputAppIdentifier(slot)
+        Logger.i("Foreground app $pkg → HomeKit input $identifier")
+        homeKit?.reportInput(identifier)
+    }
+
+    private fun reportDisplayActive(on: Boolean) {
+        if (lastReportedActive == on) return
+        // The accessory does not exist yet during onCreate, so the seeding call lands before there
+        // is anything to tell. Leaving lastReportedActive unset in that case means the next real
+        // transition still reports, instead of being suppressed as a duplicate of a value HomeKit
+        // was never given.
+        val receiver = homeKit ?: return
+        lastReportedActive = on
+        Logger.i("HomeKit: display ${if (on) "on" else "off"} — reporting Active=$on")
+        receiver.reportActive(on)
+    }
+
+    private var displayWatcher: android.content.BroadcastReceiver? = null
+    private var lastReportedActive: Boolean? = null
+
     override fun onDestroy() {
         Logger.i("PhairPlayService destroying")
         unregisterNetworkWatcher()
+        unregisterDisplayWatcher()
+        PhairPlayAccessibilityService.onForegroundApp = null
         stopAllReceiversInternal()
         DiagnosticServer.stop()
         serviceJob.cancel()
@@ -471,6 +579,12 @@ class PhairPlayService : Service() {
     private suspend fun startReceivers() = receiverLock.withLock {
         acquireWifiLock()
         val settings = settingsRepository.settingsFlow.first()
+        // onCreate and onStart both call ServiceController.start(), and both are meant to: binding
+        // alone never delivers onStartCommand, so dropping either one leaves the receiver tied to
+        // the Activity's lifetime. The duplicate reaching here is expected and the per-receiver
+        // "already running" guards handle it -- but logging it at info level three times a session
+        // made a normal path look like a fault, so the arrival is only worth a line when it
+        // actually changes something.
         Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, DLNA=${settings.dlnaEnabled}")
 
         senderVolumeMode = settings.senderVolumeMode
@@ -518,7 +632,13 @@ class PhairPlayService : Service() {
                 actions = bridge,
                 deviceName = { settings.displayName.ifBlank { android.os.Build.MODEL } },
                 extraInputs = inputAppEntries(settings),
-            ).also { it.start(); homeKit = it }
+            ).also {
+                it.start()
+                homeKit = it
+                // Seed Active from the real display state now that there is an accessory to tell.
+                // The watcher registered in onCreate had nothing to report to at the time.
+                reportDisplayActive(isDisplayInteractive())
+            }
         }.onFailure { Logger.e("HomeKit failed to start (streaming is unaffected)", it) }
     }
 
@@ -564,6 +684,10 @@ class PhairPlayService : Service() {
             wakeDisplay()
             startActivity(intent)
             Logger.i("HomeKit input $identifier → launched $pkg")
+            // Tell the Home app which input is live. Without this the tile kept showing whatever
+            // was last selected THERE, so launching an app from the Home app left the Home app
+            // itself out of date about what it had just done.
+            homeKit?.reportInput(identifier)
             true
         }.getOrElse {
             Logger.w("HomeKit input $identifier: could not launch $pkg — ${it.message}")
@@ -716,6 +840,7 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
+            audioBufferMs = settings.audioBufferMs,
             beatDelayMs = settings.beatDelayMs,
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
@@ -747,7 +872,10 @@ class PhairPlayService : Service() {
                         // showStreamingScreen() forever — a black SurfaceView with nothing decoding.
                         releaseStreamLocks()
                         _videoPlaying.value = false
-                        homeKit?.reportActive(false)
+                        // Deliberately NOT reportActive(false): ending a stream does not turn the
+                        // TV off, and saying so made the Home tile flip to "off" while the user was
+                        // sitting in front of a lit screen. Active follows the display now — see
+                        // registerDisplayWatcher.
                         _nowPlaying.value = null
                         _photoFrame.value = null
                         _activeConnection.value = null
