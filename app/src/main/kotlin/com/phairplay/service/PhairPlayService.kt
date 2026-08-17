@@ -25,6 +25,7 @@ import com.phairplay.MainActivity
 import com.phairplay.R
 import android.view.Surface
 import com.phairplay.airplay.AirPlayReceiver
+import com.phairplay.airplay.DacpClient
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.media.DeviceVolumeController
@@ -341,13 +342,46 @@ class PhairPlayService : Service() {
     private fun updateMediaButtons(streaming: Boolean) {
         if (streaming) {
             val s = mediaButtons ?: MediaButtonSession(applicationContext) { cmd ->
-                sendAirPlayRemoteCommand(cmd)
+                dispatchTransportCommand(cmd)
             }.also { mediaButtons = it }
             s.setPlaying(true)
         } else {
             mediaButtons?.release()
             mediaButtons = null
         }
+    }
+
+    /**
+     * Routes a transport command from the TV remote to whatever is actually playing.
+     *
+     * These are two completely different situations and sending both down the AirPlay path -- which
+     * is what this used to do -- meant the DLNA case silently did nothing as well:
+     *
+     *  - DLNA: WE are the player. ExoPlayer is in this process, so pause/play/stop are direct calls
+     *    and simply work.
+     *  - AirPlay: the SENDER is the player and we have to ask it. The only back-channel we have is
+     *    DACP, and AirPlay 2 senders do not offer one -- measured, see the DACP notes in CLAUDE.md.
+     *    So this reaches legacy RAOP senders that advertise a DACP identity and nothing else, which
+     *    is why the buttons appear dead against a modern iPhone. Fixing that means implementing
+     *    MediaRemote; the log line below is here so the distinction is visible in a capture rather
+     *    than being guessed at.
+     */
+    private fun dispatchTransportCommand(command: String) {
+        val player = dlnaServer?.mediaPlayer
+        if (_dlnaState.value == ProtocolState.CONNECTED && player != null) {
+            when (command) {
+                DacpClient.CMD_PLAY_RESUME -> player.play()
+                DacpClient.CMD_PAUSE -> player.pause()
+                DacpClient.CMD_PLAY_PAUSE -> if (player.isPlaying) player.pause() else player.play()
+                else -> Logger.i("Transport '$command' has no DLNA equivalent — ignored")
+            }
+            return
+        }
+        if (_airPlayState.value == ProtocolState.CONNECTED) {
+            sendAirPlayRemoteCommand(command)
+            return
+        }
+        Logger.i("Transport '$command' dropped — nothing is streaming")
     }
 
     /**

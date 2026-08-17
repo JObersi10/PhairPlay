@@ -282,31 +282,31 @@ class DynamicBackground @JvmOverloads constructor(
         canvas.drawColor(Color.BLACK)
         if (w <= 0f || h <= 0f) return
 
-        // Three orbs, each carrying its own palette colour, drifting slowly around the centre and
-        // breathing on the beat. SCREEN blending means where two overlap the light ADDS, the way
-        // two real glows would, instead of one occluding the other.
+        // Three orbs, each carrying its own palette colour, orbiting slowly and breathing on the
+        // beat. SCREEN blending means where two overlap the light ADDS, the way two real glows
+        // would, instead of one occluding the other.
         val sc = canvas.saveLayer(0f, 0f, w, h, null)
         val short = minOf(w, h)
-        val drift = (t1.animatedValue as Float) * 2f - 1f
-        val drift2 = (t2.animatedValue as Float) * 2f - 1f
-        val drift3 = (t3.animatedValue as Float) * 2f - 1f
+        val a1 = t1.animatedValue as Float
+        val a2 = t2.animatedValue as Float
+        val a3 = t3.animatedValue as Float
 
         for (k in 0 until ORB_COUNT) {
-            // FIXED anchor positions, not points on a shared circle.
+            // ORBITS, not linear drift.
             //
-            // A circle put two of the three orbs at the same x and both landed behind the album
-            // artwork, so only ONE was ever visible -- stranded against the right-hand side, which
-            // is what read as "the right side is cut off". Explicit anchors guarantee three
-            // genuinely separate horizontal positions across the frame. Each still drifts, on its
-            // own phase, so they breathe independently instead of moving as one rigid shape.
-            // Three animators, not two, combined per orb on different phases. With a single shared
-            // drift the trio slid back and forth as one rigid shape; mixing two of the three long
-            // animators per orb, in a different pairing each time, makes them wander independently
-            // and never quite repeat.
-            val wx = when (k) { 0 -> drift; 1 -> drift3; else -> drift2 }
-            val wy = when (k) { 0 -> drift2; 1 -> drift; else -> drift3 }
-            val cx = w * ORB_X[k] + wx * ORB_DRIFT_X * w
-            val cy = h * ORB_Y[k] + wy * ORB_DRIFT_Y * h
+            // The previous version moved each orb along a straight line (a triangle-wave animator
+            // scaled into an offset), which reads as sliding rather than floating and, worse, makes
+            // two orbs approach and retreat along the same axis so they never really pass through
+            // one another. Driving x with cos and y with sin -- from DIFFERENT animators per orb, on
+            // different phases -- puts each orb on its own slow ellipse. They wander into each
+            // other's halos from varying directions, fuse under the SCREEN blend into one brighter
+            // mass, and drift apart again, which is the "mixing" this mode is for.
+            val px = when (k) { 0 -> a1; 1 -> a2; else -> a3 }
+            val py = when (k) { 0 -> a2; 1 -> a3; else -> a1 }
+            val cx = w * ORB_X[k] +
+                Math.cos(((px * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_X * w
+            val cy = h * ORB_Y[k] +
+                Math.sin(((py * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_Y * h
 
             // Each orb rides its own smoothed energy, so they swell out of step with one another.
             val oe = (orbEnergy[k] * beatMultiplier).coerceIn(0f, 1f)
@@ -314,8 +314,13 @@ class DynamicBackground @JvmOverloads constructor(
 
             // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
             // own centre to the nearest side, less a margin. This is a hard geometric bound rather
-            // than a tuned constant, so it holds at any aspect ratio and at any beat strength --
-            // the glow can never reach a border, which is the whole point of the mode.
+            // than a tuned constant, so it holds at any aspect ratio and at any beat strength.
+            //
+            // The margin is measured against the SHORT side while the tightest gap is usually on the
+            // long one, so a wide anchor could satisfy the clamp and still leave only a sliver of
+            // black -- geometrically legal, visually "it touches the edge". The anchors and orbit
+            // amplitudes above are therefore chosen so the clamp does not bite at 16:9 at all; it is
+            // the safety net for odd window shapes (PiP), not the thing doing the work.
             val room = minOf(cx, cy, w - cx, h - cy) - short * ORB_EDGE_MARGIN
             if (room <= 0f) continue
             radius = radius.coerceAtMost(room)
@@ -325,23 +330,41 @@ class DynamicBackground @JvmOverloads constructor(
             if (orbGrads[k] == null || orbKeys[k] != key) {
                 orbKeys[k] = key
                 orbGrads[k] = RadialGradient(
-                    0f, 0f, 1f,
-                    intArrayOf(
-                        key or 0xFF000000.toInt(),
-                        key or 0xC0000000.toInt(),
-                        key or 0x40000000.toInt(),
-                        key and 0xFFFFFF,
-                    ),
-                    ORB_STOPS, Shader.TileMode.CLAMP,
+                    0f, 0f, 1f, orbHaloColors(key), ORB_STOPS, Shader.TileMode.CLAMP,
+                )
+                orbCoreGrads[k] = RadialGradient(
+                    0f, 0f, 1f, orbCoreColors(key), ORB_CORE_STOPS, Shader.TileMode.CLAMP,
                 )
             }
             val grad = orbGrads[k] ?: continue
+
+            // The halo alpha is CONSTANT. It used to rise with the beat, and because a halo covers
+            // most of the frame that lifted the whole picture a shade on every kick -- read on a
+            // projector as "the black gets lighter and darker with the beat", which is the one thing
+            // this mode must never do. The beat now shows as size here and as brightness in the
+            // core pass below, both of which are local to the orb.
             blobMatrix.setScale(radius, radius)
             blobMatrix.postTranslate(cx, cy)
             grad.setLocalMatrix(blobMatrix)
             orbPaint.shader = grad
-            orbPaint.alpha = ((ORB_BASE_ALPHA + oe * ORB_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
+            orbPaint.alpha = (ORB_BASE_ALPHA * 255).toInt().coerceIn(0, 255)
             canvas.drawCircle(cx, cy, radius, orbPaint)
+
+            // A second, much smaller pass gives the orb a bright heart instead of a flat disc of
+            // haze, so it reads as a light SOURCE with depth rather than a painted blur. This is
+            // where the beat's brightness goes: the core is a small fraction of the area, so it can
+            // punch hard without measurably lifting the black anywhere else.
+            val core = orbCoreGrads[k]
+            if (core != null) {
+                val cr = radius * ORB_CORE_FRAC
+                blobMatrix.setScale(cr, cr)
+                blobMatrix.postTranslate(cx, cy)
+                core.setLocalMatrix(blobMatrix)
+                orbPaint.shader = core
+                orbPaint.alpha =
+                    ((ORB_CORE_ALPHA + oe * ORB_CORE_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
+                canvas.drawCircle(cx, cy, cr, orbPaint)
+            }
             orbPaint.shader = null
         }
         canvas.restoreToCount(sc)
@@ -352,7 +375,35 @@ class DynamicBackground @JvmOverloads constructor(
         xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
     }
     private val orbGrads = arrayOfNulls<RadialGradient>(3)
+    private val orbCoreGrads = arrayOfNulls<RadialGradient>(3)
     private val orbKeys = IntArray(3) { -1 }
+
+    // Colour ramps, built only when an orb's quantised tint changes. Kept as helpers rather than
+    // constants because each stop carries the orb's own colour in its low 24 bits.
+    private fun orbHaloColors(key: Int) = intArrayOf(
+        key or 0xFF000000.toInt(),
+        key or 0x8C000000.toInt(),
+        key or 0x29000000.toInt(),
+        key or 0x05000000,
+        key and 0xFFFFFF,
+    )
+
+    private fun orbCoreColors(key: Int) = intArrayOf(
+        // Whitened centre: a real glow's hottest point desaturates toward white. Straight tint at
+        // full alpha looks like flat paint.
+        lighten(key, CORE_WHITEN) or 0xFF000000.toInt(),
+        key or 0xB3000000.toInt(),
+        key and 0xFFFFFF,
+    )
+
+    private fun lighten(c: Int, f: Float): Int {
+        val i = 1f - f
+        return Color.rgb(
+            (Color.red(c) * i + 255f * f).toInt().coerceIn(0, 255),
+            (Color.green(c) * i + 255f * f).toInt().coerceIn(0, 255),
+            (Color.blue(c) * i + 255f * f).toInt().coerceIn(0, 255),
+        )
+    }
 
     /**
      * Draws one blob, reusing its gradient across frames.
@@ -454,37 +505,63 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
         private const val ORB_COUNT = 3
-        private const val ORB_BASE_RADIUS = 0.20f
+        private const val ORB_BASE_RADIUS = 0.19f
+
         /**
-         * Where each orb sits, as fractions of width and height.
+         * Orbit anchors, as fractions of width and height.
          *
-         * Spread across the frame and off the vertical centre line so the trio reads as scattered
-         * rather than as a row. Kept between 0.2 and 0.8 on both axes so the edge clamp below
-         * rarely has to intervene -- it is the safety net, not the layout.
+         * Deliberately closer together than before, especially vertically. Two competing goals had
+         * to be reconciled: the orbs must MIX, which needs their halos to overlap, and none of them
+         * may approach an edge. Both are satisfied by keeping the anchors well inside the frame and
+         * spending the available room on orbit amplitude instead of on spread -- so the trio opens
+         * out and closes up over a couple of minutes rather than sitting at fixed distances.
+         *
+         * The numbers are chosen against 16:9 so that anchor + full orbit + fully swollen radius
+         * still clears the [ORB_EDGE_MARGIN] on every side without the clamp ever engaging. Vertical
+         * is the binding axis on a wide screen, which is why ORB_Y is the tighter of the two.
          */
-        private val ORB_X = floatArrayOf(0.24f, 0.55f, 0.79f)
-        private val ORB_Y = floatArrayOf(0.36f, 0.66f, 0.40f)
-        /**
-         * How far each orb wanders. Wider horizontally, because that is where the room is and where
-         * the overlap that makes them MERGE happens -- two orbs crossing at these amplitudes bring
-         * their halos into one another and the SCREEN blend fuses them into a single brighter mass
-         * before they separate again.
-         */
-        private const val ORB_DRIFT_X = 0.085f
-        private const val ORB_DRIFT_Y = 0.055f
+        private val ORB_X = floatArrayOf(0.32f, 0.52f, 0.68f)
+        private val ORB_Y = floatArrayOf(0.44f, 0.57f, 0.46f)
+
+        /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */
+        private const val ORB_DRIFT_X = 0.10f
+        private const val ORB_DRIFT_Y = 0.05f
+
+        /** Starting angle per orb, so they do not set off from the same point on their ellipses. */
+        private val ORB_PHASE = floatArrayOf(0f, 2.1f, 4.2f)
+        private const val TWO_PI = 6.2831855f
 
         /**
          * Per-orb energy smoothing. Low follows slowly (sustained level), high snaps (transients).
          */
         private val ORB_FOLLOW = floatArrayOf(0.06f, 0.16f, 0.38f)
-        /** Clearance kept between any orb and the nearest screen edge. */
-        private const val ORB_EDGE_MARGIN = 0.06f
-        private const val ORB_BEAT_SWELL = 0.34f
-        private const val ORB_BASE_ALPHA = 0.72f
-        private const val ORB_BEAT_ALPHA = 0.28f
 
-        /** Eased falloff — a linear ramp leaves a visible ring where the gradient ends. */
-        private val ORB_STOPS = floatArrayOf(0f, 0.35f, 0.65f, 1f)
+        /**
+         * Clearance kept between any orb and the nearest screen edge, as a fraction of the short
+         * side. Raised sharply from 0.06: at 1080p that was a ~65px gap, which is a hair on a 1920px
+         * screen and duly read as the orb touching the edge. 0.13 is ~140px of guaranteed black.
+         */
+        private const val ORB_EDGE_MARGIN = 0.13f
+        private const val ORB_BEAT_SWELL = 0.26f
+
+        /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
+        private const val ORB_BASE_ALPHA = 0.80f
+
+        /** The bright heart of each orb: small, so its beat brightness stays local. */
+        private const val ORB_CORE_FRAC = 0.34f
+        private const val ORB_CORE_ALPHA = 0.34f
+        private const val ORB_CORE_BEAT_ALPHA = 0.46f
+        private const val CORE_WHITEN = 0.34f
+        private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
+
+        /**
+         * Falloff. Five stops, front-loaded: most of the light is gone by 55% of the radius and only
+         * a 2%-alpha whisper survives to 80%. The earlier three-quarter-strength ramp spread a thin
+         * wash of colour over nearly the whole frame, so there was no genuinely black region left
+         * between the orbs -- they read as one lit haze rather than as separate glows on black. The
+         * long, near-zero tail is still what stops a visible ring forming where the gradient ends.
+         */
+        private val ORB_STOPS = floatArrayOf(0f, 0.25f, 0.55f, 0.8f, 1f)
         private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
         private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 

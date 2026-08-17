@@ -261,19 +261,38 @@ open class RtspHandler(
 
             while (running && scope.isActive) {
                 val clientSocket = serverSocket!!.accept()
-                connectStartMs = System.currentTimeMillis()
-                Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
-                runCatching { onSenderApproaching() }
 
-                if (activeClient != null && !activeClient!!.isClosed) {
-                    Logger.w("Rejecting second client — already streaming")
-                    sendServiceUnavailable(clientSocket)
-                    clientSocket.close()
+                // THE ACCEPT LOOP MUST NOT BLOCK.
+                //
+                // handleClient used to be called inline here, so for as long as one sender was
+                // connected this loop never came back to accept(). A second sender's connection
+                // then sat unanswered in the kernel's backlog: nothing rejected it, nothing served
+                // it, it simply queued. By the time the first sender disconnected and the loop
+                // reached accept() again, that queued socket was minutes stale -- the phone had
+                // long given up -- yet we adopted it as activeClient and sat on it, so the phone's
+                // *real* retry was then turned away as a "second client". That is the state where
+                // only restarting the receiver helped.
+                //
+                // Handling each client on its own coroutine keeps accept() responsive, which is
+                // what makes the one-sender-at-a-time policy below actually work: the newcomer
+                // gets an immediate 503 instead of being left hanging, and its next attempt
+                // succeeds the moment the first sender goes away.
+                val current = activeClient
+                if (current != null && !current.isClosed) {
+                    Logger.w("Rejecting second client ${clientSocket.inetAddress.hostAddress} — already streaming")
+                    runCatching { sendServiceUnavailable(clientSocket) }
+                    runCatching { clientSocket.close() }
                     continue
                 }
 
+                connectStartMs = System.currentTimeMillis()
+                Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
+                // Only for a sender we are actually going to serve. Firing this for a rejected
+                // connection would put the video surface up for a session that never happens.
+                runCatching { onSenderApproaching() }
+
                 activeClient = clientSocket
-                handleClient(clientSocket)
+                scope.launch(Dispatchers.IO) { handleClient(clientSocket) }
             }
         } catch (e: Exception) {
             if (running) {
@@ -346,7 +365,11 @@ open class RtspHandler(
         } finally {
             Logger.i("Client disconnected")
             socket.close()
-            activeClient = null
+            // Only disown the slot if it is still OURS. Now that each client runs on its own
+            // coroutine, a newcomer can be accepted in the window between this socket erroring and
+            // this block running; clearing unconditionally would hand that newcomer's slot away and
+            // let a third connection in behind it.
+            if (activeClient === socket) activeClient = null
             currentSession = null
             pairingSession = null
             fairPlay = null
