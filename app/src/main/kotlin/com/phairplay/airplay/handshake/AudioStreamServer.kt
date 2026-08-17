@@ -589,6 +589,7 @@ class AudioStreamServer(
         val now = System.currentTimeMillis()
         val isOnset = n >= 8 && level > mean + ONSET_SIGMA * stddev && now - lastOnsetMs > REFRACTORY_MS
         if (isOnset) {
+            if (lastOnsetMs > 0L) noteOnsetInterval(now - lastOnsetMs)
             lastOnsetMs = now
             envelope = 1f
         } else {
@@ -604,6 +605,63 @@ class AudioStreamServer(
         // emitting immediately made the backdrop flash ahead of the beat.
         emitDelayed(envelope)
     }
+
+    /**
+     * Tempo estimate from the spacing of bass onsets.
+     *
+     * The onset detector above already fires on the beat, so tempo is the interval between firings —
+     * no second analysis pass and no autocorrelation needed.
+     *
+     * Two things make a naive version useless. Onsets are missed and doubled, so a MEAN interval is
+     * dragged badly by a single outlier; the median is not. And a detector cannot tell a beat from
+     * its half or double, so raw intervals scatter across octaves — folding each into one octave
+     * before comparing is what collapses 60/120/240 onto the same answer.
+     *
+     * Reported with a confidence, because an estimate is worthless without one: on speech, ambient
+     * music or applause the intervals genuinely have no mode, and saying "94 BPM" about them would be
+     * a fabrication dressed as a measurement.
+     */
+    private fun noteOnsetInterval(intervalMs: Long) {
+        if (intervalMs < MIN_ONSET_INTERVAL_MS || intervalMs > MAX_ONSET_INTERVAL_MS) return
+        onsetIntervals[onsetIdx % onsetIntervals.size] = intervalMs
+        onsetIdx++
+        val n = minOf(onsetIdx, onsetIntervals.size)
+        if (n < MIN_INTERVALS_FOR_BPM) return
+
+        // Fold every interval into the 60..180 BPM octave, then take the median.
+        val folded = DoubleArray(n)
+        for (i in 0 until n) {
+            var bpm = 60_000.0 / onsetIntervals[i]
+            while (bpm > BPM_MAX) bpm /= 2.0
+            while (bpm < BPM_MIN) bpm *= 2.0
+            folded[i] = bpm
+        }
+        folded.sort()
+        val median = if (n % 2 == 1) folded[n / 2] else (folded[n / 2 - 1] + folded[n / 2]) / 2.0
+
+        var agree = 0
+        for (v in folded) if (Math.abs(v - median) / median <= BPM_TOLERANCE) agree++
+        val confidence = agree.toFloat() / n
+
+        currentBpm = if (confidence >= BPM_MIN_CONFIDENCE) median.toFloat() else 0f
+        val now = System.currentTimeMillis()
+        if (now - lastBpmLogMs > BPM_LOG_INTERVAL_MS) {
+            lastBpmLogMs = now
+            if (currentBpm > 0f) {
+                Logger.i("Tempo %.0f BPM (confidence %.0f%%, %d onsets)".format(currentBpm, confidence * 100f, n))
+            } else {
+                Logger.i("Tempo: no stable beat (best %.0f BPM at %.0f%% — below threshold)".format(median, confidence * 100f))
+            }
+        }
+    }
+
+    private val onsetIntervals = LongArray(24)
+    private var onsetIdx = 0
+    private var lastBpmLogMs = 0L
+
+    /** Latest tempo estimate, or 0 when no stable beat was found. */
+    @Volatile var currentBpm: Float = 0f
+        private set
 
     /**
      * One-pole coefficient for a cutoff of [hz] at the current sample rate.
@@ -622,6 +680,14 @@ class AudioStreamServer(
         val raw = RAW_BANDS
         raw[0] = bass; raw[1] = mid; raw[2] = treble
         for (b in 0 until 3) {
+            // ASYMMETRIC reference peak: jump straight to a new loudest, fall away very slowly.
+            //
+            // A symmetric decay makes the AGC fight itself. A transient sets a high reference, the
+            // ordinary material that follows normalises against it and reads near zero, the reference
+            // then decays until the same material reads high again -- so the level oscillates on a
+            // cycle that has nothing to do with the music. The device log showed bass stepping
+            // 0.02, 0.51, 0.00, 0.22, 0.17, 0.36, 0.88 across consecutive samples, which is that
+            // oscillation, not a beat. Holding the reference for several seconds removes it.
             val peak = bandPeak[b]
             bandPeak[b] = if (raw[b] > peak) raw[b] else {
                 (peak * BAND_PEAK_DECAY).coerceAtLeast(BAND_PEAK_FLOOR)
@@ -630,10 +696,13 @@ class AudioStreamServer(
             // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
             // costs no headroom at the top.
             val norm = ((ratio - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
-            // Slight upward curve. Linear normalised RMS clusters low, so the orbs sat near their
-            // base size most of the time; the exponent lifts the middle of the range where the
-            // interesting movement is without letting quiet passages read as loud.
-            bandLevel[b] = Math.pow(norm, BAND_CURVE).toFloat()
+            val shaped = Math.pow(norm, BAND_CURVE).toFloat()
+            // Envelope follower, fast up and slow down -- how a VU meter behaves, and how a glow
+            // should. A raw per-block figure is far too twitchy to drive anything visual: it is
+            // measured over ~10ms of audio, so it chatters at a rate the eye reads as noise. Rising
+            // quickly keeps the hit on the beat; falling slowly is what makes the decay look smooth.
+            val follow = if (shaped > bandLevel[b]) BAND_ATTACK else BAND_RELEASE
+            bandLevel[b] += (shaped - bandLevel[b]) * follow
         }
         // Periodic proof that the bank is alive and separating. "Are the orbs actually reacting?" is
         // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
@@ -646,6 +715,12 @@ class AudioStreamServer(
                 "Bands bass=%.2f mid=%.2f treble=%.2f".format(bandLevel[0], bandLevel[1], bandLevel[2])
             )
         }
+        // Rate-limited. This fired once per PCM BLOCK -- around 100 times a second -- so it was
+        // posting 100 runnables a second onto the main thread to animate something that redraws at
+        // 60fps, and the smoothing constants downstream were tuned for a far slower callback. 30/sec
+        // is more than the display can show.
+        if (now - lastBandEmitMs < BAND_EMIT_INTERVAL_MS) return
+        lastBandEmitMs = now
         val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
         val delay = beatEmitDelayMs()
         if (delay <= 0L) energyHandler.post { onBands(snapshot) }
@@ -654,6 +729,7 @@ class AudioStreamServer(
 
     private val RAW_BANDS = DoubleArray(3)
     private var lastBandLogMs = 0L
+    private var lastBandEmitMs = 0L
 
 
     private fun initDecoder() {
@@ -1053,7 +1129,7 @@ class AudioStreamServer(
          * 0.9985^100 = 0.86 per second, so the reference holds across a bar or two of music and a
          * quiet passage genuinely reads as quiet.
          */
-        private const val BAND_PEAK_DECAY = 0.9985
+        private const val BAND_PEAK_DECAY = 0.99985
         /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
         private const val BAND_PEAK_FLOOR = 1e-4
 
@@ -1075,6 +1151,23 @@ class AudioStreamServer(
          */
         private const val BAND_NOISE_FLOOR = 0.06
         private const val BAND_LOG_INTERVAL_MS = 2000L
+        private const val BAND_EMIT_INTERVAL_MS = 33L
+
+        /** Envelope follower, per call at ~100 calls/sec. Fast attack, slow release. */
+        private const val BAND_ATTACK = 0.30f
+        private const val BAND_RELEASE = 0.045f
+
+        // ── Tempo estimation ────────────────────────────────────────────────────────────────────
+        /** 180 BPM and 60 BPM as intervals — anything outside is a missed or doubled onset. */
+        private const val MIN_ONSET_INTERVAL_MS = 200L
+        private const val MAX_ONSET_INTERVAL_MS = 2000L
+        private const val MIN_INTERVALS_FOR_BPM = 8
+        private const val BPM_MIN = 60.0
+        private const val BPM_MAX = 180.0
+        /** How close an interval must be to the median to count as agreeing with it. */
+        private const val BPM_TOLERANCE = 0.08
+        private const val BPM_MIN_CONFIDENCE = 0.5f
+        private const val BPM_LOG_INTERVAL_MS = 5000L
 
         private const val ONSET_SIGMA = 1.5
         private const val REFRACTORY_MS = 120L

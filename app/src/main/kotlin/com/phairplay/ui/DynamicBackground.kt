@@ -59,6 +59,16 @@ class DynamicBackground @JvmOverloads constructor(
     private val tick = object : Runnable {
         override fun run() {
             energy += (energyTarget - energy) * 0.22f
+            // Per-orb easing toward the latest band level. Asymmetric on purpose: a glow should
+            // arrive with the hit and fade out afterwards, so rising is quick and falling is slow.
+            // Symmetric easing looked like the orbs were breathing on a timer rather than reacting.
+            for (i in 0 until 3) {
+                val d = orbTarget[i] - orbEnergy[i]
+                val rate = if (d > 0f) ORB_ATTACK[i] else ORB_RELEASE[i]
+                orbEnergy[i] += d * rate
+            }
+            bandBass = orbEnergy[0]
+            bandTreble = orbEnergy[2]
             invalidate()
             // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
             // is studying it, but the full-rate redraw competes for CPU with the video decoder and
@@ -92,15 +102,17 @@ class DynamicBackground @JvmOverloads constructor(
     fun setBands(bands: FloatArray) {
         if (bands.size < 3) return
         haveBands = true
-        for (i in 0 until 3) {
-            orbEnergy[i] += (bands[i] - orbEnergy[i]) * ORB_FOLLOW[i]
-        }
-        // The full-screen (non-projector) blob field reacts too, so the two modes feel like the same
-        // visual rather than two unrelated backdrops. Bass drives scale because that is what reads
-        // as the beat at a glance; treble adds a small brightness lift.
-        bandBass = orbEnergy[0]
-        bandTreble = orbEnergy[2]
+        // TARGETS only. The smoothing itself happens once per FRAME in [tick].
+        //
+        // Doing it here made the result depend on how often the audio thread happened to call: the
+        // same constants gave near-instant tracking at 100 calls/sec and visible stepping at 10, so
+        // the orbs' smoothness was a side effect of the audio block size. Frame-locked smoothing
+        // always takes the same wall-clock time to close a gap, which is the only way a fixed
+        // constant can mean anything.
+        for (i in 0 until 3) orbTarget[i] = bands[i]
     }
+
+    private val orbTarget = FloatArray(3)
 
     private var haveBands = false
     private var bandBass = 0f
@@ -136,11 +148,24 @@ class DynamicBackground @JvmOverloads constructor(
                 val hsv = FloatArray(3)
                 Color.colorToHSV(s.rgb, hsv)
                 hsv[1] = (hsv[1] * SAT_BOOST).coerceIn(SAT_FLOOR, 1f)
-                hsv[2] = hsv[2].coerceAtMost(VALUE_CEILING)
+                // FLOOR as well as ceiling. Only the ceiling was applied, so a dark swatch stayed
+                // dark: the device log recorded orb colours at v=0.09 and v=0.13, which on black is
+                // no glow at all -- the orbs were being drawn correctly and were simply invisible.
+                hsv[2] = hsv[2].coerceIn(VALUE_FLOOR, VALUE_CEILING)
                 Color.HSVToColor(hsv)
             }
             if (swatches.isEmpty()) return@generate
             val spread = spreadByHue(swatches)
+            // The log caught updateColors running four times in two seconds, twice producing a
+            // near-black palette (v=0.09). Those are the between-track placeholder and part-decoded
+            // images, not artwork, and letting them through means the backdrop lurches to black and
+            // back on every track change.
+            val hsvGuard = FloatArray(3)
+            val brightest = spread.maxOf { c -> Color.colorToHSV(c, hsvGuard); hsvGuard[2] }
+            if (brightest < MIN_USABLE_VALUE) {
+                Logger.i("Palette ignored — brightest swatch v=%.2f, too dark to glow".format(brightest))
+                return@generate
+            }
             for (i in 0 until PALETTE_SIZE) targets[i] = spread[i % spread.size]
             // The three hues the ORBS will use. A capture showed three purple orbs over a vivid
             // pink/orange/green cover, and there was no way to tell whether Palette had failed to
@@ -308,14 +333,28 @@ class DynamicBackground @JvmOverloads constructor(
             }
             if (!clash) picked += c
         }
-        // Top up by CYCLING the hue-distinct picks rather than by admitting the near-duplicates the
-        // filter above just rejected. Those duplicates used to fill the tail of the palette, and
-        // since the orbs read the first three slots, a two-colour cover produced one real hue plus
-        // two washed-out variants of it. Repeating a strong colour is better than introducing a weak
-        // one: the blobs pair slots up anyway, so a repeat still shows as motion between two tones.
+        // SYNTHESISE the shortfall by rotating hue, rather than repeating what was picked.
+        //
+        // Cycling the distinct picks was the previous attempt and it is why the log showed
+        // "51 deg, 353 deg, 51 deg" -- orbs 0 and 2 the same colour -- and, on a cover with one
+        // dominant tone, "0 deg, 0 deg, 0 deg": three identical orbs, which is indistinguishable
+        // from the bug that behaviour was meant to fix. Raising HUE_MIN_ANGLE to 40 made it MORE
+        // likely, because fewer candidates qualify as distinct.
+        //
+        // A cover that genuinely contains one colour cannot yield three, so the choice is between
+        // three identical orbs and three related ones. Rotating the strongest hue by even steps
+        // keeps the artwork's character while guaranteeing the trio reads as three lights.
         val distinct = picked.toList()
         if (distinct.isEmpty()) return DEFAULTS.map { Color.parseColor(it) }
-        while (picked.size < PALETTE_SIZE) picked += distinct[picked.size % distinct.size]
+        val synth = FloatArray(3)
+        var rotation = 1
+        while (picked.size < PALETTE_SIZE) {
+            val base = distinct[picked.size % distinct.size]
+            Color.colorToHSV(base, synth)
+            synth[0] = (synth[0] + HUE_SYNTH_STEP * rotation) % 360f
+            picked += Color.HSVToColor(synth)
+            rotation++
+        }
         return picked
     }
 
@@ -540,6 +579,12 @@ class DynamicBackground @JvmOverloads constructor(
         private const val SAT_BOOST = 1.45f
         private const val SAT_FLOOR = 0.55f
         private const val VALUE_CEILING = 0.92f
+        /** Below this an orb is black on black. See the note in updateColors. */
+        private const val VALUE_FLOOR = 0.55f
+        /** A palette whose brightest colour is under this came from a placeholder, not artwork. */
+        private const val MIN_USABLE_VALUE = 0.35f
+        /** Hue step used to invent the colours a one-tone cover cannot supply. */
+        private const val HUE_SYNTH_STEP = 47f
 
         /** Minimum hue separation between chosen palette colours, in degrees. */
         private const val HUE_MIN_ANGLE = 40f
@@ -614,8 +659,17 @@ class DynamicBackground @JvmOverloads constructor(
         private const val TWO_PI = 6.2831855f
 
         /**
-         * Per-orb energy smoothing. Low follows slowly (sustained level), high snaps (transients).
+         * Per-orb smoothing, PER FRAME at 60fps. Attack then release.
+         *
+         * Ordered by band, and the ordering is physical rather than decorative: bass is slow to rise
+         * and slow to fall because a bass note is, treble snaps because a hi-hat is over in 30ms.
+         * Release is always slower than attack so the glow trails the hit instead of flickering off
+         * with it. At 60fps a rate of 0.10 closes ~86% of a gap in a quarter second.
          */
+        private val ORB_ATTACK = floatArrayOf(0.10f, 0.16f, 0.28f)
+        private val ORB_RELEASE = floatArrayOf(0.030f, 0.045f, 0.075f)
+
+        /** Fallback smoothing for sources that report loudness but no bands. */
         private val ORB_FOLLOW = floatArrayOf(0.06f, 0.16f, 0.38f)
 
         /**
