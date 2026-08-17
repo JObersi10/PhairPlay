@@ -114,6 +114,9 @@ class MainActivity : AppCompatActivity() {
     // screen back when that session ends. A manual launch leaves this false.
     private var openedBySender = false
 
+    /** The current set of service collectors, so a rebind replaces them instead of duplicating. */
+    private var observeJob: kotlinx.coroutines.Job? = null
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             service = (binder as? PhairPlayService.LocalBinder)?.getService()
@@ -1056,7 +1059,14 @@ class MainActivity : AppCompatActivity() {
      */
     private fun observeOverlayState() {
         val svc = service ?: return
-        lifecycleScope.launch {
+        // CANCEL THE PREVIOUS SET FIRST. onStart() binds every time, so onServiceConnected fires
+        // again on every return to the Activity -- but lifecycleScope jobs live until DESTROY, not
+        // STOP, so each rebind stacked another full set of collectors on top of the old ones. The
+        // visible symptom was the HomeKit D-pad: after six start/stop cycles one press injected six
+        // KeyEvents and the cursor flew across the screen. repeatOnLifecycle suspends collection at
+        // STOP but does not stop a second collector from being created.
+        observeJob?.cancel()
+        observeJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     svc.airPlayState.collectLatest { state ->

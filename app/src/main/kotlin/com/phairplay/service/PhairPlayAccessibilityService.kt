@@ -99,12 +99,7 @@ class PhairPlayAccessibilityService : AccessibilityService() {
                 // our position to the whole screen -- which is the state every "up goes left" and
                 // stuck-direction press was computed from. A focusable leaf is never half the
                 // screen in both directions; a container claiming focus always is.
-                val screen = android.graphics.Rect().also {
-                    rootInActiveWindow?.getBoundsInScreen(it)
-                }
-                val tooWide = screen.width() > 0 && bounds.width() * 2 >= screen.width()
-                val tooTall = screen.height() > 0 && bounds.height() * 2 >= screen.height()
-                if (!bounds.isEmpty && !(tooWide && tooTall)) lastMovedTo = bounds
+                if (!isContainerSized(bounds)) lastMovedTo = bounds
             }
             return
         }
@@ -704,7 +699,30 @@ class PhairPlayAccessibilityService : AccessibilityService() {
     /** Draws our own highlight at [node], since the app will not move one for us. */
     private fun showCursor(node: AccessibilityNodeInfo) {
         val bounds = android.graphics.Rect().also { node.getBoundsInScreen(it) }
+        // A ring around the whole screen is worse than no ring: it tells the user nothing about
+        // where the cursor is and it looks like the app is broken. The sync path already refuses to
+        // ADOPT container-sized rects; this refuses to DRAW them, which matters in apps like
+        // Netflix where the only focusable node we can reach is the surface holding the whole UI.
+        if (isContainerSized(bounds)) {
+            Logger.i("Not drawing cursor: node is container-sized ($bounds)")
+            cursorOverlay?.hide()
+            return
+        }
         cursorOverlay?.moveTo(bounds)
+    }
+
+    /**
+     * True when [bounds] covers at least half the screen in BOTH directions.
+     *
+     * A focusable leaf is never that big; a container claiming focus always is. Both axes must
+     * exceed the threshold so a full-width Leanback row header still counts as a real target.
+     */
+    private fun isContainerSized(bounds: android.graphics.Rect): Boolean {
+        if (bounds.isEmpty) return true
+        val screen = android.graphics.Rect().also { rootInActiveWindow?.getBoundsInScreen(it) }
+        val tooWide = screen.width() > 0 && bounds.width() * 2 >= screen.width()
+        val tooTall = screen.height() > 0 && bounds.height() * 2 >= screen.height()
+        return tooWide && tooTall
     }
 
     /** Activates whatever currently has focus. */
