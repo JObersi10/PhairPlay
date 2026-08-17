@@ -125,6 +125,19 @@ class DynamicBackground @JvmOverloads constructor(
         // the "invisible" edge into a visible grey rectangle.
         canvas.drawColor(if (projectorMode) Color.BLACK else BASE_COLOR)
 
+        // PROJECTOR MODE draws a single glowing orb instead of the four drifting blobs.
+        //
+        // The blob field is built to fill a rectangle: four sources biased to the edges, bleeding
+        // off them. No amount of fading at the boundary makes that read as edgeless, because the
+        // eye still sees a lit rectangle with dark corners -- which is what the first attempt got
+        // wrong. A single radial source with a smooth falloff to true black has no edge to hide:
+        // the light simply runs out, the way a real glow does, and on a projector the surround is
+        // literally unlit wall.
+        if (projectorMode) {
+            drawOrb(canvas, w, h, e)
+            return
+        }
+
         // Save layer for SCREEN blending
         val sc = canvas.saveLayer(0f, 0f, w, h, null)
 
@@ -159,28 +172,6 @@ class DynamicBackground @JvmOverloads constructor(
         blob(canvas, 3, cx3, cy3, r, cs[3], beatAlpha)
 
         canvas.restoreToCount(sc)
-
-        // PROJECTOR MODE: dissolve the image into black on every side.
-        //
-        // A projector paints no light for black, so a frame that fades to true black before it
-        // reaches its own boundary appears to have no boundary — the visual floats. This is drawn
-        // AFTER the blobs and outside the SCREEN layer, so it darkens the composite rather than
-        // participating in the blend.
-        //
-        // VIGNETTE_CLEAR_STOP is what keeps the beat from clipping: the gradient stays fully
-        // transparent out to that fraction of the radius, and the centre-biased blobs above (even
-        // at their 1.25x beat peak) stay inside it, so the pulse is never cut into.
-        if (projectorMode) {
-            val rad = maxOf(w, h) * VIGNETTE_RADIUS
-            if (vignette == null || vignetteR != rad || vignetteW != w || vignetteH != h) {
-                vignetteR = rad; vignetteW = w; vignetteH = h
-                vignette = RadialGradient(w / 2f, h / 2f, rad,
-                    VIGNETTE_COLORS, VIGNETTE_STOPS, Shader.TileMode.CLAMP)
-            }
-            clearPaint.shader = vignette
-            canvas.drawRect(0f, 0f, w, h, clearPaint)
-            clearPaint.shader = null
-        }
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -260,6 +251,63 @@ class DynamicBackground @JvmOverloads constructor(
         while (picked.size < PALETTE_SIZE && picked.isNotEmpty()) picked += picked[picked.size % picked.size.coerceAtLeast(1)]
         return picked.ifEmpty { DEFAULTS.map { Color.parseColor(it) } }
     }
+
+    /**
+     * A single soft orb on true black, breathing with the beat.
+     *
+     * Deliberately built so nothing ever meets an edge: the radius is capped against the SHORTEST
+     * side, so even at the loudest beat the glow's outer falloff lands inside the frame on every
+     * side, including on a 16:9 screen where the vertical margin is the tight one. That cap is what
+     * keeps the pulse from clipping.
+     *
+     * The falloff is a four-stop ramp rather than a linear one. A straight fade to transparent has
+     * a visible outer ring where the gradient terminates; easing it out means the last of the light
+     * approaches black asymptotically and the boundary cannot be located by eye.
+     */
+    private fun drawOrb(canvas: Canvas, w: Float, h: Float, energy: Float) {
+        canvas.drawColor(Color.BLACK)
+        val cx = w / 2f
+        val cy = h / 2f
+        // Radius rides the beat, but the cap is on the short side so the glow never reaches a border.
+        val radius = minOf(w, h) * ORB_BASE_RADIUS * (1f + energy * ORB_BEAT_SWELL)
+        if (radius <= 0f) return
+
+        // Average the palette into one colour: the orb is a single light source, and cycling four
+        // hues through it would read as a colour wheel rather than as a glow.
+        var r = 0; var g = 0; var b = 0
+        for (i in 0 until PALETTE_SIZE) {
+            r += Color.red(colors[i]); g += Color.green(colors[i]); b += Color.blue(colors[i])
+        }
+        val tint = Color.rgb(r / PALETTE_SIZE, g / PALETTE_SIZE, b / PALETTE_SIZE)
+        val key = tint and 0xF8F8F8.toInt()
+        if (orbGrad == null || orbKey != key) {
+            orbKey = key
+            orbGrad = RadialGradient(
+                0f, 0f, 1f,
+                intArrayOf(
+                    key or 0xFF000000.toInt(),
+                    key or 0xC0000000.toInt(),
+                    key or 0x40000000.toInt(),
+                    key and 0xFFFFFF,
+                ),
+                ORB_STOPS, Shader.TileMode.CLAMP,
+            )
+        }
+        val grad = orbGrad ?: return
+        blobMatrix.setScale(radius, radius)
+        blobMatrix.postTranslate(cx, cy)
+        grad.setLocalMatrix(blobMatrix)
+        orbPaint.shader = grad
+        orbPaint.alpha = ((ORB_BASE_ALPHA + energy * ORB_BEAT_ALPHA) * 255)
+            .toInt().coerceIn(0, 255)
+        canvas.drawCircle(cx, cy, radius, orbPaint)
+        orbPaint.shader = null
+    }
+
+    /** No SCREEN xfermode: the orb is the only thing drawn, so there is nothing to blend with. */
+    private val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var orbGrad: RadialGradient? = null
+    private var orbKey = -1
 
     /**
      * Draws one blob, reusing its gradient across frames.
@@ -358,6 +406,15 @@ class DynamicBackground @JvmOverloads constructor(
         private val VIGNETTE_STOPS = floatArrayOf(0f, 0.45f, 0.75f, 1f)
 
         private val BLOB_STOPS = floatArrayOf(0f, 1f)
+
+        /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
+        private const val ORB_BASE_RADIUS = 0.62f
+        private const val ORB_BEAT_SWELL = 0.18f
+        private const val ORB_BASE_ALPHA = 0.72f
+        private const val ORB_BEAT_ALPHA = 0.28f
+
+        /** Eased falloff — a linear ramp leaves a visible ring where the gradient ends. */
+        private val ORB_STOPS = floatArrayOf(0f, 0.35f, 0.65f, 1f)
         private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
         private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 

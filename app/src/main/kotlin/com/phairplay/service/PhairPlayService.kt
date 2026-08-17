@@ -349,6 +349,24 @@ class PhairPlayService : Service() {
         _pairingPin.value = null
     }
 
+    /**
+     * Stops whichever protocol is streaming, other than [keep].
+     *
+     * AirPlay and DLNA render to the same audio output, so two live sessions play over each other.
+     * Nothing arbitrated between them: a DLNA cast during an AirPlay stream simply added itself,
+     * and Back then ended only one of the two.
+     */
+    private fun endOtherSession(keep: Protocol) {
+        if (keep != Protocol.DLNA && _dlnaState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending DLNA render — ${keep.name} is taking over")
+            runCatching { dlnaServer?.endSession() }
+        }
+        if (keep != Protocol.AIRPLAY && _airPlayState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending AirPlay session — ${keep.name} is taking over")
+            runCatching { airPlayReceiver?.endSession() }
+        }
+    }
+
     fun endCurrentSession() {
         Logger.i("Ending current session on user request")
         // Drop just this sender. Restarting every receiver took mDNS down and put it straight back,
@@ -891,6 +909,8 @@ class PhairPlayService : Service() {
                 _airPlayState.value = state
                 when (state) {
                     ProtocolState.CONNECTED   -> {
+                        // See endOtherSession: AirPlay and DLNA share one audio output.
+                        endOtherSession(Protocol.AIRPLAY)
                         _photoFrame.value = null
                         // A connected session with no now-playing metadata is a mirror/video
                         // stream. Setting this here (not only from onNowPlayingChanged) is what
@@ -1000,6 +1020,11 @@ class PhairPlayService : Service() {
             onStateChanged = { state ->
                 _dlnaState.value = state
                 if (state == ProtocolState.CONNECTED) {
+                    // One sender at a time. Starting a DLNA render while AirPlay was streaming left
+                    // BOTH playing -- two audio sources mixed together, and neither stoppable from
+                    // the sender that was no longer on screen. The protocols share one output, so
+                    // taking over means taking over.
+                    endOtherSession(Protocol.DLNA)
                     bringAppToFront()
                     _activeConnection.value = ActiveConnection("DLNA", Protocol.DLNA)
                 } else {

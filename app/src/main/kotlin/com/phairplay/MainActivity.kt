@@ -1229,10 +1229,11 @@ class MainActivity : AppCompatActivity() {
         // Leaving used to require openedBySender, so a manual launch sat on the waiting screen
         // forever after the stream ended. That is now the STAY_IN_APP setting rather than an
         // unconditional rule, and EXIT_APP leaves however the app was opened.
-        val leaving = when (streamEndAction) {
-            StreamEndAction.EXIT_APP -> true
-            StreamEndAction.STAY_IN_APP -> openedBySender
-        }
+        // STAY_IN_APP means STAY. This used to fall through to openedBySender, so the app auto-quit
+        // a few seconds after every stream that had opened it -- which is every stream started from
+        // a phone. That was the old unconditional behaviour wearing a setting's name; if the user
+        // has not asked to leave, we do not leave.
+        val leaving = streamEndAction == StreamEndAction.EXIT_APP
         if (!leaving) return
 
         // Still not instant, and deliberately so. Switching from screen mirroring to AirPlay video

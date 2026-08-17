@@ -777,7 +777,20 @@ class AudioStreamServer(
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
     fun setVolume(airplayVolume: Float) {
-        volumeGain = if (airplayVolume <= -144f) 0f else ((airplayVolume + 30f) / 30f).coerceIn(0f, 1f)
+        // dB -> AMPLITUDE, not a straight line through the dB range.
+        //
+        // The sender's scale is decibels: its slider maps linearly onto -30..0 dB. AudioTrack.setVolume
+        // takes a linear amplitude multiplier. Treating (db+30)/30 as that multiplier silently
+        // equates the two, which puts -15 dB -- the middle of the sender's slider -- at 0.5 amplitude
+        // when it should be 0.178. Every position except the two ends was wrong, and wrong in the
+        // direction that makes everything sound too loud until the very bottom of the travel. That is
+        // the "volume doesn't tally" report: the ends matched, so it looked close, and nothing in
+        // between did.
+        volumeGain = when {
+            airplayVolume <= -144f -> 0f                       // the sender's mute sentinel
+            airplayVolume >= 0f -> 1f
+            else -> Math.pow(10.0, (airplayVolume / 20f).toDouble()).toFloat().coerceIn(0f, 1f)
+        }
         runCatching { audioTrack?.setVolume(volumeGain) }
     }
 
