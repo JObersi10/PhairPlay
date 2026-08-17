@@ -32,6 +32,12 @@ class HapServer(
 ) {
 
     @Volatile private var serverSocket: ServerSocket? = null
+
+    /** Runs characteristic write handlers so they can never stall the connection thread. */
+    @Volatile private var writeHandlerPool: java.util.concurrent.ExecutorService =
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "hap-write").apply { isDaemon = true }
+        }
     @Volatile private var running = false
     private val connections = CopyOnWriteArrayList<Connection>()
 
@@ -82,6 +88,11 @@ class HapServer(
         }
         serverSocket = ss
         running = true
+        // SINGLE thread, not a pool: D-pad presses must be applied in the order they arrived, and a
+        // pool would let "down, down, OK" execute in any order. Daemon so it never holds up exit.
+        writeHandlerPool = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "hap-write").apply { isDaemon = true }
+        }
         thread(name = "hap-accept", isDaemon = true) {
             while (running) {
                 val socket = runCatching { ss.accept() }.getOrNull() ?: break
@@ -144,6 +155,9 @@ class HapServer(
         connections.clear()
         runCatching { serverSocket?.close() }
         serverSocket = null
+        // shutdownNow, not shutdown: a queued key press for a controller that has gone away is not
+        // worth delaying teardown for, and start() installs a fresh executor anyway.
+        runCatching { writeHandlerPool.shutdownNow() }
         Logger.i("HAP server stopped")
     }
 
@@ -369,8 +383,19 @@ class HapServer(
                     }
                     if (ch.writable) {
                         ch.value = parsed
-                        runCatching { ch.onWrite?.invoke(parsed) }
-                            .onFailure { Logger.w("HAP write handler failed for iid=$iid: ${it.message}") }
+                        // Handlers run OFF the connection thread. The 204 below is only sent once
+                        // this returns, so a slow handler does not merely delay itself -- it makes
+                        // the whole accessory stop answering, and iOS then shows the TV as
+                        // unresponsive. One handler doing a blocking network call cost exactly that.
+                        // Correctness is unaffected: HAP writes have no return value, and ch.value
+                        // is already updated above, so a read racing this still sees the new value.
+                        val handler = ch.onWrite
+                        if (handler != null) {
+                            writeHandlerPool.execute {
+                                runCatching { handler.invoke(parsed) }
+                                    .onFailure { Logger.w("HAP write handler failed for iid=$iid: ${it.message}") }
+                            }
+                        }
                         applied++
                     }
                 }

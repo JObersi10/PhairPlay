@@ -127,13 +127,16 @@ class PhairPlayService : Service() {
         // actually on screen -- the launcher, Netflix, anything -- which is the point of having it.
         // Crucially we must NOT bring PhairPlay forward in that case: yanking the app to the front
         // on every arrow press would make the remote useless for controlling anything else.
-        // adb first. It runs `input keyevent` through the real input pipeline via the device's own
-        // adbd, so unlike accessibility focus traversal it works in EVERY app -- the launcher,
-        // Netflix, games that draw their own UI. Needs "ADB debugging" on and a one-time "Allow
-        // debugging?" prompt; both survive reboots, so this is set up once and then invisible.
-        if (com.phairplay.util.AdbShell.sendKeyEvent(this, keyCode)) return
+        // The local-adb route used to run first and has been removed entirely. Tested on hardware
+        // 2026-08-17: adbd ACCEPTS a connection from the device's own address and then never answers
+        // the handshake, while answering the identical packet from another host in milliseconds. Our
+        // probe read that silence as "waiting for CNXN, as expected", sent the banner, and blocked
+        // for READ_TIMEOUT_MS. A timeout is not RefusedByDaemon, so the permanent-refusal latch never
+        // set and every press paid it again. Because HAP invokes write handlers on the hap-conn
+        // thread and sends its 204 only after they return, that stalled the whole accessory: the
+        // Home app showed the TV as off and the iPhone remote became unusable. Dead route, high cost.
 
-        // Root first where it exists. It runs the same `input keyevent` adb does, through the real
+        // Root where it exists. It runs the same `input keyevent` adb does, through the real
         // input pipeline, so it works in apps that ignore accessibility focus -- which is most of the
         // interesting ones. Unrooted devices (nearly all of them) skip straight past this.
         if (com.phairplay.util.RootShell.sendKeyEvent(keyCode)) return
