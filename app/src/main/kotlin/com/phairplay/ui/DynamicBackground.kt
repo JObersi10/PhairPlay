@@ -489,10 +489,14 @@ class DynamicBackground @JvmOverloads constructor(
     // Colour ramps, built only when an orb's quantised tint changes. Kept as helpers rather than
     // constants because each stop carries the orb's own colour in its low 24 bits.
     private fun orbHaloColors(key: Int) = intArrayOf(
+        // Carries more of its brightness outward than the first version did. That ramp was tuned to
+        // rescue the black between orbs, and it worked -- but it also meant a 259px orb put almost
+        // all of its light inside ~140px, which on a 1080p capture read as a dot rather than a glow.
+        // The long near-zero tail is what keeps the black; the middle stops are what make it a glow.
         key or 0xFF000000.toInt(),
-        key or 0x8C000000.toInt(),
-        key or 0x29000000.toInt(),
-        key or 0x05000000,
+        key or 0xA8000000.toInt(),
+        key or 0x42000000,
+        key or 0x0A000000,
         key and 0xFFFFFF,
     )
 
@@ -666,7 +670,7 @@ class DynamicBackground @JvmOverloads constructor(
          * Release is always slower than attack so the glow trails the hit instead of flickering off
          * with it. At 60fps a rate of 0.10 closes ~86% of a gap in a quarter second.
          */
-        private val ORB_ATTACK = floatArrayOf(0.10f, 0.16f, 0.28f)
+        private val ORB_ATTACK = floatArrayOf(0.22f, 0.30f, 0.42f)
         private val ORB_RELEASE = floatArrayOf(0.030f, 0.045f, 0.075f)
 
         /** Fallback smoothing for sources that report loudness but no bands. */
@@ -706,7 +710,7 @@ class DynamicBackground @JvmOverloads constructor(
          * between the orbs -- they read as one lit haze rather than as separate glows on black. The
          * long, near-zero tail is still what stops a visible ring forming where the gradient ends.
          */
-        private val ORB_STOPS = floatArrayOf(0f, 0.25f, 0.55f, 0.8f, 1f)
+        private val ORB_STOPS = floatArrayOf(0f, 0.34f, 0.62f, 0.85f, 1f)
         private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
         private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 
