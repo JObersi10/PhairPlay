@@ -28,6 +28,7 @@ import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.media.DeviceVolumeController
+import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -332,6 +333,21 @@ class PhairPlayService : Service() {
      */
     fun sendAirPlayRemoteCommand(command: String) {
         airPlayReceiver?.sendRemoteCommand(command)
+    }
+
+    /** Media-button owner, alive only while something is streaming. */
+    private var mediaButtons: MediaButtonSession? = null
+
+    private fun updateMediaButtons(streaming: Boolean) {
+        if (streaming) {
+            val s = mediaButtons ?: MediaButtonSession(applicationContext) { cmd ->
+                sendAirPlayRemoteCommand(cmd)
+            }.also { mediaButtons = it }
+            s.setPlaying(true)
+        } else {
+            mediaButtons?.release()
+            mediaButtons = null
+        }
     }
 
     /**
@@ -907,6 +923,10 @@ class PhairPlayService : Service() {
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state
+                // Own the transport keys while streaming, and only while streaming. Fire OS routes
+                // PLAY/PAUSE to the active MediaSession rather than to the focused Activity, which
+                // is why the Activity's key handler never saw one.
+                updateMediaButtons(state == ProtocolState.CONNECTED)
                 when (state) {
                     ProtocolState.CONNECTED   -> {
                         // See endOtherSession: AirPlay and DLNA share one audio output.

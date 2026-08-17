@@ -285,6 +285,11 @@ class AirPlayReceiver(
 
     fun endSession() {
         Logger.i("Ending AirPlay session on user request")
+        // TELL THE SENDER FIRST. Dropping the RTSP socket ends the session on our side but says
+        // nothing to the phone, which stays selected on this AirPlay output and simply carries on
+        // playing -- so Back looked like it had not stopped anything. A pause has to go out while
+        // the control path is still up, because a moment later there is nothing left to send it on.
+        runCatching { sendRemoteCommand(DacpClient.CMD_PAUSE) }
         rtspHandler?.disconnectActiveClient()
         // Closing the RTSP control socket does not touch the UDP media servers — they are separate
         // sockets and keep receiving and playing whatever the sender is still transmitting, which is
@@ -1095,6 +1100,7 @@ class AirPlayReceiver(
         private val DACP_TO_MEDIA_REMOTE = mapOf(
             DacpClient.CMD_PLAY_PAUSE to MediaRemote.TOGGLE_PLAY_PAUSE,
             DacpClient.CMD_PLAY_RESUME to MediaRemote.PLAY,
+            DacpClient.CMD_PAUSE to MediaRemote.PAUSE,
             DacpClient.CMD_NEXT to MediaRemote.NEXT_TRACK,
             DacpClient.CMD_PREV to MediaRemote.PREVIOUS_TRACK,
             DacpClient.CMD_FF to MediaRemote.BEGIN_FAST_FORWARD,

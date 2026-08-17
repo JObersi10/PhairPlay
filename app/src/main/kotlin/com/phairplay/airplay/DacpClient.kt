@@ -155,6 +155,8 @@ class DacpClient(context: Context) {
         const val CMD_FF = "beginff"
         const val CMD_REW = "beginrew"
         const val CMD_PLAY_RESUME = "playresume"
+        /** Explicit pause. Needed when ending a session: "playpause" on a paused sender resumes it. */
+        const val CMD_PAUSE = "pause"
         const val CMD_FF_STOP = "stopff"
         const val CMD_REW_STOP = "stoprew"
         const val CMD_VOLUME_UP = "volumeup"

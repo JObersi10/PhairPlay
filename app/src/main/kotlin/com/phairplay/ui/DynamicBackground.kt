@@ -69,7 +69,21 @@ class DynamicBackground @JvmOverloads constructor(
     override fun onAttachedToWindow() { super.onAttachedToWindow(); t1.start(); t2.start(); t3.start(); handler.post(tick) }
     override fun onDetachedFromWindow() { super.onDetachedFromWindow(); t1.cancel(); t2.cancel(); t3.cancel(); handler.removeCallbacks(tick) }
 
-    fun setEnergy(e: Float) { energyTarget = e }
+    fun setEnergy(e: Float) {
+        energyTarget = e
+        // A CRUDE BAND SPLIT, and worth naming as such: the audio path hands us one broadband
+        // energy figure, not a spectrum, so this is not a real FFT. Each orb follows that figure
+        // with its own smoothing constant, which separates them by how FAST they respond -- the
+        // slow one tracks sustained level (roughly what bass does), the fast one snaps to
+        // transients (roughly percussion). It reads as three orbs reacting to different parts of
+        // the music because in time-domain terms they are. Real per-band reaction needs an FFT in
+        // AudioStreamServer; this is deliberately the cheap version.
+        for (i in orbEnergy.indices) {
+            orbEnergy[i] += (e - orbEnergy[i]) * ORB_FOLLOW[i]
+        }
+    }
+
+    private val orbEnergy = FloatArray(3)
 
     /** Halves the redraw rate — set while the window is a PiP thumbnail. */
     fun setLowPower(on: Boolean) { lowPower = on }
@@ -275,6 +289,7 @@ class DynamicBackground @JvmOverloads constructor(
         val short = minOf(w, h)
         val drift = (t1.animatedValue as Float) * 2f - 1f
         val drift2 = (t2.animatedValue as Float) * 2f - 1f
+        val drift3 = (t3.animatedValue as Float) * 2f - 1f
 
         for (k in 0 until ORB_COUNT) {
             // FIXED anchor positions, not points on a shared circle.
@@ -284,10 +299,18 @@ class DynamicBackground @JvmOverloads constructor(
             // is what read as "the right side is cut off". Explicit anchors guarantee three
             // genuinely separate horizontal positions across the frame. Each still drifts, on its
             // own phase, so they breathe independently instead of moving as one rigid shape.
-            val cx = w * ORB_X[k] + (drift * ORB_DRIFT * w) * (if (k % 2 == 0) 1f else -1f)
-            val cy = h * ORB_Y[k] + (drift2 * ORB_DRIFT * h) * (if (k == 1) 1f else -1f)
+            // Three animators, not two, combined per orb on different phases. With a single shared
+            // drift the trio slid back and forth as one rigid shape; mixing two of the three long
+            // animators per orb, in a different pairing each time, makes them wander independently
+            // and never quite repeat.
+            val wx = when (k) { 0 -> drift; 1 -> drift3; else -> drift2 }
+            val wy = when (k) { 0 -> drift2; 1 -> drift; else -> drift3 }
+            val cx = w * ORB_X[k] + wx * ORB_DRIFT_X * w
+            val cy = h * ORB_Y[k] + wy * ORB_DRIFT_Y * h
 
-            var radius = short * ORB_BASE_RADIUS * (1f + energy * ORB_BEAT_SWELL)
+            // Each orb rides its own smoothed energy, so they swell out of step with one another.
+            val oe = (orbEnergy[k] * beatMultiplier).coerceIn(0f, 1f)
+            var radius = short * ORB_BASE_RADIUS * (1f + oe * ORB_BEAT_SWELL)
 
             // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
             // own centre to the nearest side, less a margin. This is a hard geometric bound rather
@@ -317,7 +340,7 @@ class DynamicBackground @JvmOverloads constructor(
             blobMatrix.postTranslate(cx, cy)
             grad.setLocalMatrix(blobMatrix)
             orbPaint.shader = grad
-            orbPaint.alpha = ((ORB_BASE_ALPHA + energy * ORB_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
+            orbPaint.alpha = ((ORB_BASE_ALPHA + oe * ORB_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
             canvas.drawCircle(cx, cy, radius, orbPaint)
             orbPaint.shader = null
         }
@@ -431,7 +454,7 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
         private const val ORB_COUNT = 3
-        private const val ORB_BASE_RADIUS = 0.17f
+        private const val ORB_BASE_RADIUS = 0.20f
         /**
          * Where each orb sits, as fractions of width and height.
          *
@@ -441,11 +464,22 @@ class DynamicBackground @JvmOverloads constructor(
          */
         private val ORB_X = floatArrayOf(0.24f, 0.55f, 0.79f)
         private val ORB_Y = floatArrayOf(0.36f, 0.66f, 0.40f)
-        /** Gentle independent wander, as a fraction of the view. */
-        private const val ORB_DRIFT = 0.045f
+        /**
+         * How far each orb wanders. Wider horizontally, because that is where the room is and where
+         * the overlap that makes them MERGE happens -- two orbs crossing at these amplitudes bring
+         * their halos into one another and the SCREEN blend fuses them into a single brighter mass
+         * before they separate again.
+         */
+        private const val ORB_DRIFT_X = 0.085f
+        private const val ORB_DRIFT_Y = 0.055f
+
+        /**
+         * Per-orb energy smoothing. Low follows slowly (sustained level), high snaps (transients).
+         */
+        private val ORB_FOLLOW = floatArrayOf(0.06f, 0.16f, 0.38f)
         /** Clearance kept between any orb and the nearest screen edge. */
         private const val ORB_EDGE_MARGIN = 0.06f
-        private const val ORB_BEAT_SWELL = 0.22f
+        private const val ORB_BEAT_SWELL = 0.34f
         private const val ORB_BASE_ALPHA = 0.72f
         private const val ORB_BEAT_ALPHA = 0.28f
 
