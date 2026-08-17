@@ -446,9 +446,17 @@ class NowPlayingScreen @JvmOverloads constructor(
         // rendering fault. Ellipsis is the honest treatment at this size: it does not move, and a
         // truncated title in a thumbnail is readable in a way a moving one is not.
         if (isCompact) {
+            // Horizontal scrolling has to go, not just the animation. A TextView with
+            // setHorizontallyScrolling(true) does not apply ellipsize at all and can still hold a
+            // scroll offset, so the "static, truncated" title was neither: it kept whatever offset
+            // it was left with and rendered blank. Turn scrolling off, park it at zero, then
+            // ellipsize.
+            view.setHorizontallyScrolling(false)
+            view.scrollTo(0, 0)
             view.ellipsize = android.text.TextUtils.TruncateAt.END
             return
         }
+        view.setHorizontallyScrolling(true)
         view.ellipsize = null
         val overflow = (view.layout?.getLineWidth(0)?.toInt() ?: 0) -
             (view.width - view.paddingLeft - view.paddingRight)
@@ -466,9 +474,18 @@ class NowPlayingScreen @JvmOverloads constructor(
             interpolator = DecelerateInterpolator()
             addUpdateListener { view.scrollTo(it.animatedValue as Int, 0) }
         }
+        // onAnimationEnd fires on CANCEL as well as on completion, so cancelling the outward pass
+        // used to immediately start the return pass -- which then kept writing scrollTo using an
+        // offset computed for the OLD width, on a view the compact branch had already walked away
+        // from. That is the title parking itself off its own edge in PiP, and it is why cancelling
+        // the animator was not enough to stop it. Only chain the return pass on a real completion.
+        var cancelled = false
         out.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationCancel(animation: android.animation.Animator) { cancelled = true }
             override fun onAnimationEnd(animation: android.animation.Animator) {
-                if (view.isAttachedToWindow) { scrollAnimators[view] = back; back.start() }
+                if (cancelled || isCompact || !view.isAttachedToWindow) return
+                scrollAnimators[view] = back
+                back.start()
             }
         })
         // Out, back, done. It used to loop forever after a rest, which is movement on screen for the
