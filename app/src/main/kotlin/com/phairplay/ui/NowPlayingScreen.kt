@@ -851,8 +851,15 @@ class NowPlayingScreen @JvmOverloads constructor(
 
     /** Edgeless projector look — see [DynamicBackground.setProjectorMode]. */
     fun setProjectorMode(on: Boolean) {
+        if (projectorMode == on) return
+        projectorMode = on
         dynamicBg.setProjectorMode(on)
+        // Re-apply so the album-art backdrop is dropped (or restored) straight away rather than at
+        // the next compact transition, which might be minutes later or never.
+        applyCompactState()
     }
+
+    private var projectorMode = false
 
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {
         screensaverEnabled = enabled
@@ -1126,7 +1133,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         // In a window this size the artwork cannot be shown as a tile at all, which is fine: the
         // dark album-art backdrop is already behind everything and carries the artwork on its own.
         artWrapper.visibility = if (compact) GONE else VISIBLE
-        compactArtBg.visibility = if (compact && currentArtDrawable != null) VISIBLE else GONE
+        // Never in projector mode. This is a full-screen, centre-cropped album cover behind
+        // everything -- exactly the thing the mode exists to get rid of. Leaving it visible in a PiP
+        // window meant "black background" was in fact a darkened album cover, which on a projector
+        // is a lit rectangle with hard edges: the one thing the orbs are shaped to avoid.
+        compactArtBg.visibility =
+            if (compact && currentArtDrawable != null && !projectorMode) VISIBLE else GONE
         val pad = if (compact) dp(12) else dp(72)
         val padV = if (compact) dp(8) else dp(60)
         contentGroup.setPadding(pad, padV, pad, padV)
