@@ -180,6 +180,17 @@ data class AppSettings(
      */
     val remoteEnabled: Boolean = false,
 
+    /**
+     * Edgeless "projector" look for the now-playing screen: true black instead of the lifted TV
+     * base, the beat visual pulled to the middle, and a vignette that dissolves it into black on
+     * every side. On a projector black is simply no light, so the picture appears to have no
+     * boundary at all. Off by default — on a normal TV it just looks dimmer.
+     */
+    val projectorMode: Boolean = false,
+
+    /** What to do when a stream ends. */
+    val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,
+
     /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
     val beatPulse: Int = 0,
 
@@ -297,5 +308,20 @@ enum class BackAction {
     companion object {
         fun fromName(name: String?): BackAction =
             entries.firstOrNull { it.name == name } ?: STOP_STREAM
+    }
+}
+
+/** What PhairPlay does when the sender stops streaming. */
+enum class StreamEndAction {
+    /** Stay on the waiting screen with the receiver running, ready for the next sender. */
+    STAY_IN_APP,
+
+    /** Leave immediately for the Fire TV home screen. The receiver keeps running in the service. */
+    EXIT_APP,
+    ;
+
+    companion object {
+        fun fromName(name: String?): StreamEndAction =
+            entries.firstOrNull { it.name == name } ?: STAY_IN_APP
     }
 }

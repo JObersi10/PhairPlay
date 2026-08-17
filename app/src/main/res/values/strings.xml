@@ -286,9 +286,14 @@
     <string name="setting_perm_on">Granted</string>
     <string name="setting_perm_off">Not granted</string>
     <string name="setting_perm_remote">Remote control outside PhairPlay</string>
-    <string name="setting_perm_remote_granted">Already granted. The HomeKit and iPhone remotes can navigate the whole Fire TV, not just PhairPlay.</string>
+    <string name="setting_perm_remote_granted">Granted. The remote can navigate outside PhairPlay — but Fire TV blocks the normal way to move the selection, so expect it to be unresponsive or to skip around on the home screen and in apps like Netflix. Root is the only way to make this reliable everywhere.</string>
     <string name="setting_remote">Remote control</string>
-    <string name="setting_remote_subtitle">Off by default because it is unreliable. Fire TV blocks the way apps normally move the selection, so PhairPlay has to fake it — expect it to be unresponsive or skip around on the home screen and in apps like Netflix. Inside PhairPlay it works properly. A rooted Fire TV can inject real button presses and is the only way to get this working everywhere.</string>
+    <string name="setting_remote_subtitle">Off by default. Works properly inside PhairPlay; unreliable elsewhere — see the permission notice below.</string>
+
+    <string name="setting_projector">Projector mode</string>
+    <string name="setting_projector_subtitle">Pure black background with the beat visual centred and faded out on every side, so a projected image has no visible edge.</string>
+    <string name="setting_stream_end">Exit when the stream ends</string>
+    <string name="setting_stream_end_subtitle">Leave for the Fire TV home screen as soon as the sender stops. Off keeps PhairPlay on screen, ready for the next stream.</string>
     <string name="setting_perm_overlay">Show the remote\'s focus ring</string>
     <string name="setting_perm_overlay_granted">Granted. The remote draws its own highlight in apps that will not move theirs — the Fire TV launcher among them.</string>
     <string name="setting_perm_overlay_explanation">The Fire TV launcher refuses to move its highlight for the remote, so PhairPlay draws its own ring instead. Without this the remote still navigates and selects — you just cannot see where it is.</string>
@@ -296,7 +301,7 @@
     <string name="setting_perm_sleep_granted">Granted. Turning PhairPlay off in the Home app blanks the display.\n\nNote: while this is on, PhairPlay cannot be uninstalled — Android blocks it for device admins. Revoke first if you want to remove the app.</string>
     <string name="setting_perm_revoke">Revoke</string>
     <string name="setting_perm_open_settings">Open Settings anyway</string>
-    <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nNote: even once granted, arrow keys cannot navigate other apps on Fire TV — that needs Android 13. Back and Home do work.</string>
+    <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nEven once granted, expect the remote to be unresponsive or to skip around on the Fire TV home screen and in apps like Netflix. Fire TV blocks the way apps normally move the selection, so PhairPlay has to fake it with a drawn highlight and synthetic swipes. Inside PhairPlay the remote works properly. A rooted Fire TV can inject real button presses and is the only way to get this working everywhere.</string>
     <string name="setting_perm_sleep_explanation">Lets PhairPlay blank the display when you turn it off from the Home app. Nothing else uses this.</string>
     <string name="setting_perm_no_screen">This Fire TV has no screen for that permission. Grant it from a computer instead:\n\n%1$s</string>
 </resources>

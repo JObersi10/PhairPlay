@@ -22,6 +22,7 @@ import com.phairplay.R
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
+import com.phairplay.settings.StreamEndAction
 import com.phairplay.util.Logger
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -65,6 +66,8 @@ class SettingsFragment : Fragment() {
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
+    private lateinit var rowProjectorMode: View
+    private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
     private lateinit var rowPip: View
@@ -137,6 +140,8 @@ class SettingsFragment : Fragment() {
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
+        rowProjectorMode    = view.findViewById(R.id.row_projector_mode)
+        rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
         rowPip              = view.findViewById(R.id.row_pip)
@@ -207,6 +212,8 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
+        configureToggleRow(rowProjectorMode, R.string.setting_projector,        R.string.setting_projector_subtitle)
+        configureToggleRow(rowStreamEndAction, R.string.setting_stream_end,     R.string.setting_stream_end_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
@@ -278,6 +285,8 @@ class SettingsFragment : Fragment() {
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
+        setToggle(rowProjectorMode, settings.projectorMode)
+        setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
@@ -362,6 +371,10 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
+        setToggleListener(rowProjectorMode) { enabled -> save { it.copy(projectorMode = enabled) } }
+        setToggleListener(rowStreamEndAction) { enabled ->
+            save { it.copy(streamEndAction = if (enabled) StreamEndAction.EXIT_APP else StreamEndAction.STAY_IN_APP) }
+        }
         rowBackAction.setOnClickListener { pickBackAction() }
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }

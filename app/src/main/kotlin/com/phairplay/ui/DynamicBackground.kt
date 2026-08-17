@@ -112,17 +112,28 @@ class DynamicBackground @JvmOverloads constructor(
         val beatAlpha = 0.66f + e * 0.22f
         val r = maxOf(w, h) * 0.62f * beatScale
 
-        // Black base required for SCREEN blend
-        canvas.drawColor(Color.parseColor("#050505"))
+        // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
+        // near-black used on a TV: #050505 is a deliberate lift that stops OLED/LCD panels crushing
+        // shadows, but on a projector any non-zero value is light thrown onto a wall, which turns
+        // the "invisible" edge into a visible grey rectangle.
+        canvas.drawColor(if (projectorMode) Color.BLACK else BASE_COLOR)
 
         // Save layer for SCREEN blending
         val sc = canvas.saveLayer(0f, 0f, w, h, null)
 
-        // 4 blob centers — lerp-based, biased to edges
-        val cx0 = lerp(0.05f, 0.40f, a1) * w; val cy0 = lerp(0.10f, 0.45f, a2) * h
-        val cx1 = lerp(0.95f, 0.60f, a2) * w; val cy1 = lerp(0.05f, 0.50f, a3) * h
-        val cx2 = lerp(0.15f, 0.50f, a3) * w; val cy2 = lerp(0.90f, 0.55f, a1) * h
-        val cx3 = lerp(0.80f, 0.45f, a1) * w; val cy3 = lerp(0.80f, 0.40f, a3) * h
+        // 4 blob centers — lerp-based, biased to edges.
+        //
+        // PROJECTOR MODE pulls them toward the middle. Normally the blobs deliberately hug the
+        // edges and bleed off-screen, which looks right on a TV with a bezel but puts a hard,
+        // straight cut exactly where a projector has no edge at all. [pull] compresses every centre
+        // toward 0.5 so the whole composition sits inside the frame and the vignette below can
+        // dissolve it into black without ever clipping a blob against a boundary.
+        fun px(v: Float) = (0.5f + (v - 0.5f) * centreBias) * w
+        fun py(v: Float) = (0.5f + (v - 0.5f) * centreBias) * h
+        val cx0 = px(lerp(0.05f, 0.40f, a1)); val cy0 = py(lerp(0.10f, 0.45f, a2))
+        val cx1 = px(lerp(0.95f, 0.60f, a2)); val cy1 = py(lerp(0.05f, 0.50f, a3))
+        val cx2 = px(lerp(0.15f, 0.50f, a3)); val cy2 = py(lerp(0.90f, 0.55f, a1))
+        val cx3 = px(lerp(0.80f, 0.45f, a1)); val cy3 = py(lerp(0.80f, 0.40f, a3))
 
         // Each blob rides between two palette entries, driven by a drift float, so four blobs
         // express six colours and keep "vibing" without any extra animators.
@@ -142,6 +153,27 @@ class DynamicBackground @JvmOverloads constructor(
 
         canvas.restoreToCount(sc)
 
+        // PROJECTOR MODE: dissolve the image into black on every side.
+        //
+        // A projector paints no light for black, so a frame that fades to true black before it
+        // reaches its own boundary appears to have no boundary — the visual floats. This is drawn
+        // AFTER the blobs and outside the SCREEN layer, so it darkens the composite rather than
+        // participating in the blend.
+        //
+        // VIGNETTE_CLEAR_STOP is what keeps the beat from clipping: the gradient stays fully
+        // transparent out to that fraction of the radius, and the centre-biased blobs above (even
+        // at their 1.25x beat peak) stay inside it, so the pulse is never cut into.
+        if (projectorMode) {
+            val rad = maxOf(w, h) * VIGNETTE_RADIUS
+            if (vignette == null || vignetteR != rad || vignetteW != w || vignetteH != h) {
+                vignetteR = rad; vignetteW = w; vignetteH = h
+                vignette = RadialGradient(w / 2f, h / 2f, rad,
+                    VIGNETTE_COLORS, VIGNETTE_STOPS, Shader.TileMode.CLAMP)
+            }
+            clearPaint.shader = vignette
+            canvas.drawRect(0f, 0f, w, h, clearPaint)
+            clearPaint.shader = null
+        }
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -171,6 +203,30 @@ class DynamicBackground @JvmOverloads constructor(
 
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
     fun setBeatMultiplier(m: Float) { beatMultiplier = m }
+
+    /**
+     * Turns the edgeless projector look on or off.
+     *
+     * Cheap enough to call whenever the setting changes: it only flips a flag and drops the cached
+     * gradient, and the next frame rebuilds whatever it needs.
+     */
+    fun setProjectorMode(on: Boolean) {
+        if (projectorMode == on) return
+        projectorMode = on
+        centreBias = if (on) PROJECTOR_CENTRE_BIAS else 1f
+        vignette = null
+        invalidate()
+    }
+
+    private var projectorMode = false
+
+    /** 1f leaves blob centres where they are; below 1f compresses them toward the middle. */
+    private var centreBias = 1f
+
+    private var vignette: RadialGradient? = null
+    private var vignetteR = 0f
+    private var vignetteW = 0f
+    private var vignetteH = 0f
 
     /**
      * Picks colours at least [HUE_MIN_ANGLE] apart so the blobs don't all land on one shade.
@@ -239,6 +295,28 @@ class DynamicBackground @JvmOverloads constructor(
         private const val TEXT_DARKEN_ARGB = 0x8C000000.toInt()
 
         /** Colours and stops for the text scrim. Constant, so they are shared, not rebuilt per frame. */
+        /** The near-black TV base. Lifted off zero so panels do not crush shadows. */
+        private val BASE_COLOR = Color.parseColor("#050505")
+
+        /**
+         * How far projector mode pulls the blob centres toward the middle.
+         *
+         * 0.55 keeps the composition well inside the vignette's clear zone even when a loud beat
+         * scales a blob by 1.25x, which is the whole reason the pulse never clips.
+         */
+        private const val PROJECTOR_CENTRE_BIAS = 0.55f
+
+        /** Vignette reach, as a fraction of the longest edge. */
+        private const val VIGNETTE_RADIUS = 0.78f
+
+        /**
+         * Fully transparent out to 0.45 so the centre is untouched, then a long ramp to opaque
+         * black. The ramp is deliberately gradual — a short one reads as a dark ring rather than
+         * as the image simply running out of light.
+         */
+        private val VIGNETTE_COLORS = intArrayOf(0x00000000, 0x00000000, 0x80000000.toInt(), 0xFF000000.toInt())
+        private val VIGNETTE_STOPS = floatArrayOf(0f, 0.45f, 0.75f, 1f)
+
         private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
         private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
 

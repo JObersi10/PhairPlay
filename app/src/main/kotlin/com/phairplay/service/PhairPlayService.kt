@@ -666,6 +666,7 @@ class PhairPlayService : Service() {
                         .ifBlank { com.phairplay.util.NetworkUtils.getDeviceName(this) }
                 },
                 extraInputs = inputAppEntries(settings),
+                remoteEnabled = settings.remoteEnabled,
             ).also {
                 it.start()
                 homeKit = it

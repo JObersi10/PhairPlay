@@ -832,6 +832,11 @@ class NowPlayingScreen @JvmOverloads constructor(
         dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
     }
 
+    /** Edgeless projector look — see [DynamicBackground.setProjectorMode]. */
+    fun setProjectorMode(on: Boolean) {
+        dynamicBg.setProjectorMode(on)
+    }
+
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {
         screensaverEnabled = enabled
         screensaverDelayMs = timeoutMinutes.coerceAtLeast(1) * 60_000L

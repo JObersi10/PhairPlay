@@ -139,7 +139,13 @@ class SettingsRepository(private val context: Context) {
         onboardingComplete = this[Keys.ONBOARDING_COMPLETE] ?: false,
         lastSenderName = this[Keys.LAST_SENDER_NAME] ?: "",
         lastSenderAtMs = this[Keys.LAST_SENDER_AT] ?: 0L,
-        rememberPinPairing = this[Keys.REMEMBER_PIN_PAIRING] ?: true
+        rememberPinPairing = this[Keys.REMEMBER_PIN_PAIRING] ?: true,
+        // remoteEnabled was declared in AppSettings but never appeared here or in
+        // fromAppSettings, so the Settings toggle wrote a value that was thrown away and the
+        // field always read its default. Persisted now.
+        remoteEnabled      = this[Keys.REMOTE_ENABLED]          ?: false,
+        projectorMode      = this[Keys.PROJECTOR_MODE]          ?: false,
+        streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
     /**
@@ -171,6 +177,9 @@ class SettingsRepository(private val context: Context) {
         this[Keys.LAST_SENDER_NAME]     = settings.lastSenderName
         this[Keys.LAST_SENDER_AT]       = settings.lastSenderAtMs
         this[Keys.REMEMBER_PIN_PAIRING] = settings.rememberPinPairing
+        this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
+        this[Keys.PROJECTOR_MODE]       = settings.projectorMode
+        this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
     /**
@@ -190,6 +199,9 @@ class SettingsRepository(private val context: Context) {
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
         // Legacy, read-only: superseded by BACK_ACTION but still consulted when migrating.
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
+        val REMOTE_ENABLED      = booleanPreferencesKey("remote_enabled")
+        val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
+        val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
         val AUDIO_BUFFER_MS     = intPreferencesKey("audio_buffer_ms")

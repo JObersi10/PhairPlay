@@ -555,6 +555,19 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
+        <!-- Projector mode: black background with the beat visual dissolved into it on all
+             sides, so a projected image has no visible edge. -->
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_projector_mode"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
+        <!-- What happens when the sender stops streaming. -->
+        <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_stream_end_action"
+            android:layout_width="match_parent"
+            android:layout_height="72dp" />
+
         <LinearLayout
             android:id="@+id/row_beat_pulse"
             android:layout_width="match_parent"

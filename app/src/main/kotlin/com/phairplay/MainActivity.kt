@@ -33,6 +33,7 @@ import com.phairplay.airplay.DacpClient
 import com.phairplay.airplay.NowPlayingInfo
 import com.phairplay.settings.BackAction
 import com.phairplay.settings.SettingsRepository
+import com.phairplay.settings.StreamEndAction
 import com.phairplay.util.Logger
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.MirrorControls
@@ -113,6 +114,9 @@ class MainActivity : AppCompatActivity() {
     // True when PhairPlayService auto-opened us for an incoming sender, so we know to hand the
     // screen back when that session ends. A manual launch leaves this false.
     private var openedBySender = false
+
+    /** Cached from settings — the session-end path is synchronous and cannot await DataStore. */
+    private var streamEndAction = com.phairplay.settings.StreamEndAction.STAY_IN_APP
 
     /** The current set of service collectors, so a rebind replaces them instead of duplicating. */
     private var observeJob: kotlinx.coroutines.Job? = null
@@ -934,6 +938,9 @@ class MainActivity : AppCompatActivity() {
                 pipEnabled = settings.pipEnabled
                 refreshPipParams()
                 nowPlayingScreen.setBeatPulse(settings.beatPulse)
+                nowPlayingScreen.setProjectorMode(settings.projectorMode)
+                // Cached for the same reason as backAction: the session-end path is synchronous.
+                streamEndAction = settings.streamEndAction
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time
                 // reflects what is coming out of the speakers rather than what has been received.
                 nowPlayingScreen.setPresentationLatency(BASE_LATENCY_MS + settings.audioDelayMs)
@@ -1012,6 +1019,13 @@ class MainActivity : AppCompatActivity() {
          * disconnect doesn't leave the user staring at PhairPlay.
          */
         private const val SESSION_HANDOVER_GRACE_MS = 4_000L
+
+        /**
+         * Wait before leaving when the user chose "exit when the stream ends".
+         *
+         * Covers the mirroring-to-video handover gap without feeling like a delay.
+         */
+        private const val EXIT_ON_END_GRACE_MS = 800L
 
         /** Minimum horizontal travel for a swipe to count as a track skip rather than a tap. */
         private const val FLING_MIN_DP = 80
@@ -1208,13 +1222,28 @@ class MainActivity : AppCompatActivity() {
         }
         if (!hadActiveSession) return
         hadActiveSession = false
-        if (!openedBySender) return
-        // Don't leave immediately. Switching from screen mirroring to AirPlay video tears the first
-        // session down and opens a second one a beat later, and leaving on the gap made PhairPlay
-        // look like it had quit by itself mid-handover. Wait out the gap; if a new session arrives
-        // the callback above cancels this.
+
+        // Leaving used to require openedBySender, so a manual launch sat on the waiting screen
+        // forever after the stream ended. That is now the STAY_IN_APP setting rather than an
+        // unconditional rule, and EXIT_APP leaves however the app was opened.
+        val leaving = when (streamEndAction) {
+            StreamEndAction.EXIT_APP -> true
+            StreamEndAction.STAY_IN_APP -> openedBySender
+        }
+        if (!leaving) return
+
+        // Still not instant, and deliberately so. Switching from screen mirroring to AirPlay video
+        // tears the first session down and opens a second a beat later; leaving on that gap made
+        // PhairPlay look like it had quit by itself mid-handover. EXIT_APP uses a much shorter wait
+        // -- long enough to cover the handover, short enough to read as immediate -- because a user
+        // who asked to exit on stream end is telling us they do not want to sit on a dead screen.
+        val grace = if (streamEndAction == StreamEndAction.EXIT_APP) {
+            EXIT_ON_END_GRACE_MS
+        } else {
+            SESSION_HANDOVER_GRACE_MS
+        }
         sessionEndHandler.removeCallbacks(returnToPreviousApp)
-        sessionEndHandler.postDelayed(returnToPreviousApp, SESSION_HANDOVER_GRACE_MS)
+        sessionEndHandler.postDelayed(returnToPreviousApp, grace)
     }
 
     private val sessionEndHandler = Handler(Looper.getMainLooper())

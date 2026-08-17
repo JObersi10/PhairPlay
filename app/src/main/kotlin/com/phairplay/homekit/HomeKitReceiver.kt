@@ -55,6 +55,18 @@ class HomeKitReceiver(
      * service, and [HapStore.syncConfigNumber] makes controllers re-read the new layout.
      */
     private val extraInputs: List<Pair<Int, String>> = emptyList(),
+    /**
+     * Whether to expose the remote at all.
+     *
+     * Gating only the key handler still left RemoteKey in the accessory database, so iOS kept
+     * offering a remote in Control Center that silently did nothing — worse than no remote. When
+     * this is false the characteristic is omitted entirely and the remote is simply not there.
+     *
+     * Read once, at build time: the HAP accessory database is fixed for the life of a connection,
+     * and changing the setting restarts the receiver, which rebuilds this and bumps the config
+     * number so controllers re-read the layout.
+     */
+    private val remoteEnabled: Boolean = true,
 ) {
 
     private val store = HapStore(context)
@@ -148,11 +160,11 @@ class HomeKitReceiver(
             // Inputs and the speaker must be LINKED to the television or the Home app shows a bare
             // switch with no remote and no input list.
             linked = inputs.map { it.iid } + Ids.SPEAKER_SERVICE,
-            characteristics = listOf(
+            characteristics = listOfNotNull(
                 configuredNameChar,
                 activeChar,
                 activeIdentifierChar,
-                remoteKeyChar,
+                remoteKeyChar.takeIf { remoteEnabled },
                 HapCharacteristic(Ids.TV_SLEEP_DISCOVERY, HapCharType.SLEEP_DISCOVERY_MODE,
                     HapFormat.UINT8, listOf(HapPerm.READ, HapPerm.NOTIFY), 1),
             ),
