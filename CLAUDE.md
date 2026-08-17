@@ -154,17 +154,45 @@ keys=[type, params]
  params={mrSupportedCommandsFromSender=[<104B>, <226B>, <765B>, <503B>, … 36 blobs]}}
 ```
 
-36 opaque binary blobs, 103–765 bytes each — serialized **MediaRemote protobuf**
-messages (`mrSupportedCommandsFromSender`; MR = MediaRemote) inside a plist wrapper.
-Not a plist command vocabulary. An earlier revision of this file claimed the opposite,
-based on extrapolating from the one documented `updateInfo` example; that was wrong.
+36 opaque binary blobs, 103–765 bytes each, under `mrSupportedCommandsFromSender`
+(MR = MediaRemote) inside a plist wrapper.
 
-Making skip/next work for AirPlay 2 senders therefore means implementing MRP message
-encoding (pyatv ships the `.proto` files). Tractable, but a subsystem, not a tweak.
+**That measurement recorded blob SIZES and then guessed at their contents.** It
+concluded "serialized MediaRemote protobuf, not a plist command vocabulary" without
+decoding a single blob. openairplay/airplay2-receiver decodes each one with
+`readPlistFromString` into a dict keyed `kCommandInfoCommandKey` /
+`kCommandInfoEnabledKey` — i.e. **nested binary plists**. `RtspHandler`
+(`decodeSupportedCommand`) now accepts both shapes rather than betting on either, so
+the ambiguity costs nothing; but do not cite that paragraph as settled. Two successive
+revisions of this file asserted opposite answers, each confidently, neither having
+decoded a blob.
 
-The event channel is encrypted and now decrypts correctly (`Event channel cipher
-ready`, no tag failures), but the sender writes nothing to it — it is the receiver's
-to write to. Encryption was a prerequisite worth having; it is not the blocker.
+**MRP encoding is DONE and the commands do go out.** `MediaRemote.encodeSendCommand`
+builds a real `SendCommandMessage` — the field numbers and the `Command` enum come from
+pyatv's `.proto` files, so those parts are sourced, not invented — and the device log
+shows `MediaRemote TogglePlayPause sent (151B plist)`. **The buttons still do nothing.**
+So encoding was never the blocker either.
+
+**What is actually unknown (checked 2026-08-17):** how a receiver DELIVERS a command to
+the sender. Our POST goes over the event channel as
+`{type: "sendCommand", params: {mrCommandFromReceiver: <protobuf>}}` — and **both of
+those key names are invented**, mirrored off the sender's key by an earlier session.
+Neither appears in pyatv, openairplay/airplay2-receiver, nto.github.io, SteeBono's wiki,
+or emanuelecozzi.net. No public implementation sends receiver→sender commands at all;
+openairplay only parses them.
+
+Measured on iOS 26.1 / iPhone13,1:
+- the sender sends **zero** `POST /command` — no `updateMRSupportedCommands` in the whole
+  session, so it advertised no command vocabulary
+- it opens the event channel, the cipher goes ready, and it then writes **nothing** and
+  reads nothing before closing
+- it sets up **stream type 96 only**
+
+The live lead is **stream type 130 = "Remote control"**, named in emanuelecozzi.net's
+SETUP table and in SteeBono's wiki, documented in neither, and never opened by this
+sender. Until its SETUP shape and framing come from a real source or a real capture,
+further key-name guesses are fabrication — that is what produced the two dead keys
+above. Do not add a third.
 
 ### macOS audio backlog churn
 

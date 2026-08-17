@@ -632,6 +632,17 @@ class AudioStreamServer(
             // interesting movement is without letting quiet passages read as loud.
             bandLevel[b] = Math.pow(norm, BAND_CURVE).toFloat()
         }
+        // Periodic proof that the bank is alive and separating. "Are the orbs actually reacting?" is
+        // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
+        // one. Three numbers a couple of times a second settle it: if they move independently the
+        // orbs are following the music, and if one sits at 0.00 that band is the thing to fix.
+        val now = System.currentTimeMillis()
+        if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
+            lastBandLogMs = now
+            Logger.i(
+                "Bands bass=%.2f mid=%.2f treble=%.2f".format(bandLevel[0], bandLevel[1], bandLevel[2])
+            )
+        }
         val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
         val delay = beatEmitDelayMs()
         if (delay <= 0L) energyHandler.post { onBands(snapshot) }
@@ -639,6 +650,7 @@ class AudioStreamServer(
     }
 
     private val RAW_BANDS = DoubleArray(3)
+    private var lastBandLogMs = 0L
 
 
     private fun initDecoder() {
@@ -1029,6 +1041,7 @@ class AudioStreamServer(
         /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
         private const val BAND_PEAK_FLOOR = 1e-4
         private const val BAND_CURVE = 0.65
+        private const val BAND_LOG_INTERVAL_MS = 2000L
 
         private const val ONSET_SIGMA = 1.5
         private const val REFRACTORY_MS = 120L
