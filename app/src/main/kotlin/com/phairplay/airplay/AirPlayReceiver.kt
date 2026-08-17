@@ -156,6 +156,16 @@ class AirPlayReceiver(
      * exists. Without this the value was dropped and playback started at the default.
      */
     @Volatile private var lastVolumeGain: Float? = null
+
+    /**
+     * Forgets the remembered gain when a session ends.
+     *
+     * Remembering it across the whole process meant a NEW sender inherited the previous one's
+     * volume until it happened to send its own -- the "it grabs from the last session" report. The
+     * value only needs to survive the gap between a sender connecting and its audio server being
+     * built, which is well inside one session.
+     */
+    private fun forgetVolume() { lastVolumeGain = null }
     @Volatile private var bufferedAudioServer: BufferedAudioServer? = null
     @Volatile private var urlVideoPlayer: AirPlayVideoPlayer? = null
 
@@ -849,6 +859,7 @@ class AirPlayReceiver(
     private fun stopMirrorAudio() {
         audioServer?.stop()
         audioServer = null
+        forgetVolume()
         audioPlaying = false
         clearNowPlayingMetadata()
         emitNowPlaying()
@@ -957,6 +968,7 @@ class AirPlayReceiver(
         anchorStartTs = -1L
         audioServer?.stop()
         audioServer = null
+        forgetVolume()
         bufferedAudioServer?.stop()
         bufferedAudioServer = null
         urlVideoPlayer?.release()

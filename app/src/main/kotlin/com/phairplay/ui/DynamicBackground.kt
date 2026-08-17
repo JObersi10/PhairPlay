@@ -273,15 +273,20 @@ class DynamicBackground @JvmOverloads constructor(
         // two real glows would, instead of one occluding the other.
         val sc = canvas.saveLayer(0f, 0f, w, h, null)
         val short = minOf(w, h)
-        val orbit = short * ORB_ORBIT
+        // ELLIPTICAL, not circular. A circular orbit sized off the short side bunches all three
+        // orbs into the middle of a 16:9 screen and wastes the width. The horizontal reach is taken
+        // from the WIDTH so they spread across the frame; the vertical stays tied to the short side
+        // so nothing drifts toward the top or bottom edge, where the room runs out first.
+        val orbitX = w * ORB_ORBIT_X
+        val orbitY = short * ORB_ORBIT_Y
         val drift = (t1.animatedValue as Float) * 2f - 1f
         val drift2 = (t2.animatedValue as Float) * 2f - 1f
 
         for (k in 0 until ORB_COUNT) {
             // Evenly spaced around a slow circle, each on its own phase so they never line up.
             val angle = (k * (2.0 * Math.PI / ORB_COUNT) + drift * ORB_DRIFT_RAD).toFloat()
-            val cx = w / 2f + (Math.cos(angle.toDouble()) * orbit).toFloat()
-            val cy = h / 2f + (Math.sin(angle.toDouble()) * orbit * (1f + drift2 * 0.12f)).toFloat()
+            val cx = w / 2f + (Math.cos(angle.toDouble()) * orbitX).toFloat()
+            val cy = h / 2f + (Math.sin(angle.toDouble()) * orbitY * (1f + drift2 * 0.12f)).toFloat()
 
             var radius = short * ORB_BASE_RADIUS * (1f + energy * ORB_BEAT_SWELL)
 
@@ -428,8 +433,10 @@ class DynamicBackground @JvmOverloads constructor(
         /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
         private const val ORB_COUNT = 3
         private const val ORB_BASE_RADIUS = 0.30f
-        /** How far each orb sits from the centre, as a fraction of the short side. */
-        private const val ORB_ORBIT = 0.17f
+        /** Horizontal reach, as a fraction of the WIDTH — this is what spreads them out. */
+        private const val ORB_ORBIT_X = 0.24f
+        /** Vertical reach, against the short side, where the clearance runs out first. */
+        private const val ORB_ORBIT_Y = 0.13f
         /** Slow rotation of the whole trio, in radians. */
         private const val ORB_DRIFT_RAD = 0.55f
         /** Clearance kept between any orb and the nearest screen edge. */

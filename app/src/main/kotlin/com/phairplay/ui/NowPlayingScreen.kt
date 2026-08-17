@@ -1133,12 +1133,10 @@ class NowPlayingScreen @JvmOverloads constructor(
         // In a window this size the artwork cannot be shown as a tile at all, which is fine: the
         // dark album-art backdrop is already behind everything and carries the artwork on its own.
         artWrapper.visibility = if (compact) GONE else VISIBLE
-        // Never in projector mode. This is a full-screen, centre-cropped album cover behind
-        // everything -- exactly the thing the mode exists to get rid of. Leaving it visible in a PiP
-        // window meant "black background" was in fact a darkened album cover, which on a projector
-        // is a lit rectangle with hard edges: the one thing the orbs are shaped to avoid.
-        compactArtBg.visibility =
-            if (compact && currentArtDrawable != null && !projectorMode) VISIBLE else GONE
+        // Kept in PiP even in projector mode. Suppressing it did make the thumbnail pure black, but
+        // a PiP window is a thumbnail on someone's TV, not a projected image -- the album cover is
+        // what makes it recognisable at that size, and there is no edge to hide.
+        compactArtBg.visibility = if (compact && currentArtDrawable != null) VISIBLE else GONE
         val pad = if (compact) dp(12) else dp(72)
         val padV = if (compact) dp(8) else dp(60)
         contentGroup.setPadding(pad, padV, pad, padV)
