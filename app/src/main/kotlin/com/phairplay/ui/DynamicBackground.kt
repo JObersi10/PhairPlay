@@ -266,48 +266,66 @@ class DynamicBackground @JvmOverloads constructor(
      */
     private fun drawOrb(canvas: Canvas, w: Float, h: Float, energy: Float) {
         canvas.drawColor(Color.BLACK)
-        val cx = w / 2f
-        val cy = h / 2f
-        // Radius rides the beat, but the cap is on the short side so the glow never reaches a border.
-        val radius = minOf(w, h) * ORB_BASE_RADIUS * (1f + energy * ORB_BEAT_SWELL)
-        if (radius <= 0f) return
+        if (w <= 0f || h <= 0f) return
 
-        // Average the palette into one colour: the orb is a single light source, and cycling four
-        // hues through it would read as a colour wheel rather than as a glow.
-        var r = 0; var g = 0; var b = 0
-        for (i in 0 until PALETTE_SIZE) {
-            r += Color.red(colors[i]); g += Color.green(colors[i]); b += Color.blue(colors[i])
+        // Three orbs, each carrying its own palette colour, drifting slowly around the centre and
+        // breathing on the beat. SCREEN blending means where two overlap the light ADDS, the way
+        // two real glows would, instead of one occluding the other.
+        val sc = canvas.saveLayer(0f, 0f, w, h, null)
+        val short = minOf(w, h)
+        val orbit = short * ORB_ORBIT
+        val drift = (t1.animatedValue as Float) * 2f - 1f
+        val drift2 = (t2.animatedValue as Float) * 2f - 1f
+
+        for (k in 0 until ORB_COUNT) {
+            // Evenly spaced around a slow circle, each on its own phase so they never line up.
+            val angle = (k * (2.0 * Math.PI / ORB_COUNT) + drift * ORB_DRIFT_RAD).toFloat()
+            val cx = w / 2f + (Math.cos(angle.toDouble()) * orbit).toFloat()
+            val cy = h / 2f + (Math.sin(angle.toDouble()) * orbit * (1f + drift2 * 0.12f)).toFloat()
+
+            var radius = short * ORB_BASE_RADIUS * (1f + energy * ORB_BEAT_SWELL)
+
+            // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
+            // own centre to the nearest side, less a margin. This is a hard geometric bound rather
+            // than a tuned constant, so it holds at any aspect ratio and at any beat strength --
+            // the glow can never reach a border, which is the whole point of the mode.
+            val room = minOf(cx, cy, w - cx, h - cy) - short * ORB_EDGE_MARGIN
+            if (room <= 0f) continue
+            radius = radius.coerceAtMost(room)
+
+            val tint = colors[(k * 2) % PALETTE_SIZE]
+            val key = tint and 0xF8F8F8.toInt()
+            if (orbGrads[k] == null || orbKeys[k] != key) {
+                orbKeys[k] = key
+                orbGrads[k] = RadialGradient(
+                    0f, 0f, 1f,
+                    intArrayOf(
+                        key or 0xFF000000.toInt(),
+                        key or 0xC0000000.toInt(),
+                        key or 0x40000000.toInt(),
+                        key and 0xFFFFFF,
+                    ),
+                    ORB_STOPS, Shader.TileMode.CLAMP,
+                )
+            }
+            val grad = orbGrads[k] ?: continue
+            blobMatrix.setScale(radius, radius)
+            blobMatrix.postTranslate(cx, cy)
+            grad.setLocalMatrix(blobMatrix)
+            orbPaint.shader = grad
+            orbPaint.alpha = ((ORB_BASE_ALPHA + energy * ORB_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
+            canvas.drawCircle(cx, cy, radius, orbPaint)
+            orbPaint.shader = null
         }
-        val tint = Color.rgb(r / PALETTE_SIZE, g / PALETTE_SIZE, b / PALETTE_SIZE)
-        val key = tint and 0xF8F8F8.toInt()
-        if (orbGrad == null || orbKey != key) {
-            orbKey = key
-            orbGrad = RadialGradient(
-                0f, 0f, 1f,
-                intArrayOf(
-                    key or 0xFF000000.toInt(),
-                    key or 0xC0000000.toInt(),
-                    key or 0x40000000.toInt(),
-                    key and 0xFFFFFF,
-                ),
-                ORB_STOPS, Shader.TileMode.CLAMP,
-            )
-        }
-        val grad = orbGrad ?: return
-        blobMatrix.setScale(radius, radius)
-        blobMatrix.postTranslate(cx, cy)
-        grad.setLocalMatrix(blobMatrix)
-        orbPaint.shader = grad
-        orbPaint.alpha = ((ORB_BASE_ALPHA + energy * ORB_BEAT_ALPHA) * 255)
-            .toInt().coerceIn(0, 255)
-        canvas.drawCircle(cx, cy, radius, orbPaint)
-        orbPaint.shader = null
+        canvas.restoreToCount(sc)
     }
 
-    /** No SCREEN xfermode: the orb is the only thing drawn, so there is nothing to blend with. */
-    private val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var orbGrad: RadialGradient? = null
-    private var orbKey = -1
+    /** SCREEN so overlapping orbs add their light rather than hiding one another. */
+    private val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.SCREEN)
+    }
+    private val orbGrads = arrayOfNulls<RadialGradient>(3)
+    private val orbKeys = IntArray(3) { -1 }
 
     /**
      * Draws one blob, reusing its gradient across frames.
@@ -408,8 +426,15 @@ class DynamicBackground @JvmOverloads constructor(
         private val BLOB_STOPS = floatArrayOf(0f, 1f)
 
         /** Orb size against the SHORT side, so the glow clears every edge on a wide screen. */
-        private const val ORB_BASE_RADIUS = 0.62f
-        private const val ORB_BEAT_SWELL = 0.18f
+        private const val ORB_COUNT = 3
+        private const val ORB_BASE_RADIUS = 0.30f
+        /** How far each orb sits from the centre, as a fraction of the short side. */
+        private const val ORB_ORBIT = 0.17f
+        /** Slow rotation of the whole trio, in radians. */
+        private const val ORB_DRIFT_RAD = 0.55f
+        /** Clearance kept between any orb and the nearest screen edge. */
+        private const val ORB_EDGE_MARGIN = 0.06f
+        private const val ORB_BEAT_SWELL = 0.22f
         private const val ORB_BASE_ALPHA = 0.72f
         private const val ORB_BEAT_ALPHA = 0.28f
 
