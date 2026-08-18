@@ -622,7 +622,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         layoutPreset = all[(layoutPreset.ordinal + 1) % all.size]
         Logger.i("NowPlaying layout → $layoutPreset")
         applyCompactState()
-        applyPresetTransform()
+        applyPresetTransform(animate = true)
         restartScrolls()
         return true
     }
@@ -643,30 +643,53 @@ class NowPlayingScreen @JvmOverloads constructor(
      * The pivot is the corner the card should collapse toward, so gravity comes for free: scaling
      * a MATCH_PARENT view about its top-left corner leaves it occupying the top-left of the frame.
      */
-    private fun applyPresetTransform() {
+    private fun applyPresetTransform(animate: Boolean = false) {
         val w = width.toFloat()
         val h = height.toFloat()
         if (w <= 0f || h <= 0f) return
-        val p = layoutPreset
-        contentGroup.pivotX = when (p) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> 0f
-            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> w
-            else -> w / 2f
-        }
-        contentGroup.pivotY = when (p) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> 0f
-            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> h
-            else -> h / 2f
-        }
-        // Set directly, not animated: the screensaver owns an animator on this same view, and two
-        // of them on one property is what made the card visibly jump on every drift step.
-        contentGroup.animate().cancel()
         val s = presetScale()
-        contentGroup.scaleX = s
-        contentGroup.scaleY = s
-        contentGroup.alpha = 1f
-        contentGroup.translationX = 0f
-        contentGroup.translationY = 0f
+
+        // PIVOT STAYS CENTRED and the corner is reached by TRANSLATION.
+        //
+        // Moving the pivot to the corner is the obvious way to do this and it cannot be animated:
+        // pivot is not an animatable property, so changing it teleports the view to its new frame of
+        // reference and the scale animation then runs from the wrong place. With a fixed centre
+        // pivot the scaled card is a rect of w*s x h*s centred in the view, and putting it in a
+        // corner is just arithmetic — which interpolates cleanly.
+        val margin = dp(24).toFloat()
+        val dx = (w - w * s) / 2f - margin
+        val dy = (h - h * s) / 2f - margin
+        val tx = when (layoutPreset) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> -dx
+            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> dx
+            else -> 0f
+        }
+        val ty = when (layoutPreset) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> -dy
+            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> dy
+            else -> 0f
+        }
+
+        contentGroup.animate().cancel()
+        contentGroup.pivotX = w / 2f
+        contentGroup.pivotY = h / 2f
+        if (!animate) {
+            // A resize has no "before" worth animating from, and the screensaver owns an animator on
+            // this same view — two of them on one property is what made the card jump on every drift.
+            contentGroup.scaleX = s; contentGroup.scaleY = s
+            contentGroup.translationX = tx; contentGroup.translationY = ty
+            contentGroup.alpha = 1f
+            return
+        }
+        contentGroup.animate()
+            .scaleX(s).scaleY(s).translationX(tx).translationY(ty).alpha(1f)
+            .setDuration(PRESET_MOVE_MS)
+            // Overshoot, lightly. The card is being thrown to a corner, and landing dead-still
+            // reads as a jump-cut however long the duration is; a small settle reads as weight.
+            // Tension is well under the 2.0 default — at that value a half-screen card visibly
+            // bounces off the edge of the screen.
+            .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
+            .start()
     }
 
     /**
@@ -789,7 +812,20 @@ class NowPlayingScreen @JvmOverloads constructor(
         updateInfoPanel(info)
 
         if (info.title != currentTitle) {
+            val hadTitle = currentTitle != null
             currentTitle = info.title
+            // A track change is the one moment the card has something to say, so let it move. The
+            // text is already updated by the time this runs -- this lifts and fades the NEW text in
+            // rather than animating the old one out, which would need a snapshot to be honest about.
+            // Only when a title is being replaced: on the first track of a session the whole card is
+            // already arriving, and animating it again reads as a stutter.
+            if (hadTitle && !isCompact) {
+                textColumn.animate().cancel()
+                textColumn.alpha = 0f
+                textColumn.translationY = dp(10).toFloat()
+                textColumn.animate().alpha(1f).translationY(0f)
+                    .setDuration(TEXT_SWAP_MS).setInterpolator(DecelerateInterpolator()).start()
+            }
             if (!isPaused) positionBaseEpoch = SystemClock.elapsedRealtime()
             // Seed from the sender's reported position rather than 0. Returning from Home clears
             // currentTitle, so the same track looked like a new one and the elapsed time snapped
@@ -929,6 +965,16 @@ class NowPlayingScreen @JvmOverloads constructor(
             fade.isCrossFadeEnabled = true
             artworkView.setImageDrawable(fade)
             fade.startTransition(ARTWORK_FADE_MS)
+            // A crossfade alone reads as a slideshow. Letting the tile settle in from slightly
+            // under-size gives the new cover a moment of physicality, and it is the same gesture
+            // the text does beside it, so the two land as one event rather than two.
+            artWrapper.animate().cancel()
+            artWrapper.scaleX = ART_SWAP_SCALE
+            artWrapper.scaleY = ART_SWAP_SCALE
+            artWrapper.animate().scaleX(1f).scaleY(1f)
+                .setDuration(ARTWORK_FADE_MS.toLong() + 140L)
+                .setInterpolator(android.view.animation.OvershootInterpolator(1.1f))
+                .start()
         }
         currentArtDrawable = next
         // A SEPARATE drawable instance, not the same one the tile shows. ImageView.setColorFilter
@@ -1031,12 +1077,14 @@ class NowPlayingScreen @JvmOverloads constructor(
         handler.removeCallbacks(driftRunnable)
         dynamicBg.animate().alpha(1f).setDuration(WAKE_MS).start()
         pillWrapper.animate().alpha(1f).setDuration(WAKE_MS).start()
-        // Back to the PRESET's scale, not to 1. Waking always restored full size, so on any MINI_*
-        // preset the card silently grew to fill the screen the first time the screensaver ended.
-        contentGroup.animate()
-            .alpha(1f).translationX(0f).translationY(0f)
-            .scaleX(presetScale()).scaleY(presetScale())
-            .setDuration(WAKE_MS).setInterpolator(DecelerateInterpolator()).start()
+        // Back to the PRESET, not to "full size, centred". Waking restored scale 1 and translation
+        // 0 unconditionally, so on any MINI_* preset the card silently grew to fill the screen and
+        // slid back to the middle the first time the idle timer fired. The transform is one place
+        // now, so there is no second copy of this to forget.
+        // One animator, not two: a View has a single ViewPropertyAnimator, so starting an alpha
+        // fade here and then calling applyPresetTransform -- which cancels before it builds -- would
+        // throw the fade away and leave the card dimmed. applyPresetTransform restores alpha itself.
+        applyPresetTransform(animate = true)
     }
 
     /**
@@ -1103,6 +1151,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         compactProgress.setValue(0)
         compactProgress.visibility = View.GONE
         handler.removeCallbacks(compactTick)
+        textColumn.animate().cancel()
+        textColumn.alpha = 1f
+        textColumn.translationY = 0f
+        artWrapper.animate().cancel()
+        artWrapper.scaleX = 1f
+        artWrapper.scaleY = 1f
     }
 
     private fun darken(color: Int, f: Float) = Color.rgb(
@@ -1137,6 +1191,15 @@ class NowPlayingScreen @JvmOverloads constructor(
          * sofa. The corner presets already leave three quarters of the screen clear at this size.
          */
         private const val MINI_SCALE = 0.5f
+
+        /** How long the card takes to fly between layout presets. */
+        private const val PRESET_MOVE_MS = 460L
+
+        /** Track-change text lift. Short -- this fires on every song, so it must not feel ceremonial. */
+        private const val TEXT_SWAP_MS = 340L
+
+        /** How far under-size a new cover starts before settling. Subtle by design. */
+        private const val ART_SWAP_SCALE = 0.94f
 
         /** The PiP progress bar moves imperceptibly, so it does not need the 4Hz treatment. */
         private const val COMPACT_TICK_MS = 1_000L
@@ -1367,6 +1430,11 @@ class NowPlayingScreen @JvmOverloads constructor(
             contentGroup.scaleY = 1f
             contentGroup.translationX = 0f
             contentGroup.translationY = 0f
+            // The track-change lift is skipped in PiP, so a resize landing mid-animation would
+            // otherwise strand the text column part-faded and offset for the rest of the session.
+            textColumn.animate().cancel()
+            textColumn.alpha = 1f
+            textColumn.translationY = 0f
         }
 
         // A Mac mirroring session sends no now-playing metadata at all -- the log shows artwork

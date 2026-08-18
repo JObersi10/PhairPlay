@@ -213,7 +213,7 @@ slider is for.
 ## 4. Tempo (BPM)
 
 Detect onsets on the bass envelope (a rise crossing a threshold), keep the last N
-inter-onset intervals in the 200–2000 ms range, and score candidate tempos by
+inter-onset intervals in the 200-2000 ms range, and score candidate tempos by
 **harmonic agreement**:
 
 ```
@@ -231,7 +231,29 @@ implementation took the **median of folded intervals**, which only rescues clean
 and folds missed beats onto unrelated tempos — it never cleared 50 % confidence on
 material a human reads instantly. Harmonic scoring gets 75–92 % on the same tracks.
 
-Needs ≥ 8 intervals before reporting.
+Needs at least 8 intervals before reporting.
+
+### Hysteresis is not optional
+
+A single confidence threshold makes the readout unusable. Real music sits either side of
+any fixed bar from window to window, so the meter flicks between a number and blank
+several times a minute on a track whose tempo plainly never changes. Nothing is wrong
+with the estimate -- the display is being asked a yes/no question every few seconds about
+something that is true for the length of a song.
+
+Use two bars: cross **0.50** to acquire a lock, but fall under **0.28** for **six
+consecutive** windows to lose it. A real tempo change still drops the lock within a few
+seconds; an ambiguous bar does not.
+
+Then **fold octave errors onto the existing lock**. Scoring against integer multiples is
+what lets the estimator survive missed beats, but it also means 85 and 170 explain the
+same track equally well, and which one wins can flip on nothing more than where the
+window was cut. When a fresh estimate lands within ~12% of half, double or quadruple the
+current lock, it is the same tempo counted differently -- keep the lock. Anything genuinely
+different is near neither multiple and passes through.
+
+Ease adopted values (~25% per update) rather than snapping, so a half-time bar nudges the
+readout instead of jerking it.
 
 ---
 
@@ -331,17 +353,52 @@ brightens on every move.
 
 **Layout presets.** Menu cycles six layouts: full size, small centred, and the four
 corners. The mini presets show artwork + title + artist only — no pill, progress or
-credits.
+credits — but the bottom-edge progress line stays in all of them.
 
-> Implement mini as a **scale about a pivot**, not as a smaller layout. The card's text
-> column is `weight=1`, so shrinking its layout bounds makes it *reflow*: at half width the
-> artwork tile consumes the entire row and the text column is laid out at zero width. Every
-> field is visible, correctly styled, and has no space to occupy — which looks exactly like
-> "the setting does nothing". Scaling the composed result preserves every proportion.
+> Implement mini as a **scale**, not as a smaller layout. The card's text column is
+> `weight=1`, so shrinking its layout bounds makes it *reflow*: at half width the artwork
+> tile consumes the entire row and the text column is laid out at zero width. Every field is
+> visible, correctly styled, and has no space to occupy — which looks exactly like "the
+> setting does nothing". Scaling the composed result preserves every proportion.
 >
-> Pivot at the corner the card should collapse toward and gravity comes for free: scaling a
-> `MATCH_PARENT` view about its top-left leaves it in the top-left of the frame. Recompute
-> pivots in `onSizeChanged` — they are in pixels.
+> **Keep the pivot centred and reach the corners by translation.** Pivoting at the target
+> corner is the obvious approach and it cannot be animated — pivot is not an animatable
+> property, so changing it teleports the view into a new frame of reference and the scale
+> animation then runs from the wrong place. With a centred pivot the scaled card is a
+> `w·s × h·s` rect in the middle of the frame, and each corner is arithmetic:
+> `tx = ±((w − w·s)/2 − margin)`. That interpolates cleanly. Recompute on resize — it is
+> in pixels.
+
+### Motion
+
+The card should feel like it has weight. Four rules carry most of it:
+
+**One animator per view.** Android gives a `View` a single `ViewPropertyAnimator`, so
+starting a fade and then starting a transform on the same view throws the fade away --
+and any code path that cancels before it builds will silently strip properties another
+path set. Put everything a view does in one call, and give each view one function that
+owns its transform.
+
+**Animate the arrival, not the departure.** On a track change, update the text and then
+fade and lift the *new* text in. Animating the old text out requires a snapshot to be
+honest about what is on screen, and nobody will notice the difference.
+
+**Move things together.** The cover settling in from 94% and the text lifting 10dp should
+share a moment, so the change reads as one event rather than two widgets reacting
+separately. A crossfade on its own reads as a slideshow.
+
+**Overshoot, lightly.** A card thrown to a corner that stops dead reads as a jump-cut
+however long the duration is; a small settle reads as weight. Keep the tension well under
+the platform default -- at Android's `OvershootInterpolator` default of 2.0 a half-screen
+card visibly bounces off the edge of the screen. 0.9-1.1 is the useful range.
+
+Durations that worked on a TV at 3m viewing distance: layout moves **460 ms**, track-change
+text **340 ms**, artwork crossfade **~500 ms**, panel slides **220-260 ms**.
+
+**Reset animated state wherever the animation can be skipped.** Every property you animate
+needs an explicit reset on the paths that bypass the animation -- a resize landing mid-flight
+otherwise strands a view part-faded and offset for the rest of the session. This is the
+single most common way expressive motion turns into a stuck UI.
 
 **Picture-in-picture** is a genuine window resize, not a thumbnail scale. Text sizes must
 go **down**, not up. (A previous attempt set 96 sp on the theory that the activity is
@@ -368,6 +425,9 @@ artwork as a darkened full-bleed background instead.
 - [ ] Shortfall synthesised, never cycled
 - [ ] Mini layouts scale a composed view; they do not re-lay-out a narrower one
 - [ ] Smoothing runs per **frame**, not per audio callback
+- [ ] Tempo has two thresholds (acquire/hold) and folds octave errors onto the lock
+- [ ] Every animated property has an explicit reset on the paths that skip the animation
+- [ ] One animator per view; no two code paths animating the same view separately
 
 That last one is subtle: easing inside the audio callback makes smoothness a side effect
 of the audio block size — the same constants gave near-instant tracking at 100 calls/sec

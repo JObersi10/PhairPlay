@@ -694,7 +694,35 @@ class AudioStreamServer(
         val median = bestBpm
         val confidence = bestScore.toFloat() / n
 
-        currentBpm = if (confidence >= BPM_MIN_CONFIDENCE) median.toFloat() else 0f
+        // HYSTERESIS. Acquiring a tempo is held to a high bar; KEEPING one is not.
+        //
+        // A single threshold made the meter unusable on real music: confidence sits either side of
+        // 0.5 from window to window, so the readout flicked between a number and blank several
+        // times a minute even though the track's tempo obviously never changed. Nothing was wrong
+        // with the estimate — the display was just being asked a yes/no question every few seconds
+        // about something that is true for the length of a song.
+        //
+        // So: cross BPM_MIN_CONFIDENCE to acquire, but only fall below BPM_HOLD_CONFIDENCE for
+        // BPM_MISSES_TO_DROP consecutive windows to lose it. A genuine tempo change (or the next
+        // track) still drops the lock within a few seconds; a momentarily ambiguous bar does not.
+        val locked = currentBpm > 0f
+        when {
+            confidence >= BPM_MIN_CONFIDENCE -> {
+                val adopt = if (locked) foldToLock(median, currentBpm.toDouble()) else median
+                // Eased while locked, so a half-time bar nudges the readout instead of snapping it.
+                currentBpm =
+                    if (locked) (currentBpm * (1f - BPM_ADOPT) + adopt.toFloat() * BPM_ADOPT)
+                    else adopt.toFloat()
+                bpmMisses = 0
+            }
+            // Weak but still locked: hold the number and say nothing.
+            locked && confidence >= BPM_HOLD_CONFIDENCE -> bpmMisses = 0
+            locked -> {
+                bpmMisses++
+                if (bpmMisses >= BPM_MISSES_TO_DROP) { currentBpm = 0f; bpmMisses = 0 }
+            }
+            else -> currentBpm = 0f
+        }
         val now = System.currentTimeMillis()
         if (now - lastBpmLogMs > BPM_LOG_INTERVAL_MS) {
             lastBpmLogMs = now
@@ -706,9 +734,33 @@ class AudioStreamServer(
         }
     }
 
+    /**
+     * Pulls an octave error back onto the tempo we already have.
+     *
+     * The scorer treats an interval as a hit when it lands near ANY integer multiple of the
+     * candidate period, which is what lets it survive missed beats — but it also means 85 and 170
+     * both explain the same track well, and which of them wins can change from window to window on
+     * nothing more than where the bar happened to be cut. Reported raw, the meter reads 170, then
+     * 85, then 170 on a track whose tempo is completely steady.
+     *
+     * So when a fresh estimate is within tolerance of double or half the current lock, it is the
+     * same tempo counted differently, and the lock wins. A genuinely different tempo is not near
+     * either multiple and passes through untouched.
+     */
+    private fun foldToLock(candidate: Double, lock: Double): Double {
+        if (lock <= 0.0) return candidate
+        for (m in intArrayOf(1, 2, 4)) {
+            if (Math.abs(candidate / m - lock) / lock <= BPM_OCTAVE_TOLERANCE) return lock
+            if (Math.abs(candidate * m - lock) / lock <= BPM_OCTAVE_TOLERANCE) return lock
+        }
+        return candidate
+    }
+
     private val onsetIntervals = LongArray(24)
     private var onsetIdx = 0
     private var lastBpmLogMs = 0L
+    /** Consecutive sub-[BPM_HOLD_CONFIDENCE] windows while locked. */
+    private var bpmMisses = 0
 
     /** Latest tempo estimate, or 0 when no stable beat was found. */
     @Volatile var currentBpm: Float = 0f
@@ -1225,6 +1277,18 @@ class AudioStreamServer(
         /** How close an interval must be to the median to count as agreeing with it. */
         private const val BPM_TOLERANCE = 0.08
         private const val BPM_MIN_CONFIDENCE = 0.5f
+
+        /** Confidence needed to KEEP a lock, well under what it takes to acquire one. */
+        private const val BPM_HOLD_CONFIDENCE = 0.28f
+
+        /** Consecutive windows under the hold bar before the lock is released. */
+        private const val BPM_MISSES_TO_DROP = 6
+
+        /** How far a re-estimate moves an existing lock, per adoption. */
+        private const val BPM_ADOPT = 0.25f
+
+        /** Proximity to a 2x/4x multiple that counts as the same tempo counted differently. */
+        private const val BPM_OCTAVE_TOLERANCE = 0.12
         /** Candidate resolution. 0.5 BPM is finer than anyone can hear a visual lag against. */
         private const val BPM_STEP = 0.5
         /** How many beats a single missed-onset gap may span and still count as evidence. */
