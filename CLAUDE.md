@@ -97,7 +97,8 @@ the event never happened, not that the server is broken.
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
-Projector mode, the band/tempo analysis and the Now Playing card are written up for
+`docs/FEATURES.md` is the current feature list. Projector mode, the band/tempo
+analysis and the Now Playing card are written up for
 reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
 constants that only look arbitrary until you have shipped the wrong one.
 
@@ -198,6 +199,27 @@ repeatedly. Audible as the "laggy and weird" playback.
 macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
 
 ## Hard-won details
+
+- **Ending a session must make the receiver DISAPPEAR, not just pause the sender.**
+  Back used to send DACP pause and close the RTSP socket. That stops the audio and
+  leaves the phone SELECTED on this output, paused — the log reads as a clean teardown
+  (RTSP closed, media released, mDNS re-advertised) while the iPad still shows itself
+  connected. DACP is a transport protocol; it has no "deselect output". What makes iOS
+  let go is the service going away, so `onStreamingStopped` withdraws mDNS and holds it
+  withdrawn for `KICK_WINDOW_MS` on a user-initiated end.
+  **The first attempt got the order backwards** — it delayed and *then* called
+  `restart()`, but the withdrawal happens inside `restart()`, so the receiver stayed
+  advertised for the whole hold and vanished only for the ~650ms the restart itself
+  takes. `Holding mDNS withdrawn for 3992ms` at 01:50:57 and `Stopping mDNS
+  advertising` at 01:51:01 in the same log is what that looks like.
+- **Store suffixes break MusicBrainz lookups.** Apple reports singles as
+  `"Bluewave - Single"`, which is how the *store* lists it, not how MusicBrainz
+  catalogues the release — so the fielded query matched nothing. In the log that is
+  indistinguishable from the album not being in the database, and it is why the cover
+  lookup appeared to work "about a quarter of the time": it failed on exactly the
+  singles and EPs. `CoverArtFinder.cleanRelease` strips them, and the search retries
+  without the artist term before giving up.
+
 
 - **`setText(resId)` does not format.** `protocol_detail_connected` is
   `"Streaming from %1$s"`; passed to `setText(resId)` the card literally displayed

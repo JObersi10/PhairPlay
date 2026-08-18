@@ -57,7 +57,14 @@ object CoverArtFinder {
         }
         if (!lookupEnabled) return Result(null, Source.NONE)
 
-        val mbid = searchRelease(artist, album, title) ?: return Result(null, Source.NONE)
+        // Two attempts, narrow then wide. The device log showed the single fielded query failing on
+        // ordinary tracks -- `release:"Bluewave - Single" AND artist:"Jeon"` matched nothing, because
+        // MusicBrainz catalogues that release as "Bluewave" and the store suffix is not part of its
+        // title. Dropping the artist on the retry also rescues the case where the sender reports a
+        // featured-artist string that no catalogue lists verbatim.
+        val mbid = searchRelease(artist, album, title)
+            ?: searchRelease(null, album, title)
+            ?: return Result(null, Source.NONE)
         val bytes = fetch("$COVER_ART_ARCHIVE/release/$mbid/front-500")
         return if (bytes != null) Result(bytes, Source.LOOKUP) else Result(null, Source.NONE)
     }
@@ -74,7 +81,7 @@ object CoverArtFinder {
     private fun searchRelease(artist: String?, album: String?, title: String?): String? {
         val terms = buildList {
             val release = album?.takeIf { it.isNotBlank() } ?: title?.takeIf { it.isNotBlank() }
-            if (release != null) add("release:${quote(release)}")
+            if (release != null) add("release:${quote(cleanRelease(release))}")
             if (!artist.isNullOrBlank()) add("artist:${quote(artist)}")
         }
         if (terms.isEmpty()) return null
@@ -89,6 +96,26 @@ object CoverArtFinder {
         val mbid = MBID_REGEX.find(body)?.value
         if (mbid == null) Logger.i("Cover art: no MusicBrainz match for ${terms.joinToString(" AND ")}")
         return mbid
+    }
+
+    /**
+     * Strips the store suffixes senders attach to an album name.
+     *
+     * Apple Music reports singles and EPs as "Bluewave - Single" and "Something - EP", which is how
+     * the STORE lists them, not how MusicBrainz catalogues the release. Left in place the fielded
+     * query matches nothing at all, which is indistinguishable in the log from an album genuinely
+     * not being in the database -- and it is why the lookup appeared to work only occasionally: it
+     * failed on exactly the singles, and succeeded on full albums whose names carry no suffix.
+     */
+    private fun cleanRelease(s: String): String {
+        var out = s.trim()
+        for (suffix in STORE_SUFFIXES) {
+            if (out.endsWith(suffix, ignoreCase = true)) {
+                out = out.dropLast(suffix.length).trimEnd(' ', '-', '–', '—')
+                break
+            }
+        }
+        return out.ifBlank { s }
     }
 
     /** Lucene needs the inner quotes escaped, or a title containing one breaks the whole query. */
@@ -145,6 +172,11 @@ object CoverArtFinder {
             runCatching { conn?.disconnect() }
         }
     }
+
+    private val STORE_SUFFIXES = listOf(
+        " - Single", " - EP", " (Single)", " (EP)", " - Deluxe Edition", " (Deluxe Edition)",
+        " (Deluxe)", " - Deluxe",
+    )
 
     private const val MUSICBRAINZ = "https://musicbrainz.org/ws/2"
     private const val COVER_ART_ARCHIVE = "https://coverartarchive.org"

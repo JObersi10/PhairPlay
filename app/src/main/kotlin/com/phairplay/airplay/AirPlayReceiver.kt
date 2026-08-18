@@ -606,19 +606,24 @@ class AirPlayReceiver(
 
         scope.launch {
             try {
-                // HOLD THE WITHDRAWAL OPEN after a user-initiated end.
+                // WITHDRAW FIRST, then hold, then re-register.
                 //
-                // The service was being torn down and re-registered inside about 7ms, which is far
-                // too fast for the sender to notice: iOS never sees the receiver leave, so it keeps
-                // the route selected and the user's Back press reads as a pause. Staying gone long
-                // enough for the departure to propagate is what makes the phone fall back to its own
-                // speaker and drop the output.
+                // The first version of this delayed and *then* called restart() -- but the
+                // withdrawal happens inside restart(), so the receiver stayed fully advertised for
+                // the whole four seconds and only went away for the ~650ms the restart itself takes.
+                // The device log said "Holding mDNS withdrawn for 3992ms" at 01:50:57 and "Stopping
+                // mDNS advertising" at 01:51:01 -- the hold ran before the thing it was supposed to
+                // be holding. iOS never saw us leave, so it kept the route and Back still read as a
+                // pause. The order is the entire fix.
                 val hold = kickUntilMs - System.currentTimeMillis()
                 if (hold > 0) {
-                    Logger.i("Holding mDNS withdrawn for ${hold}ms so the sender drops the route")
+                    Logger.i("Withdrawing mDNS for ${hold}ms so the sender drops the route")
+                    mdnsService?.stop()
                     kotlinx.coroutines.delay(hold)
+                    mdnsService?.start(displayName.ifBlank { null })
+                } else {
+                    mdnsService?.restart(displayName.ifBlank { null })
                 }
-                mdnsService?.restart(displayName.ifBlank { null })
             } catch (e: Exception) {
                 Logger.e("Failed to restart mDNS after streaming", e)
             }

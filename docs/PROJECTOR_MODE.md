@@ -275,6 +275,13 @@ maxSat = max saturation across the ORIGINAL swatches
 monochrome = maxSat < 0.18
 ```
 
+> **The two looks need different brightness, and this is easy to get backwards.** The
+> full-screen field is four screen-sized sources SCREEN-blended, so it washes out if each
+> colour is bright; the projector orbs are small on true black, where every bit of alpha is
+> light thrown at a wall in a dark room. Dimming the shared palette fixes one and ruins the
+> other. Keep the palette as-is and dim per look: a value scale on the field's colours, and
+> the *alphas* on the orbs.
+
 **Colour art** — push toward vivid, and clamp value at *both* ends:
 
 ```
@@ -428,6 +435,9 @@ artwork as a darkened full-bleed background instead.
 - [ ] Tempo has two thresholds (acquire/hold) and folds octave errors onto the lock
 - [ ] Every animated property has an explicit reset on the paths that skip the animation
 - [ ] One animator per view; no two code paths animating the same view separately
+- [ ] Field and orb brightness tuned separately, not via the shared palette
+- [ ] Blob centres bounded to their own region, or they pile onto the middle when the
+      drift animators line up
 
 That last one is subtle: easing inside the audio callback makes smoothness a side effect
 of the audio block size — the same constants gave near-instant tracking at 100 calls/sec

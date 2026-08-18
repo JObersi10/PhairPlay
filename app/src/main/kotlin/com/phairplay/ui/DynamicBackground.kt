@@ -689,7 +689,11 @@ class DynamicBackground @JvmOverloads constructor(
          * album art as the brightest object in the frame, which is what makes the card read as a
          * card rather than as text floating on a pastel wash.
          */
-        private const val BLOB_VALUE_SCALE = 0.34f
+        // Back up from 0.34. Dimming this was a misread: the field was only ever "washed out" at
+        // 0.92, and the ask was for PROJECTOR mode to be dimmer -- so 0.34 made the one mode that
+        // was fine too dark while leaving the orbs untouched. The orb alphas below carry that
+        // change now, and this sits at the value that killed the wash without draining the colour.
+        private const val BLOB_VALUE_SCALE = 0.50f
 
         /** Beat -> blob size. The only place the full-screen field expresses the beat. */
         private const val FIELD_BEAT_SCALE = 0.20f
@@ -701,7 +705,7 @@ class DynamicBackground @JvmOverloads constructor(
          * backdrop brightness is contrast the text loses. White-on-pastel at TV viewing distance is
          * the failure mode, and it is worse mid-crossfade than at rest.
          */
-        private const val FIELD_BASE_ALPHA = 0.58f
+        private const val FIELD_BASE_ALPHA = 0.70f
         private const val FIELD_BEAT_ALPHA = 0.05f
         /** Hue step used to invent the colours a one-tone cover cannot supply. */
         private const val HUE_SYNTH_STEP = 47f
@@ -836,12 +840,14 @@ class DynamicBackground @JvmOverloads constructor(
         private const val ORB_BEAT_SWELL = 0.60f
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
-        private const val ORB_BASE_ALPHA = 0.92f
+        // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
+        // halo covers most of the frame, so the orbs were the brightest thing in a dark room.
+        private const val ORB_BASE_ALPHA = 0.66f
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
-        private const val ORB_CORE_ALPHA = 0.30f
-        private const val ORB_CORE_BEAT_ALPHA = 0.62f
+        private const val ORB_CORE_ALPHA = 0.22f
+        private const val ORB_CORE_BEAT_ALPHA = 0.46f
         private const val CORE_WHITEN = 0.34f
         private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
 
