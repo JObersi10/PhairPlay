@@ -357,6 +357,39 @@ class AirPlayReceiver(
      * @return false when there is no event channel or the sender did not advertise this command.
      */
     fun sendMediaRemoteCommand(command: Int): Boolean {
+        // OFF because there is no known delivery format — NOT because it is harmful.
+        //
+        // The body below addresses /command with two plist keys ("sendCommand" and
+        // "mrCommandFromReceiver") that were guessed by mirroring the sender's own
+        // mrSupportedCommandsFromSender. Neither appears in pyatv, openairplay's receiver,
+        // nto.github.io, emanuelecozzi.net or SteeBono's wiki, and no public implementation sends
+        // receiver->sender commands at all. So it cannot work, and every press writes bytes the
+        // sender will not parse.
+        //
+        // AN EARLIER REVISION OF THIS COMMENT CLAIMED THESE SENDS WERE TEARING DOWN SESSIONS. That
+        // was wrong, and the correction is worth keeping because the reasoning failed in an
+        // instructive way. It rested on two timestamp correlations, and an airplayd capture from the
+        // sender disproves both:
+        //
+        //   * "session died 4s after a burst of sends" -- the sender's own log shows the stream
+        //     perfectly healthy across that gap (buffer fullness 43.55%, time announces on schedule,
+        //     no errors) and then an orderly "RTAE Suspending" / "MediaPlaying stopped" /
+        //     "Starting 480-sec inactivity timer". That is playback ending, not a session being
+        //     killed. The kCanceledErr entries follow the suspend as cleanup, they do not precede it.
+        //   * "socket closed 6ms after a send" -- that send was OUR OWN endSession(), which fires
+        //     CMD_PAUSE and then immediately calls disconnectActiveClient(). We closed that socket.
+        //     Reverse causation, in a path written three commits earlier.
+        //
+        // Correlating our own log against itself was never going to separate those; it took the
+        // other end's log. Keep that in mind before concluding anything about what a sender "does"
+        // in response to us.
+        if (!MRP_SEND_ENABLED) {
+            Logger.i(
+                "MediaRemote ${MediaRemote.name(command)} not sent — no known delivery format, " +
+                    "and sending a guessed one makes the sender ignore it — see sendMediaRemoteCommand"
+            )
+            return false
+        }
         val cipher = eventCipher
         val output = eventOutput
         if (cipher == null || output == null) {
@@ -1094,6 +1127,13 @@ class AirPlayReceiver(
     }
 
     companion object {
+
+        /**
+         * Whether to POST MediaRemote commands on the event channel. See sendMediaRemoteCommand:
+         * the delivery format is unknown, so a guessed one cannot be parsed by any sender.
+         */
+        private const val MRP_SEND_ENABLED = false
+
 
         /**
          * DACP command → MediaRemote `Command`, so one TV-remote key press works against either
