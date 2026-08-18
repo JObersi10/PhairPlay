@@ -185,13 +185,16 @@ class AudioStreamServer(
     // a handful of multiply-adds per sample, where a windowed FFT would cost a transform per block
     // on the same thread that feeds AudioTrack -- the thread whose stalls are audible.
     //
-    //   bass   = lp160                 (kick, bassline)
-    //   mid    = lp2500 - lp300        (vocals and most instruments)
-    //   treble = sample - lp4000       (cymbals, sibilance, air)
+    //   bass   = lp160                                  (kick, bassline)
+    //   vocal  = band(300-3400) of mid, minus that of side (centre-panned voice)
+    //   treble = mid - lp4000                            (cymbals, sibilance, air)
     private var lp160 = 0.0
-    private var lp300 = 0.0
-    private var lp2500 = 0.0
     private var lp4000 = 0.0
+    // Vocal band, taken twice: once from mid, once from side. See the mid/side note in emitEnergy.
+    private var lpM300 = 0.0
+    private var lpM3400 = 0.0
+    private var lpS300 = 0.0
+    private var lpS3400 = 0.0
 
     /**
      * Per-band automatic gain, decaying.
@@ -538,40 +541,68 @@ class AudioStreamServer(
         // the three-band bank below, so the PCM is walked once rather than four times.
         val a160 = alphaFor(160.0)
         val a300 = alphaFor(300.0)
-        val a2500 = alphaFor(2500.0)
+        val a3400 = alphaFor(3400.0)
         val a4000 = alphaFor(4000.0)
         var sum = 0.0
         var sumBass = 0.0
-        var sumMid = 0.0
+        var sumVocalMid = 0.0
+        var sumVocalSide = 0.0
         var sumTreble = 0.0
         var count = 0
         var i = 0
         while (i + 1 < pcm.size) {
-            var sample = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
+            val left = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
             i += 2
-            if (channels >= 2 && i + 1 < pcm.size) {
-                sample = (sample + ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()) / 2.0
+            val right = if (channels >= 2 && i + 1 < pcm.size) {
+                val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
                 i += 2
-            }
-            lowPass += LP_ALPHA * (sample - lowPass)
+                v
+            } else left
+
+            // MID/SIDE, kept separate instead of collapsed to mono immediately.
+            //
+            // This loop used to average L and R on its first line and discard the difference, which
+            // threw away the one cue that distinguishes a voice from everything else sharing its
+            // frequency range. A band-pass over 300-2500Hz catches vocals, but it equally catches
+            // rhythm guitar, synths, snare body and piano -- so the "mid" orb was really a
+            // "most of the music" orb. Lead vocals are almost always panned dead centre, so they
+            // live in mid and are nearly absent from side; guitars, pads and reverb are spread.
+            val mid = (left + right) / 2.0
+            val side = (left - right) / 2.0
+
+            lowPass += LP_ALPHA * (mid - lowPass)
             sum += lowPass * lowPass
 
-            lp160 += a160 * (sample - lp160)
-            lp300 += a300 * (sample - lp300)
-            lp2500 += a2500 * (sample - lp2500)
-            lp4000 += a4000 * (sample - lp4000)
-            val mid = lp2500 - lp300
-            val treble = sample - lp4000
+            lp160 += a160 * (mid - lp160)
+            lp4000 += a4000 * (mid - lp4000)
             sumBass += lp160 * lp160
-            sumMid += mid * mid
-            sumTreble += treble * treble
+            sumTreble += (mid - lp4000) * (mid - lp4000)
+
+            // The same 300-3400Hz band taken from mid and from side. Comparing their ENERGIES below
+            // is what isolates the voice, and doing it on the band rather than per-sample keeps the
+            // maths linear -- subtracting sample by sample would clip the waveform and invent
+            // harmonics that the filters would then dutifully report.
+            lpM300 += a300 * (mid - lpM300)
+            lpM3400 += a3400 * (mid - lpM3400)
+            lpS300 += a300 * (side - lpS300)
+            lpS3400 += a3400 * (side - lpS3400)
+            val midBand = lpM3400 - lpM300
+            val sideBand = lpS3400 - lpS300
+            sumVocalMid += midBand * midBand
+            sumVocalSide += sideBand * sideBand
             count++
         }
         if (count == 0) return
         val level = Math.sqrt(sum / count) / 32768.0
+        // Centre-dominant energy in the vocal band: what is in mid and NOT in side. Floored at zero
+        // because a wide stereo pad can hold more energy in side than in mid, and "negative vocal"
+        // is not a thing. On a mono source side is silent and this degrades to a plain band-pass,
+        // which is the right fallback rather than a special case.
+        val vocal = (Math.sqrt(sumVocalMid / count) - Math.sqrt(sumVocalSide / count))
+            .coerceAtLeast(0.0) / 32768.0
         updateBands(
             Math.sqrt(sumBass / count) / 32768.0,
-            Math.sqrt(sumMid / count) / 32768.0,
+            vocal,
             Math.sqrt(sumTreble / count) / 32768.0,
         )
 
@@ -732,7 +763,7 @@ class AudioStreamServer(
         if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
             lastBandLogMs = now
             Logger.i(
-                "Bands bass=%.2f mid=%.2f treble=%.2f".format(bandLevel[0], bandLevel[1], bandLevel[2])
+                "Bands bass=%.2f vocal=%.2f treble=%.2f".format(bandLevel[0], bandLevel[1], bandLevel[2])
             )
         }
         // Rate-limited. This fired once per PCM BLOCK -- around 100 times a second -- so it was

@@ -92,10 +92,12 @@ class DynamicBackground @JvmOverloads constructor(
     }
 
     /**
-     * Real per-band levels: index 0 bass, 1 mid, 2 treble.
+     * Real per-band levels: index 0 bass, 1 vocal, 2 treble.
      *
-     * One orb per band, which is the point — the bass orb swells on the kick, the mid orb moves with
-     * vocals, the treble orb flickers on cymbals. They are still smoothed, but each with a constant
+     * One orb per band, which is the point — the bass orb swells on the kick, the middle orb tracks
+     * the CENTRE-PANNED voice specifically (see the mid/side note in AudioStreamServer, which is why
+     * it follows the singer rather than everything sharing the singer's frequency range), and the
+     * treble orb flickers on cymbals. They are still smoothed, but each with a constant
      * suited to its band rather than as a way of faking the split: bass is slow because bass IS
      * slow, treble is fast because a hi-hat is over in 30ms.
      */
