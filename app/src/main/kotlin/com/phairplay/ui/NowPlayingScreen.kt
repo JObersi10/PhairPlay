@@ -1097,6 +1097,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         progressBar.visibility = View.GONE
         timeElapsed.visibility = View.GONE
         timeRemaining.visibility = View.GONE
+        // The bottom-edge bar is no longer PiP-only, so it has to be torn down here as well. Its
+        // ticker keys off durationMs, which this method has just zeroed — leaving the bar on screen
+        // frozen at whatever fraction the last track ended on.
+        compactProgress.setValue(0)
+        compactProgress.visibility = View.GONE
+        handler.removeCallbacks(compactTick)
     }
 
     private fun darken(color: Int, f: Float) = Color.rgb(
@@ -1371,11 +1377,15 @@ class NowPlayingScreen @JvmOverloads constructor(
             titleView.text = context.getString(R.string.now_playing_audio)
         }
 
-        // Only when the sender told us a duration. A Mac mirroring session does not, and an empty
-        // bar pinned to the bottom of the window is worse than no bar at all.
-        compactProgress.visibility = if (compact && durationMs > 0L) VISIBLE else GONE
+        // EVERY layout, not just PiP. This was gated on `compact`, so the mini Menu presets — which
+        // strip the inline bar along with the pill and the credits — had nothing tracking position
+        // at all, and full size had no bottom-edge line either.
+        //
+        // Still gated on a duration: a Mac mirroring session never sends one, and an empty bar
+        // pinned to the bottom edge is worse than no bar at all.
+        compactProgress.visibility = if (durationMs > 0L) VISIBLE else GONE
         handler.removeCallbacks(compactTick)
-        if (compact) handler.post(compactTick)
+        if (durationMs > 0L) handler.post(compactTick)
 
         // The 4Hz position ticker formats two timestamps and repaints the progress bar. All three of
         // those are GONE in compact, so it was pure main-thread work for something nobody can see.
