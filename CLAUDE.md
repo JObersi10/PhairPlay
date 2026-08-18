@@ -188,6 +188,9 @@ Measured on iOS 26.1 / iPhone13,1:
   reads nothing before closing
 - it sets up **stream type 96 only**
 
+External references, and which ones are already-checked dead ends, are in
+`docs/PROTOCOL_RESOURCES.md`.
+
 The live lead is **stream type 130 = "Remote control"**, named in emanuelecozzi.net's
 SETUP table and in SteeBono's wiki, documented in neither, and never opened by this
 sender. Until its SETUP shape and framing come from a real source or a real capture,

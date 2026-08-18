@@ -45,18 +45,24 @@ object AirPlayVersion {
      *
      * The two services carry SEPARATE TXT records, so they are not obliged to agree — and the
      * question each answers is different. `_raop` is where the DACP decision is made; `_airplay` is
-     * where the sender decides which generation of features to offer, including whether to offer
-     * multi-room grouping at all. Pinning both to 350.0 to protect remote control also, silently,
-     * declined every AirPlay 2 feature gated on being the newer generation.
+     * where the sender decides which generation of features to offer.
      *
-     * Splitting them is the experiment: claim the modern generation where capability is negotiated,
-     * keep the older one where reverse control is granted. It may simply not work — a sender that
-     * cross-checks the two will see an inconsistency, and the honest expectation is that this
-     * either unlocks grouping or changes nothing. It cannot cost DACP, which is decided on the
-     * other service.
+     * WHAT IS ALREADY KNOWN, so this is not re-run blind. `_raop` has been pinned to 350.0 for a
+     * while, which is exactly the shairport-sync #2014 workaround, and the device log still says
+     * "GET /info WITHOUT DACP-ID — sender withheld remote authority (srcvers 350.0)" against
+     * iPhone/iPad on iOS 26.1 and 27. That number in the log is OUR advertised value, not the
+     * sender's, so it confirms the workaround is applied and ineffective: whatever hole iOS 18 left
+     * open is closed on current iOS.
      *
-     * If grouping still is not offered, the next thing to suspect is the feature bits rather than
-     * this number.
+     * The one variable never tested is this constant. While `_raop` claimed 350.0, `_airplay` was
+     * still claiming a current Apple TV, so a sender reading both saw a receiver announcing the
+     * modern generation on one service and a legacy one on the other. Agreeing on 350.0 removes
+     * that inconsistency. It is a genuine experiment with a real mechanism, not a guess at a wire
+     * format — the values are ours to set and their meaning is documented.
+     *
+     * The cost if it fails is AirPlay 2 features gated on the newer generation: multi-room grouping
+     * first, possibly buffered audio. Mirroring is the thing to watch, since it is the feature most
+     * likely to regress and the easiest to notice. Set this back to [APPLE_TV_CURRENT] to undo.
      */
-    const val ADVERTISED_AIRPLAY = APPLE_TV_CURRENT
+    const val ADVERTISED_AIRPLAY = DACP_CAPABLE
 }
