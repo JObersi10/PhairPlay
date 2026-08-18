@@ -282,7 +282,13 @@ class DynamicBackground @JvmOverloads constructor(
         for (i in 0 until 4) {
             val c1 = blend(colors[(i * 2) % PALETTE_SIZE], targets[(i * 2) % PALETTE_SIZE], f)
             val c2 = blend(colors[(i * 2 + 1) % PALETTE_SIZE], targets[(i * 2 + 1) % PALETTE_SIZE], f)
-            cs[i] = blend(c1, c2, blobMix[i])
+            // DIMMED for the blob field specifically. VALUE_FLOOR exists so a dark swatch still
+            // glows as a small orb on black -- but here four screen-sized sources are SCREEN-blended
+            // over each other, and SCREEN is additive: four overlapping colours each held above 55%
+            // value sum toward white, which is why the whole backdrop went to hazy lilac-grey and
+            // the artwork stopped being the brightest thing on screen. The orbs keep the floor;
+            // the field is scaled back down before it is stacked.
+            cs[i] = darken(blend(c1, c2, blobMix[i]), BLOB_VALUE_SCALE)
         }
         blob(canvas, 0, cx0, cy0, r, cs[0], beatAlpha)
         blob(canvas, 1, cx1, cy1, r, cs[1], beatAlpha)
@@ -574,6 +580,13 @@ class DynamicBackground @JvmOverloads constructor(
         key and 0xFFFFFF,
     )
 
+    /** Scales a colour's brightness, leaving hue and saturation alone. */
+    private fun darken(c: Int, f: Float): Int = Color.rgb(
+        (Color.red(c) * f).toInt().coerceIn(0, 255),
+        (Color.green(c) * f).toInt().coerceIn(0, 255),
+        (Color.blue(c) * f).toInt().coerceIn(0, 255),
+    )
+
     private fun lighten(c: Int, f: Float): Int {
         val i = 1f - f
         return Color.rgb(
@@ -653,6 +666,16 @@ class DynamicBackground @JvmOverloads constructor(
         private const val VALUE_FLOOR = 0.55f
         /** A palette whose brightest colour is under this came from a placeholder, not artwork. */
         private const val MIN_USABLE_VALUE = 0.35f
+
+        /**
+         * Brightness the full-screen blob field is scaled to before SCREEN-stacking.
+         *
+         * Four overlapping sources add, so the on-screen result is far brighter than any single
+         * blob colour. 0.46 keeps the palette's hue and saturation fully readable while leaving the
+         * album art as the brightest object in the frame, which is what makes the card read as a
+         * card rather than as text floating on a pastel wash.
+         */
+        private const val BLOB_VALUE_SCALE = 0.46f
         /** Hue step used to invent the colours a one-tone cover cannot supply. */
         private const val HUE_SYNTH_STEP = 47f
 

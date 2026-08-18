@@ -857,9 +857,15 @@ class NowPlayingScreen @JvmOverloads constructor(
             // 2000ms of slack used to be necessary because position was extrapolated from sparse,
             // whole-second sender pushes. It now comes from the receiver's audio clock four times a
             // second and is exact, so the tolerance only needs to cover local animation jitter.
-            if (Math.abs(newPosMs - expectedMs) > 400L) {
+            // NOT WHILE PAUSED. A paused iOS sender keeps pushing progress, and senderPositionMs
+            // subtracts the presentation latency derived from the audio queue -- which keeps moving
+            // as the queue drains and refills on keepalive packets. Frozen display vs drifting
+            // measurement crosses the 400ms tolerance every couple of seconds, so the bar jumped
+            // back about a second, sat still, and jumped again, forever. Nothing is seeking; a
+            // paused position is simply not a thing that needs resyncing.
+            if (!isPaused && Math.abs(newPosMs - expectedMs) > 400L) {
                 positionBaseMs = newPosMs
-                if (!isPaused) positionBaseEpoch = SystemClock.elapsedRealtime()
+                positionBaseEpoch = SystemClock.elapsedRealtime()
                 seekMultiplier = 1f
             }
         } else if (!info.title.isNullOrBlank() && positionBaseEpoch == 0L && !isPaused) {
@@ -1137,6 +1143,12 @@ class NowPlayingScreen @JvmOverloads constructor(
      */
     fun clear() {
         cancelScreensaver()
+        // Layout is per-session. Parking the card in a corner is something you do for the thing you
+        // are watching right now; inheriting it silently on the next connect means the next stream
+        // starts in a corner for no reason the user can see.
+        layoutPreset = LayoutPreset.FULL
+        applyCompactState()
+        applyPresetTransform()
         infoPanel.visibility = View.GONE
         pillWrapper.alpha = 1f
         positionBaseEpoch = 0L; positionBaseMs = 0L; durationMs = 0L
@@ -1445,15 +1457,16 @@ class NowPlayingScreen @JvmOverloads constructor(
             titleView.text = context.getString(R.string.now_playing_audio)
         }
 
-        // EVERY layout, not just PiP. This was gated on `compact`, so the mini Menu presets — which
-        // strip the inline bar along with the pill and the credits — had nothing tracking position
-        // at all, and full size had no bottom-edge line either.
+        // PiP ONLY. Briefly this was shown in every layout so the mini presets would have something
+        // tracking position; at full size a hairline spanning the whole screen reads as a stray UI
+        // artifact rather than as part of the card, so it is back to the window that has no room for
+        // the inline bar. The mini presets simply go without.
         //
-        // Still gated on a duration: a Mac mirroring session never sends one, and an empty bar
-        // pinned to the bottom edge is worse than no bar at all.
-        compactProgress.visibility = if (durationMs > 0L) VISIBLE else GONE
+        // Also gated on a duration: a Mac mirroring session never sends one, and an empty bar pinned
+        // to the bottom edge is worse than no bar at all.
+        compactProgress.visibility = if (compact && durationMs > 0L) VISIBLE else GONE
         handler.removeCallbacks(compactTick)
-        if (durationMs > 0L) handler.post(compactTick)
+        if (compact && durationMs > 0L) handler.post(compactTick)
 
         // The 4Hz position ticker formats two timestamps and repaints the progress bar. All three of
         // those are GONE in compact, so it was pure main-thread work for something nobody can see.
