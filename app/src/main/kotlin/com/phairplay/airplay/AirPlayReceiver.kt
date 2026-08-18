@@ -287,12 +287,18 @@ class AirPlayReceiver(
 
     fun endSession() {
         Logger.i("Ending AirPlay session on user request")
-        // TELL THE SENDER FIRST. Dropping the RTSP socket ends the session on our side but says
-        // nothing to the phone, which stays selected on this AirPlay output and simply carries on
-        // playing -- so Back looked like it had not stopped anything. A pause has to go out while
-        // the control path is still up, because a moment later there is nothing left to send it on.
-        runCatching { sendRemoteCommand(DacpClient.CMD_PAUSE) }
+        // NO DACP PAUSE HERE any more. It was sent so the phone would not carry on playing into a
+        // closed socket, and it does stop the audio -- but pause is all it does. The phone stays
+        // SELECTED on this output, showing the receiver as its active AirPlay destination, just
+        // paused. The device log reads as a clean teardown (RTSP closed, media released, mDNS
+        // re-advertised) while the iPad still believes it is connected, which is exactly what
+        // "back doesn't terminate the connection" looked like from the sofa.
+        //
+        // DACP has no "deselect this output" command -- it is a transport protocol. What actually
+        // makes iOS let go of a route is the receiver becoming UNAVAILABLE, which is why the
+        // withdrawal below is now held open for a moment.
         rtspHandler?.disconnectActiveClient()
+        kickUntilMs = System.currentTimeMillis() + KICK_WINDOW_MS
         // Closing the RTSP control socket does not touch the UDP media servers — they are separate
         // sockets and keep receiving and playing whatever the sender is still transmitting, which is
         // why Back looked like it did nothing. Tear the media down explicitly.
@@ -302,6 +308,7 @@ class AirPlayReceiver(
 
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
+        kickUntilMs = 0L
         try {
             rtspHandler?.stop()
             timingHandler?.stop()
@@ -599,12 +606,33 @@ class AirPlayReceiver(
 
         scope.launch {
             try {
+                // HOLD THE WITHDRAWAL OPEN after a user-initiated end.
+                //
+                // The service was being torn down and re-registered inside about 7ms, which is far
+                // too fast for the sender to notice: iOS never sees the receiver leave, so it keeps
+                // the route selected and the user's Back press reads as a pause. Staying gone long
+                // enough for the departure to propagate is what makes the phone fall back to its own
+                // speaker and drop the output.
+                val hold = kickUntilMs - System.currentTimeMillis()
+                if (hold > 0) {
+                    Logger.i("Holding mDNS withdrawn for ${hold}ms so the sender drops the route")
+                    kotlinx.coroutines.delay(hold)
+                }
                 mdnsService?.restart(displayName.ifBlank { null })
             } catch (e: Exception) {
                 Logger.e("Failed to restart mDNS after streaming", e)
             }
         }
     }
+
+    /**
+     * While now() is under this, the receiver stays off the network after a session ends.
+     *
+     * Only set by the user ending a session by hand. A sender that leaves on its own has already
+     * let go of the route, and making the receiver vanish for several seconds then would just delay
+     * the next connection for no reason.
+     */
+    @Volatile private var kickUntilMs = 0L
 
     // ─── Private: media pipeline ──────────────────────────────────────────────
 
@@ -1127,6 +1155,14 @@ class AirPlayReceiver(
     }
 
     companion object {
+        /**
+         * How long the receiver stays off the network after the user ends a session by hand.
+         *
+         * Long enough for a Bonjour goodbye plus the sender's own route bookkeeping to settle;
+         * short enough that reconnecting deliberately still feels immediate.
+         */
+        private const val KICK_WINDOW_MS = 4000L
+
 
         /**
          * Whether to POST MediaRemote commands on the event channel. See sendMediaRemoteCommand:

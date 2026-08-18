@@ -841,11 +841,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         // arriving. Inferring it from progress-push timing gave false pauses on sparse senders and
         // could never detect resume, because a paused sender stops sending the updates the
         // detector was watching.
-        if (isPaused && info.positionSec > lastReportedPositionSec && lastReportedPositionSec >= 0.0) {
-            isPaused = false
-            positionBaseEpoch = SystemClock.elapsedRealtime()
-            positionBaseMs = senderPositionMs(info.positionSec)
-        }
+        // The old progress-timing resume heuristic lived here and is gone. It fought info.paused:
+        // a paused iOS sender keeps pushing progress, and senderPositionMs subtracts a presentation
+        // latency derived from the audio queue, which keeps moving on keepalive packets. So
+        // positionSec crept up, this cleared isPaused and re-anchored the clock, the next push set
+        // it back -- and the bar twitched and the remaining time flicked by a second, forever.
+        // info.paused tracks whether audio packets are actually arriving and is authoritative.
         lastReportedPositionSec = info.positionSec
 
         if (info.durationSec > 0) {

@@ -277,10 +277,15 @@ class DynamicBackground @JvmOverloads constructor(
         // dissolve it into black without ever clipping a blob against a boundary.
         fun px(v: Float) = (0.5f + (v - 0.5f) * centreBias) * w
         fun py(v: Float) = (0.5f + (v - 0.5f) * centreBias) * h
-        val cx0 = px(lerp(0.05f, 0.40f, a1)); val cy0 = py(lerp(0.10f, 0.45f, a2))
-        val cx1 = px(lerp(0.95f, 0.60f, a2)); val cy1 = py(lerp(0.05f, 0.50f, a3))
-        val cx2 = px(lerp(0.15f, 0.50f, a3)); val cy2 = py(lerp(0.90f, 0.55f, a1))
-        val cx3 = px(lerp(0.80f, 0.45f, a1)); val cy3 = py(lerp(0.80f, 0.40f, a3))
+        // Each blob stays in its own QUADRANT. The inner endpoints used to run to 0.40-0.60 on x
+        // and 0.40-0.55 on y, so whenever the three animators happened to line up all four centres
+        // converged on the middle of the screen -- four colours piled into one bright blob with dark
+        // corners around it, which is both the ugliest and the least colourful state the field has.
+        // The travel is the same in character, just bounded well short of the centre line.
+        val cx0 = px(lerp(0.04f, 0.30f, a1)); val cy0 = py(lerp(0.08f, 0.34f, a2))
+        val cx1 = px(lerp(0.96f, 0.70f, a2)); val cy1 = py(lerp(0.04f, 0.30f, a3))
+        val cx2 = px(lerp(0.10f, 0.34f, a3)); val cy2 = py(lerp(0.94f, 0.68f, a1))
+        val cx3 = px(lerp(0.90f, 0.66f, a1)); val cy3 = py(lerp(0.90f, 0.64f, a3))
 
         // Each blob rides between two palette entries, driven by a drift float, so four blobs
         // express six colours and keep "vibing" without any extra animators.
