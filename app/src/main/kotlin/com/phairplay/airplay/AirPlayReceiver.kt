@@ -1116,6 +1116,15 @@ class AirPlayReceiver(
         positionTicker = scope.launch {
             while (isActive) {
                 delay(POSITION_TICK_MS)
+                // FREEZE WHILE PAUSED. A paused sender's empty keepalives never reach the point
+                // where lastRtpTs advances, so the numerator is genuinely still -- but
+                // playingRtpTimestamp() also subtracts AudioTrack's pending frames, and those
+                // DRAIN to zero over about a second once the queue stops feeding. That drain shows
+                // up as the position walking a second forward, and getTimestamp() jittering around
+                // the drained value walks it back again: the progress bar creeping +1s and back
+                // for as long as the track sits paused. Nothing is moving except the measurement,
+                // so stop measuring.
+                if (npPaused) continue
                 val start = anchorStartTs
                 val playing = audioServer?.playingRtpTimestamp() ?: -1L
                 if (start < 0 || playing < 0) continue

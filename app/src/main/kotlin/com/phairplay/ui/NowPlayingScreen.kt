@@ -504,6 +504,8 @@ class NowPlayingScreen @JvmOverloads constructor(
     /** Restarts every scroll pass — called when the displayed text changes. */
     private fun restartScrolls() = scrollTrackedViews.forEach { scheduleScroll(it) }
 
+    private val restartScrollsRunnable = Runnable { restartScrolls() }
+
     // ── Info panel ("back of the sleeve") ─────────────────────────────────────
 
     /**
@@ -623,7 +625,13 @@ class NowPlayingScreen @JvmOverloads constructor(
         Logger.i("NowPlaying layout → $layoutPreset")
         applyCompactState()
         applyPresetTransform(animate = true)
-        restartScrolls()
+        // AFTER the move, not during it. A scroll pass is sized from the view's measured width, and
+        // switching preset re-lays the artwork tile at a new size while a 460ms transform is still
+        // running -- so the pass that started here was computed against a width the card no longer
+        // had by the time it played, and the title slid to a stop somewhere off its own edge. That
+        // is the mini-mode "glitchy marquee". Wait for the layout to settle, then measure once.
+        handler.removeCallbacks(restartScrollsRunnable)
+        handler.postDelayed(restartScrollsRunnable, PRESET_MOVE_MS + PRESET_SETTLE_MS)
         return true
     }
 
@@ -1164,6 +1172,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         compactProgress.setValue(0)
         compactProgress.visibility = View.GONE
         handler.removeCallbacks(compactTick)
+        handler.removeCallbacks(restartScrollsRunnable)
         textColumn.animate().cancel()
         textColumn.alpha = 1f
         textColumn.translationY = 0f
@@ -1213,6 +1222,15 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         /** How far under-size a new cover starts before settling. Subtle by design. */
         private const val ART_SWAP_SCALE = 0.94f
+
+        /** Artwork tile: full-screen, and the deliberately smaller one the mini presets use. */
+        private const val FULL_ART_DP = 340
+        private const val FULL_ART_GAP_DP = 64
+        private const val MINI_ART_DP = 220
+        private const val MINI_ART_GAP_DP = 36
+
+        /** Slack after the preset move before the marquee is allowed to re-measure. */
+        private const val PRESET_SETTLE_MS = 90L
 
         /** The PiP progress bar moves imperceptibly, so it does not need the 4Hz treatment. */
         private const val COMPACT_TICK_MS = 1_000L
@@ -1358,8 +1376,25 @@ class NowPlayingScreen @JvmOverloads constructor(
         // a PiP window is a thumbnail on someone's TV, not a projected image -- the album cover is
         // what makes it recognisable at that size, and there is no edge to hide.
         compactArtBg.visibility = if (compact && currentArtDrawable != null) VISIBLE else GONE
-        val pad = if (compact) dp(12) else dp(72)
-        val padV = if (compact) dp(8) else dp(60)
+        // MINI IS NOT JUST "THE SAME CARD, SMALLER".
+        //
+        // The preset transform scales the composed card uniformly, so at MINI_SCALE the 340dp
+        // artwork tile and its 64dp gap still claim the same *fraction* of the row they do at full
+        // size -- over half of it. On a card parked in a corner that is the wrong split: the tile
+        // is already unmistakable at 110dp, and the half-row it leaves is what forces every title
+        // into a scroll. Re-laying the tile smaller for the mini presets hands the difference to
+        // the text column, which is the only part of a parked card anyone is still reading.
+        val mini = !compact && layoutPreset != LayoutPreset.FULL
+        (artWrapper.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            val side = if (mini) dp(MINI_ART_DP) else dp(FULL_ART_DP)
+            val gap = if (mini) dp(MINI_ART_GAP_DP) else dp(FULL_ART_GAP_DP)
+            if (lp.width != side || lp.rightMargin != gap) {
+                lp.width = side; lp.height = side; lp.rightMargin = gap
+                artWrapper.layoutParams = lp
+            }
+        }
+        val pad = if (compact) dp(12) else if (mini) dp(40) else dp(72)
+        val padV = if (compact) dp(8) else if (mini) dp(28) else dp(60)
         contentGroup.setPadding(pad, padV, pad, padV)
         contentGroup.gravity = if (compact) android.view.Gravity.CENTER else android.view.Gravity.CENTER_VERTICAL
         textColumn.gravity =

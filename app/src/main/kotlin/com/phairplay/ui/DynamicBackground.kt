@@ -837,7 +837,7 @@ class DynamicBackground @JvmOverloads constructor(
          * readable on screen. At 0.60 the same beat is a ~40% change, and the base radius comes down
          * to keep the fully-swollen orb inside the edge budget.
          */
-        private const val ORB_BEAT_SWELL = 0.60f
+        private const val ORB_BEAT_SWELL = 0.70f
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
@@ -846,8 +846,8 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
-        private const val ORB_CORE_ALPHA = 0.22f
-        private const val ORB_CORE_BEAT_ALPHA = 0.46f
+        private const val ORB_CORE_ALPHA = 0.16f
+        private const val ORB_CORE_BEAT_ALPHA = 0.74f
         private const val CORE_WHITEN = 0.34f
         private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
 
