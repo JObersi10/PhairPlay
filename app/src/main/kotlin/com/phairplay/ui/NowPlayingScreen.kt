@@ -687,7 +687,16 @@ class NowPlayingScreen @JvmOverloads constructor(
             visibility = if (secondaryParts.isEmpty() || isCompact) View.GONE else View.VISIBLE
         }
 
-        Timber.d("NowPlaying senderType=${info.senderDeviceType} name=${info.senderName}")
+        // Logged only when it CHANGES. This render runs on every progress tick — roughly 30 times a
+        // second — and the line is about identity, which changes maybe twice a session. Unthrottled
+        // it emitted ~30 entries/sec into the diagnostic ring buffer, which holds only a few
+        // hundred: every other event, including the whole RTSP handshake, was evicted within
+        // seconds, so `curl :8001` returned nothing but this one line repeated.
+        val senderKey = "${info.senderDeviceType}/${info.senderName}"
+        if (senderKey != lastSenderKey) {
+            lastSenderKey = senderKey
+            Timber.i("NowPlaying senderType=${info.senderDeviceType} name=${info.senderName}")
+        }
         if (info.senderName == "DLNA") {
             pillIcon.setImageResource(R.drawable.ic_cast)
             pillLabel.text = if (info.title != null) "Playing via DLNA" else "Audio via DLNA"
@@ -798,6 +807,9 @@ class NowPlayingScreen @JvmOverloads constructor(
 
     /** Pending "no artwork" fallback, cancelled the moment a real image turns up. */
     private var artworkClear: Runnable? = null
+
+    /** Last logged sender identity, so the line above fires on change rather than on every render. */
+    private var lastSenderKey: String? = null
 
     private fun applyArtworkNow(bytes: ByteArray?) {
         // Senders push a 0-byte "image/none" placeholder between tracks (visible in the RTSP log as

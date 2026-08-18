@@ -974,13 +974,19 @@ class AudioStreamServer(
      * delayed by the same amount or the orbs would react on a different beat from the pulse.
      */
     private fun beatEmitDelayMs(): Long {
-        val track = audioTrack
-        val bufferedMs = if (track != null) {
-            val queuedFrames = frameQueue.size * framesPerPacket
-            val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
-            ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
+        // OUR queue only. AudioTrack's own holding is [outputLatencyMs] below and must not be
+        // counted twice.
+        //
+        // This added `track.bufferSizeInFrames` as well, which is wrong on both counts: it is the
+        // buffer's CAPACITY rather than how much is actually sitting in it, and whatever is really
+        // in it is precisely what getTimestamp() already reports as pending. So the visuals were
+        // held back by roughly a full AudioTrack buffer beyond the true latency — a fixed couple of
+        // hundred milliseconds, which is about half a beat at 160 BPM and reads exactly like "the
+        // orbs are not on the beat" while every band level is perfectly correct.
+        val queuedMs = if (audioTrack != null) {
+            (frameQueue.size.toLong() * framesPerPacket * 1000L / sampleRate.coerceAtLeast(1))
         } else 0L
-        return bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
+        return queuedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
     }
 
     /**

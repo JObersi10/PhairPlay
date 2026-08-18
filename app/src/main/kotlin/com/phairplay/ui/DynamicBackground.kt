@@ -136,28 +136,54 @@ class DynamicBackground @JvmOverloads constructor(
             // several of those roles are filled by shades of that SAME colour, so the pool handed to
             // the hue filter had no red in it to pick. palette.swatches is the full quantised set,
             // where a strong secondary colour does appear even when it holds no named role.
-            val swatches = (
+            val raw = (
                 listOfNotNull(
                     palette.vibrantSwatch, palette.darkVibrantSwatch, palette.mutedSwatch,
                     palette.lightVibrantSwatch, palette.darkMutedSwatch, palette.lightMutedSwatch,
                     palette.dominantSwatch,
                 ) + palette.swatches
-                ).distinctBy { it.rgb }.sortedByDescending { it.population }.map { s ->
-                // Push toward vivid. The value ceiling matters most: a pale, high-value swatch
-                // reads as light grey and washes out the text on top, so cap value and floor
-                // saturation to force deep colour rather than haze. A plain saturation filter was
-                // tried upstream and stripped vivid pinks and teals.
+                ).distinctBy { it.rgb }.sortedByDescending { it.population }
+            if (raw.isEmpty()) return@generate
+
+            // GREY AND WHITE ARTWORK IS ITS OWN CASE, not a weak version of a colour one.
+            //
+            // SAT_FLOOR forces every swatch to 55% saturation. That is right for a colour cover and
+            // actively wrong for a monochrome one: a black-and-white sleeve has no hue, so whatever
+            // trace the quantiser happens to report gets amplified into a confident invented colour,
+            // and spreadByHue then rotates it into two more. Three arbitrary pastels off a greyscale
+            // cover, none of which are in the artwork.
+            //
+            // Decided from the ORIGINAL saturations, before any boost — after the boost everything
+            // looks saturated by construction and the test can no longer tell the two cases apart.
+            val hsvProbe = FloatArray(3)
+            val maxSat = raw.maxOf { s -> Color.colorToHSV(s.rgb, hsvProbe); hsvProbe[1] }
+            val monochrome = maxSat < ACHROMATIC_SAT
+
+            val swatches = raw.map { s ->
                 val hsv = FloatArray(3)
                 Color.colorToHSV(s.rgb, hsv)
-                hsv[1] = (hsv[1] * SAT_BOOST).coerceIn(SAT_FLOOR, 1f)
-                // FLOOR as well as ceiling. Only the ceiling was applied, so a dark swatch stayed
-                // dark: the device log recorded orb colours at v=0.09 and v=0.13, which on black is
-                // no glow at all -- the orbs were being drawn correctly and were simply invisible.
-                hsv[2] = hsv[2].coerceIn(VALUE_FLOOR, VALUE_CEILING)
+                if (monochrome) {
+                    // Stay grey, and glow anyway. Value is lifted into a band that actually reads on
+                    // black, but the artwork's own spread across that band is preserved by mapping
+                    // rather than clamping, so a white highlight and a mid grey stay different tones
+                    // instead of collapsing onto one.
+                    hsv[1] = 0f
+                    hsv[2] = MONO_VALUE_FLOOR + hsv[2] * (MONO_VALUE_CEILING - MONO_VALUE_FLOOR)
+                } else {
+                    // Push toward vivid. The value ceiling matters most: a pale, high-value swatch
+                    // reads as light grey and washes out the text on top, so cap value and floor
+                    // saturation to force deep colour rather than haze. A plain saturation filter was
+                    // tried upstream and stripped vivid pinks and teals.
+                    hsv[1] = (hsv[1] * SAT_BOOST).coerceIn(SAT_FLOOR, 1f)
+                    // FLOOR as well as ceiling. Only the ceiling was applied, so a dark swatch stayed
+                    // dark: the device log recorded orb colours at v=0.09 and v=0.13, which on black is
+                    // no glow at all -- the orbs were being drawn correctly and were simply invisible.
+                    hsv[2] = hsv[2].coerceIn(VALUE_FLOOR, VALUE_CEILING)
+                }
                 Color.HSVToColor(hsv)
             }
             if (swatches.isEmpty()) return@generate
-            val spread = spreadByHue(swatches)
+            val spread = if (monochrome) spreadByValue(swatches) else spreadByHue(swatches)
             // The log caught updateColors running four times in two seconds, twice producing a
             // near-black palette (v=0.09). Those are the between-track placeholder and part-decoded
             // images, not artwork, and letting them through means the backdrop lurches to black and
@@ -176,10 +202,11 @@ class DynamicBackground @JvmOverloads constructor(
             // fine and the drawing is at fault.
             val hs = FloatArray(3)
             Logger.i(
-                "Palette orb hues: " + (0 until 3).joinToString(", ") { i ->
-                    Color.colorToHSV(targets[i], hs)
-                    "%.0f° s=%.2f v=%.2f".format(hs[0], hs[1], hs[2])
-                }
+                "Palette orb hues${if (monochrome) " (monochrome art)" else ""}: " +
+                    (0 until 3).joinToString(", ") { i ->
+                        Color.colorToHSV(targets[i], hs)
+                        "%.0f° s=%.2f v=%.2f".format(hs[0], hs[1], hs[2])
+                    }
             )
             colorFade = 0f; colorAnim.cancel(); colorAnim.start()
         }
@@ -356,6 +383,43 @@ class DynamicBackground @JvmOverloads constructor(
             synth[0] = (synth[0] + HUE_SYNTH_STEP * rotation) % 360f
             picked += Color.HSVToColor(synth)
             rotation++
+        }
+        return picked
+    }
+
+    /**
+     * The monochrome counterpart to [spreadByHue].
+     *
+     * On greyscale artwork hue carries no information at all — every entry sits at the same
+     * meaningless angle, so [spreadByHue] would reject all but the first as a clash and then
+     * synthesise the rest by ROTATING that angle, which is how a black-and-white sleeve ends up
+     * throwing coloured light. Here the orbs are separated on VALUE instead, which is the one axis a
+     * greyscale image genuinely varies along: a white, a light grey and a mid grey still read as
+     * three distinct lights on black.
+     */
+    private fun spreadByValue(source: List<Int>): List<Int> {
+        val hsv = FloatArray(3)
+        val picked = mutableListOf<Int>()
+        for (c in source) {
+            if (picked.size >= PALETTE_SIZE) break
+            Color.colorToHSV(c, hsv)
+            val v = hsv[2]
+            val clash = picked.any { p ->
+                Color.colorToHSV(p, hsv)
+                Math.abs(hsv[2] - v) < VALUE_MIN_GAP
+            }
+            if (!clash) picked += c
+        }
+        if (picked.isEmpty()) return DEFAULTS.map { Color.parseColor(it) }
+        // Shortfall stepped DOWN from what was found, floored so it never darkens into invisibility.
+        val distinct = picked.toList()
+        var step = 1
+        while (picked.size < PALETTE_SIZE) {
+            Color.colorToHSV(distinct[picked.size % distinct.size], hsv)
+            hsv[1] = 0f
+            hsv[2] = (hsv[2] - VALUE_MIN_GAP * step).coerceAtLeast(MONO_VALUE_FLOOR)
+            picked += Color.HSVToColor(hsv)
+            step++
         }
         return picked
     }
@@ -595,6 +659,22 @@ class DynamicBackground @JvmOverloads constructor(
         /** Minimum hue separation between chosen palette colours, in degrees. */
         private const val HUE_MIN_ANGLE = 40f
 
+        /**
+         * Below this ORIGINAL saturation the artwork is treated as greyscale and kept that way.
+         *
+         * Set generously rather than at literal zero: JPEG chroma subsampling and Palette's own
+         * quantiser both leave a few percent of colour on an image that is black and white to the
+         * eye, and SAT_BOOST multiplies exactly that residue into a real hue.
+         */
+        private const val ACHROMATIC_SAT = 0.18f
+
+        /** Monochrome value band. The floor must clear MIN_USABLE_VALUE or the art is rejected. */
+        private const val MONO_VALUE_FLOOR = 0.45f
+        private const val MONO_VALUE_CEILING = 1f
+
+        /** How far apart two greys must be to count as different lights. */
+        private const val VALUE_MIN_GAP = 0.16f
+
         /** Darkness directly under the text block; the gradient fades to nothing from there. */
         private const val TEXT_DARKEN_ARGB = 0x8C000000.toInt()
 
@@ -647,7 +727,10 @@ class DynamicBackground @JvmOverloads constructor(
          * still clears the [ORB_EDGE_MARGIN] on every side without the clamp ever engaging. Vertical
          * is the binding axis on a wide screen, which is why ORB_Y is the tighter of the two.
          */
-        private val ORB_X = floatArrayOf(0.34f, 0.52f, 0.66f)
+        // Left orb pulled in from 0.34: at 16:9 that anchor plus its orbit put it noticeably closer
+        // to the left edge than the right orb was to the right one, so the trio sat off-centre. 0.42
+        // makes the group symmetric about the middle.
+        private val ORB_X = floatArrayOf(0.42f, 0.54f, 0.66f)
         private val ORB_Y = floatArrayOf(0.46f, 0.54f, 0.48f)
 
         /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */

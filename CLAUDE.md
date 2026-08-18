@@ -5,12 +5,20 @@ Fire TV receiver for AirPlay 2, Miracast and DLNA. Views are plain Android
 
 ## Build
 
+Build **from the checkout you are editing** — `~/Documents/Claude/Projects/Fire AirPlay`:
+
 ```bash
-cd /Volumes/SABRENT/PhairPlay && \
+cd ~/Documents/Claude/Projects/"Fire AirPlay" && \
 JAVA_HOME="/Volumes/SABRENT/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 ANDROID_HOME="/Volumes/SABRENT/Applications/AndroidSDK" \
 ./gradlew :app:assembleFiretvDebug
 ```
+
+**`/Volumes/SABRENT/PhairPlay` is a stale fork, not the live tree.** This file used to
+say to build there. It is a separate git repo whose last commit is from early August;
+the project moved to the MacBook and that copy was left behind. Building it succeeds,
+reports `BUILD SUCCESSFUL`, and produces an APK without any of your changes in it —
+there is no error anywhere to notice. Only the toolchain still lives on SABRENT.
 
 There is **no system JDK and no system Android SDK** — both live on the SABRENT
 drive, along with `adb` (`$ANDROID_HOME/platform-tools/adb`). Without those two
@@ -26,7 +34,11 @@ Never pipe a Gradle run through `tail`: it buffers everything until exit, so a
 build that is working looks identically dead to one that is hung. Redirect to a
 file instead.
 
-APK: `app/build/outputs/apk/firetv/debug/app-firetv-debug.apk`
+APK: `/Volumes/SABRENT/phairplay-build/app/outputs/apk/firetv/debug/app-firetv-debug.apk`
+
+Build output is redirected off the internal disk by `layout.buildDirectory` in the root
+`build.gradle.kts`, so there is **no `app/build/outputs`** in the tree and the in-repo
+path that used to be documented here simply does not exist.
 
 ### ⚠️ Verify the native library before every install
 
@@ -40,7 +52,7 @@ exFAT has no journal, so nothing detects the mismatch. Only native rebuilds are
 affected — Kotlin-only changes never invoke the linker.
 
 ```bash
-unzip -p app/build/outputs/apk/firetv/debug/app-firetv-debug.apk \
+unzip -p /Volumes/SABRENT/phairplay-build/app/outputs/apk/firetv/debug/app-firetv-debug.apk \
   lib/armeabi-v7a/libalac.so | head -c 4 | xxd -p   # must be 7f454c46
 ```
 
@@ -52,7 +64,7 @@ permanent, not a workaround to remove later.
 
 ## Device
 
-- Fire TV at `192.168.1.246:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
+- Fire TV at `192.168.0.11:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
 - App ID `com.phairplay.firetv`
 - The SABRENT drive must be mounted first
 - Install with `adb install -r`. **Do not** `am start` afterwards — that is what
@@ -62,7 +74,7 @@ permanent, not a workaround to remove later.
 
 ## Diagnostics
 
-`curl -s http://192.168.1.246:8001/` — full dump. `:8002` — streaming tail.
+`curl -s http://192.168.0.11:8001/` — full dump. `:8002` — streaming tail.
 
 The buffer only holds events since the app last started, and it is small. To
 capture something, reproduce **first**, then curl. An empty `grep` usually means
@@ -134,68 +146,41 @@ Our handler reads raw bytes off that socket and replies in cleartext RTSP, so it
 anything real. The doc also says the receiver is expected to `POST /command` with a
 `updateInfo` plist over this channel once RECORD completes, which we never send.
 
-### Remote skip/next does nothing on modern senders
+### Remote play/pause/skip — SOLVED, and it was the advertised version all along
 
-Not a regression in the key mapping — that is intact. Recent iOS senders never
-advertise a DACP identity at all, so `sendAirPlayRemoteCommand` has nothing to talk
-to: a whole session logs zero `DACP` lines while logging
-`POST /command type=updateMRSupportedCommands`. DACP still works for the legacy RAOP senders that do advertise it (a TikTok session
-logged `DACP configured: id=…`), which is why this used to work. Both the unofficial
-AirPlay spec and pyatv's notes agree: remote control *is* DACP, and it requires the
-sender to send `DACP-ID` + `Active-Remote` so the receiver can find its `_dacp._tcp`
-service. AirPlay 2 senders send neither.
-
-**Settled by measurement, 2026-08-08.** Dumping the sender's own `POST /command`
-payload ends the speculation:
+**Fixed 2026-08-18.** Working on iOS 26.1:
 
 ```
-keys=[type, params]
-{type=updateMRSupportedCommands,
- params={mrSupportedCommandsFromSender=[<104B>, <226B>, <765B>, <503B>, … 36 blobs]}}
+DACP configured: id=40BDA1669DF38307 — discovering iTunes_Ctrl_40BDA1669DF38307
+DACP resolved: 192.168.0.6:54394
+GET /info granted remote authority: DACP-ID=40BDA1669DF38307 (srcvers 350.0)
+DACP playpause → HTTP 200
 ```
 
-36 opaque binary blobs, 103–765 bytes each, under `mrSupportedCommandsFromSender`
-(MR = MediaRemote) inside a plist wrapper.
+The mechanism was never exotic. Remote control **is** DACP, exactly as pyatv, UxPlay,
+openairplay and every other reference says, and it requires the sender to send `DACP-ID`
++ `Active-Remote` so the receiver can find the sender's `_dacp._tcp` service. Modern iOS
+withholds both unless the receiver advertises an OLD ENOUGH `srcvers` — the
+shairport-sync #2014 workaround.
 
-**That measurement recorded blob SIZES and then guessed at their contents.** It
-concluded "serialized MediaRemote protobuf, not a plist command vocabulary" without
-decoding a single blob. openairplay/airplay2-receiver decodes each one with
-`readPlistFromString` into a dict keyed `kCommandInfoCommandKey` /
-`kCommandInfoEnabledKey` — i.e. **nested binary plists**. `RtspHandler`
-(`decodeSupportedCommand`) now accepts both shapes rather than betting on either, so
-the ambiguity costs nothing; but do not cite that paragraph as settled. Two successive
-revisions of this file asserted opposite answers, each confidently, neither having
-decoded a blob.
+That workaround had been applied to `_raop._tcp` (350.0) and appeared not to work.
+**It was only half-applied**: `_airplay._tcp` was still advertising `377.40.00`, a current
+Apple TV. The sender reads both services, saw the modern generation on one of them, and
+withheld remote authority. Aligning both to `DACP_CAPABLE` in `AirPlayVersion.kt` is the
+entire fix.
 
-**MRP encoding is DONE and the commands do go out.** `MediaRemote.encodeSendCommand`
-builds a real `SendCommandMessage` — the field numbers and the `Command` enum come from
-pyatv's `.proto` files, so those parts are sourced, not invented — and the device log
-shows `MediaRemote TogglePlayPause sent (151B plist)`. **The buttons still do nothing.**
-So encoding was never the blocker either.
+The confusing part was that our own log line prints the srcvers we ADVERTISE, so
+`WITHOUT DACP-ID — sender withheld remote authority (srcvers 350.0)` read as "the
+workaround is applied and ineffective" when it in fact only described one of two records.
 
-**What is actually unknown (checked 2026-08-17):** how a receiver DELIVERS a command to
-the sender. Our POST goes over the event channel as
-`{type: "sendCommand", params: {mrCommandFromReceiver: <protobuf>}}` — and **both of
-those key names are invented**, mirrored off the sender's key by an earlier session.
-Neither appears in pyatv, openairplay/airplay2-receiver, nto.github.io, SteeBono's wiki,
-or emanuelecozzi.net. No public implementation sends receiver→sender commands at all;
-openairplay only parses them.
+**Cost:** `ADVERTISED_AIRPLAY` is deliberately a lie about our generation, so any AirPlay 2
+feature a sender gates on a newer version is off the table. Mirroring and audio are
+unaffected in testing. One-line revert to `APPLE_TV_CURRENT` if something turns up.
 
-Measured on iOS 26.1 / iPhone13,1:
-- the sender sends **zero** `POST /command` — no `updateMRSupportedCommands` in the whole
-  session, so it advertised no command vocabulary
-- it opens the event channel, the cipher goes ready, and it then writes **nothing** and
-  reads nothing before closing
-- it sets up **stream type 96 only**
-
-External references, and which ones are already-checked dead ends, are in
-`docs/PROTOCOL_RESOURCES.md`.
-
-The live lead is **stream type 130 = "Remote control"**, named in emanuelecozzi.net's
-SETUP table and in SteeBono's wiki, documented in neither, and never opened by this
-sender. Until its SETUP shape and framing come from a real source or a real capture,
-further key-name guesses are fabrication — that is what produced the two dead keys
-above. Do not add a third.
+**The MediaRemote/MRP work was a dead end and is still disabled** (`MRP_SEND_ENABLED =
+false` in `AirPlayReceiver`). Its two payload key names were invented and appear in no
+public implementation. Do not revive it — DACP is the answer and it works. External
+references, and which are already-checked dead ends, are in `docs/PROTOCOL_RESOURCES.md`.
 
 ### macOS audio backlog churn
 
