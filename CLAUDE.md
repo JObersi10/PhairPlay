@@ -97,6 +97,10 @@ the event never happened, not that the server is broken.
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
+Projector mode, the band/tempo analysis and the Now Playing card are written up for
+reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
+constants that only look arbitrary until you have shipped the wrong one.
+
 Google Cast was removed entirely. Port 8009 is permanently held by
 `com.amazon.cast.sink`, and a receiver must answer `DeviceAuthMessage` with a
 Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it.

@@ -596,6 +596,80 @@ class NowPlayingScreen @JvmOverloads constructor(
     }
 
     /**
+     * Where the now-playing card sits and how big it is.
+     *
+     * FULL is the normal screen-filling layout. The five MINI_* entries are the same card at
+     * [MINI_SCALE], parked centred or in one of the four corners, with everything except the
+     * artwork, title and artist stripped out — so the card can be pushed out of the way of whatever
+     * else is on screen without losing what is playing.
+     */
+    enum class LayoutPreset { FULL, MINI_CENTER, MINI_TOP_LEFT, MINI_TOP_RIGHT, MINI_BOTTOM_LEFT, MINI_BOTTOM_RIGHT }
+
+    private var layoutPreset = LayoutPreset.FULL
+
+    /**
+     * Advances Menu through the six layouts: full, small centred, then the four corners, then back
+     * to full.
+     *
+     * Menu also opens the credits panel, and both cannot live on a single press. The panel moved to
+     * a LONG press (see MainActivity) because it is the rarer of the two — you read the credits
+     * once, whereas moving the card out of the way is something you do while looking at the screen.
+     */
+    fun cycleLayoutPreset(): Boolean {
+        wakeFromScreensaver()
+        dismissInfoPanel()
+        val all = LayoutPreset.values()
+        layoutPreset = all[(layoutPreset.ordinal + 1) % all.size]
+        Logger.i("NowPlaying layout → $layoutPreset")
+        applyCompactState()
+        applyPresetTransform()
+        restartScrolls()
+        return true
+    }
+
+    /** The scale the card is drawn at right now — 1 at full size, [MINI_SCALE] otherwise. */
+    private fun presetScale() = if (layoutPreset == LayoutPreset.FULL) 1f else MINI_SCALE
+
+    /**
+     * Positions and scales the card for the current preset.
+     *
+     * Done as a SCALE about a pivot rather than by re-laying-out the card at a smaller size. The
+     * card is a horizontal row whose text column is weight=1, so shrinking its layout bounds does
+     * not shrink it proportionally — it reflows, and at half width the artwork tile alone eats the
+     * row and the text collapses to nothing, which is precisely the bug documented in
+     * [applyCompactState] for PiP. Scaling the composed result keeps every proportion the full-size
+     * card was designed with and simply makes it smaller.
+     *
+     * The pivot is the corner the card should collapse toward, so gravity comes for free: scaling
+     * a MATCH_PARENT view about its top-left corner leaves it occupying the top-left of the frame.
+     */
+    private fun applyPresetTransform() {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val p = layoutPreset
+        contentGroup.pivotX = when (p) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> 0f
+            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> w
+            else -> w / 2f
+        }
+        contentGroup.pivotY = when (p) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> 0f
+            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> h
+            else -> h / 2f
+        }
+        // Set directly, not animated: the screensaver owns an animator on this same view, and two
+        // of them on one property is what made the card visibly jump on every drift step.
+        contentGroup.animate().cancel()
+        val s = presetScale()
+        contentGroup.scaleX = s
+        contentGroup.scaleY = s
+        contentGroup.alpha = 1f
+        contentGroup.translationX = 0f
+        contentGroup.translationY = 0f
+    }
+
+    /**
      * Shows/hides the credits panel. Returns true if the key was consumed — the caller uses this to
      * decide whether Menu did anything, so it can fall through to default handling when the panel
      * isn't applicable.
@@ -957,8 +1031,11 @@ class NowPlayingScreen @JvmOverloads constructor(
         handler.removeCallbacks(driftRunnable)
         dynamicBg.animate().alpha(1f).setDuration(WAKE_MS).start()
         pillWrapper.animate().alpha(1f).setDuration(WAKE_MS).start()
+        // Back to the PRESET's scale, not to 1. Waking always restored full size, so on any MINI_*
+        // preset the card silently grew to fill the screen the first time the screensaver ended.
         contentGroup.animate()
-            .alpha(1f).translationX(0f).translationY(0f).scaleX(1f).scaleY(1f)
+            .alpha(1f).translationX(0f).translationY(0f)
+            .scaleX(presetScale()).scaleY(presetScale())
             .setDuration(WAKE_MS).setInterpolator(DecelerateInterpolator()).start()
     }
 
@@ -1045,6 +1122,15 @@ class NowPlayingScreen @JvmOverloads constructor(
         // scaled-down screenshot of the full one.
         /** A window narrower than this is a PiP window, not a television. */
         private const val COMPACT_MAX_WIDTH_DP = 500
+
+        /**
+         * How big a MINI_* preset draws the card, as a fraction of the full layout.
+         *
+         * 0.5 rather than smaller: the card is scaled as a composed bitmap, so the title's text
+         * size shrinks with it, and below about half the artist line stops being readable from a
+         * sofa. The corner presets already leave three quarters of the screen clear at this size.
+         */
+        private const val MINI_SCALE = 0.5f
 
         /** The PiP progress bar moves imperceptibly, so it does not need the 4Hz treatment. */
         private const val COMPACT_TICK_MS = 1_000L
@@ -1135,6 +1221,8 @@ class NowPlayingScreen @JvmOverloads constructor(
         val small = w < COMPACT_MAX_WIDTH_DP * resources.displayMetrics.density
         Logger.i("NowPlaying window ${w}x$h — compact=$small")
         setCompact(small)
+        // The pivot is in pixels, so it is only meaningful for the size it was computed at.
+        applyPresetTransform()
         // Every resize, not only the compact transition. A PiP window can be resized by the user
         // while it stays a PiP window (the log shows 384x216 → 728x410 → 384x216), and setCompact
         // early-returns on those because compact has not changed -- so the marquee kept a scroll
@@ -1197,12 +1285,18 @@ class NowPlayingScreen @JvmOverloads constructor(
             else android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.START
 
         // Compact shows the song and who made it, and nothing else.
-        albumView.visibility = if (compact) GONE else VISIBLE
-        metaSecondaryView.visibility = if (compact) GONE else VISIBLE
-        progressBar.visibility = if (compact) GONE else VISIBLE
-        timeElapsed.visibility = if (compact) GONE else VISIBLE
-        timeRemaining.visibility = if (compact) GONE else VISIBLE
-        pillWrapper.visibility = if (compact) GONE else VISIBLE
+        //
+        // A MINI_* preset wants exactly the same reduction for a different reason — the card is
+        // being parked out of the way, so the progress bar, the credits line and the "Audio from…"
+        // pill are noise — so both drive the same set. The artwork tile is the one difference: PiP
+        // has no room for it, a mini preset is built around it.
+        val stripped = compact || layoutPreset != LayoutPreset.FULL
+        albumView.visibility = if (stripped) GONE else VISIBLE
+        metaSecondaryView.visibility = if (stripped) GONE else VISIBLE
+        progressBar.visibility = if (stripped) GONE else VISIBLE
+        timeElapsed.visibility = if (stripped) GONE else VISIBLE
+        timeRemaining.visibility = if (stripped) GONE else VISIBLE
+        pillWrapper.visibility = if (stripped) GONE else VISIBLE
         debugView.visibility = if (compact) GONE else debugView.visibility
 
         // The info panel is opened by a key press, which cannot happen in PiP -- but it can already
@@ -1260,6 +1354,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         if (compact) {
             contentGroup.animate().cancel()
             contentGroup.alpha = 1f
+            // A PiP window is already as small as it gets; a mini preset on top of that would
+            // shrink the card to a quarter of a thumbnail. Full scale is right here whatever the
+            // preset says — [applyPresetTransform] restores it when the window grows back.
             contentGroup.scaleX = 1f
             contentGroup.scaleY = 1f
             contentGroup.translationX = 0f

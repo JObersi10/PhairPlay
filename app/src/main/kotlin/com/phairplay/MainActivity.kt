@@ -853,11 +853,24 @@ class MainActivity : AppCompatActivity() {
             // Any remote press counts as presence — restart the Now Playing idle countdown.
             nowPlayingScreen.notifyActivity()
 
-            // Menu (and Info on some remotes) flips the now-playing card over to its credits side.
+            // Menu (and Info on some remotes) cycles the card through its six layouts: full size,
+            // small and centred, then each of the four corners.
+            //
+            // A LONG press still flips the card over to its credits side, which is where that used
+            // to live on a short press. Moving the card is the thing you do while looking at the
+            // screen and want repeatable on one button; the credits are read once. `startTracking`
+            // is what makes onKeyLongPress fire at all, and the repeat guard keeps the auto-repeat
+            // that follows a held key from spinning through all six layouts.
             if (keyCode == android.view.KeyEvent.KEYCODE_MENU ||
                 keyCode == android.view.KeyEvent.KEYCODE_INFO
             ) {
-                if (nowPlayingScreen.visibility == View.VISIBLE) return nowPlayingScreen.toggleInfoPanel()
+                if (nowPlayingScreen.visibility == View.VISIBLE) {
+                    if (event != null && event.repeatCount == 0) {
+                        event.startTracking()
+                        menuLongPressed = false
+                    }
+                    return true
+                }
             }
 
             // Audio mapping: D-pad left/right scrubs *within* the track, the dedicated media
@@ -916,7 +929,29 @@ class MainActivity : AppCompatActivity() {
             service?.dispatchTransportCommand(DacpClient.CMD_PLAY_RESUME)
             return true
         }
+        // The layout cycle fires on RELEASE, so a press that turned out to be a long one can be
+        // claimed by the credits panel instead. Acting on the way down would run both.
+        if (keyCode == android.view.KeyEvent.KEYCODE_MENU || keyCode == android.view.KeyEvent.KEYCODE_INFO) {
+            if (nowPlayingScreen.visibility == View.VISIBLE) {
+                val wasLong = menuLongPressed
+                menuLongPressed = false
+                return if (wasLong) true else nowPlayingScreen.cycleLayoutPreset()
+            }
+        }
         return super.onKeyUp(keyCode, event)
+    }
+
+    /** True once [onKeyLongPress] has handled the current Menu hold, so its release does nothing. */
+    private var menuLongPressed = false
+
+    override fun onKeyLongPress(keyCode: Int, event: android.view.KeyEvent?): Boolean {
+        if (keyCode == android.view.KeyEvent.KEYCODE_MENU || keyCode == android.view.KeyEvent.KEYCODE_INFO) {
+            if (nowPlayingScreen.visibility == View.VISIBLE) {
+                menuLongPressed = true
+                return nowPlayingScreen.toggleInfoPanel()
+            }
+        }
+        return super.onKeyLongPress(keyCode, event)
     }
 
     /** Marks a seek as running so [onKeyUp] knows to stop it, and returns the command to send. */
