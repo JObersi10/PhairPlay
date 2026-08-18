@@ -227,14 +227,23 @@ class DynamicBackground @JvmOverloads constructor(
         val a3 = t3.animatedValue as Float
 
         val e = (energy * beatMultiplier).coerceIn(0f, 1f)
-        // The full-screen field uses the SAME band levels as the projector orbs, so the two modes
-        // read as one visual. Bass goes to scale, because size is what registers as the beat from
-        // across a room; treble goes to brightness, where a fast flicker looks like air rather than
-        // like the whole picture pumping.
+        // BAND ENVELOPES ONLY -- `energy` is deliberately not mixed in here any more.
+        //
+        // It carries the same beat, but through a SECOND smoothing stage (0.22/frame in tick, on top
+        // of the per-band attack/release the bands already went through). Summing a once-smoothed
+        // and a twice-smoothed copy of one signal smears the attack and lands the field a frame or
+        // two behind the orbs -- the two modes were drawing the same music at different times.
+        // bandBass already falls back to `energy` for sources that report loudness but no spectrum,
+        // so nothing is lost by dropping it. `e` stays for the fallback path below.
         val bass = (bandBass * beatMultiplier).coerceIn(0f, 1f)
         val treble = (bandTreble * beatMultiplier).coerceIn(0f, 1f)
-        val beatScale = 1f + (e * 0.16f) + (bass * 0.16f)
-        val beatAlpha = 0.66f + e * 0.14f + treble * 0.10f
+        val beatScale = 1f + bass * FIELD_BEAT_SCALE
+        // ALPHA IS ALL BUT CONSTANT, for the same reason the projector halo's is: these blobs cover
+        // the whole screen, so any alpha that rides the beat pumps the entire picture's brightness
+        // on every kick. That is what read as "too sensitive" -- the response was not too large in
+        // magnitude, it was applied to the one property that affects every pixel at once. The beat
+        // now shows as size, which is local and reads correctly from across a room.
+        val beatAlpha = FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA
         val r = maxOf(w, h) * 0.62f * beatScale
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
@@ -675,7 +684,20 @@ class DynamicBackground @JvmOverloads constructor(
          * album art as the brightest object in the frame, which is what makes the card read as a
          * card rather than as text floating on a pastel wash.
          */
-        private const val BLOB_VALUE_SCALE = 0.46f
+        private const val BLOB_VALUE_SCALE = 0.34f
+
+        /** Beat -> blob size. The only place the full-screen field expresses the beat. */
+        private const val FIELD_BEAT_SCALE = 0.20f
+
+        /**
+         * Field brightness. Near-constant on purpose -- see the note at the call site.
+         *
+         * Lowered along with BLOB_VALUE_SCALE: the title fades IN over this field, so every point of
+         * backdrop brightness is contrast the text loses. White-on-pastel at TV viewing distance is
+         * the failure mode, and it is worse mid-crossfade than at rest.
+         */
+        private const val FIELD_BASE_ALPHA = 0.58f
+        private const val FIELD_BEAT_ALPHA = 0.05f
         /** Hue step used to invent the colours a one-tone cover cannot supply. */
         private const val HUE_SYNTH_STEP = 47f
 
@@ -699,7 +721,14 @@ class DynamicBackground @JvmOverloads constructor(
         private const val VALUE_MIN_GAP = 0.16f
 
         /** Darkness directly under the text block; the gradient fades to nothing from there. */
-        private const val TEXT_DARKEN_ARGB = 0x8C000000.toInt()
+        // Raised from 0x8C. This pool is what the title and artist actually sit on, and the card
+        // renders them white; the backdrop only has to be dark HERE, not everywhere, so darkening
+        // this region harder costs nothing elsewhere and is what keeps the text readable while the
+        // blob field stays colourful.
+        private const val TEXT_DARKEN_ARGB = 0xB8000000.toInt()
+
+        /** Mid stop of the text pool, so the falloff eases rather than ramping straight to nothing. */
+        private const val TEXT_DARKEN_MID_ARGB = 0x8C000000.toInt()
 
         /** Colours and stops for the text scrim. Constant, so they are shared, not rebuilt per frame. */
         /** The near-black TV base. Lifted off zero so panels do not crush shadows. */
@@ -819,8 +848,12 @@ class DynamicBackground @JvmOverloads constructor(
          * long, near-zero tail is still what stops a visible ring forming where the gradient ends.
          */
         private val ORB_STOPS = floatArrayOf(0f, 0.34f, 0.62f, 0.85f, 1f)
-        private val TEXT_GRAD_COLORS = intArrayOf(TEXT_DARKEN_ARGB, 0x00000000)
-        private val TEXT_GRAD_STOPS = floatArrayOf(0f, 1f)
+        private val TEXT_GRAD_COLORS =
+            intArrayOf(TEXT_DARKEN_ARGB, TEXT_DARKEN_MID_ARGB, 0x00000000)
+        // Three stops, not two. A linear ramp from full darkening to nothing puts the steepest part
+        // of the falloff right where the text ends, so the pool reads as a dark disc behind the
+        // words. Holding it near-full to 45% and easing out from there hides the boundary.
+        private val TEXT_GRAD_STOPS = floatArrayOf(0f, 0.45f, 1f)
 
         private val DEFAULTS = arrayOf("#1a1a2e", "#16213e", "#0f3460", "#220033", "#2a1a3e", "#0d2b4e")
     }

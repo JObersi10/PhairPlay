@@ -858,16 +858,16 @@ class MainActivity : AppCompatActivity() {
             //
             // A LONG press still flips the card over to its credits side, which is where that used
             // to live on a short press. Moving the card is the thing you do while looking at the
-            // screen and want repeatable on one button; the credits are read once. `startTracking`
-            // is what makes onKeyLongPress fire at all, and the repeat guard keeps the auto-repeat
-            // that follows a held key from spinning through all six layouts.
+            // screen and want repeatable on one button; the credits are read once. The hold is
+            // timed here rather than via onKeyLongPress -- see [menuLongRunnable].
             if (keyCode == android.view.KeyEvent.KEYCODE_MENU ||
                 keyCode == android.view.KeyEvent.KEYCODE_INFO
             ) {
                 if (nowPlayingScreen.visibility == View.VISIBLE) {
                     if (event != null && event.repeatCount == 0) {
-                        event.startTracking()
                         menuLongPressed = false
+                        menuHandler.removeCallbacks(menuLongRunnable)
+                        menuHandler.postDelayed(menuLongRunnable, MENU_LONG_PRESS_MS)
                     }
                     return true
                 }
@@ -933,6 +933,7 @@ class MainActivity : AppCompatActivity() {
         // claimed by the credits panel instead. Acting on the way down would run both.
         if (keyCode == android.view.KeyEvent.KEYCODE_MENU || keyCode == android.view.KeyEvent.KEYCODE_INFO) {
             if (nowPlayingScreen.visibility == View.VISIBLE) {
+                menuHandler.removeCallbacks(menuLongRunnable)
                 val wasLong = menuLongPressed
                 menuLongPressed = false
                 return if (wasLong) true else nowPlayingScreen.cycleLayoutPreset()
@@ -941,17 +942,25 @@ class MainActivity : AppCompatActivity() {
         return super.onKeyUp(keyCode, event)
     }
 
-    /** True once [onKeyLongPress] has handled the current Menu hold, so its release does nothing. */
+    /** True once the hold has already opened the credits, so the release does nothing. */
     private var menuLongPressed = false
+    private val menuHandler = Handler(Looper.getMainLooper())
 
-    override fun onKeyLongPress(keyCode: Int, event: android.view.KeyEvent?): Boolean {
-        if (keyCode == android.view.KeyEvent.KEYCODE_MENU || keyCode == android.view.KeyEvent.KEYCODE_INFO) {
-            if (nowPlayingScreen.visibility == View.VISIBLE) {
-                menuLongPressed = true
-                return nowPlayingScreen.toggleInfoPanel()
-            }
+    /**
+     * Opens the credits panel when Menu is HELD.
+     *
+     * Deliberately a posted delay rather than onKeyLongPress. The framework only dispatches a long
+     * press for a key it is tracking, and that interacts with what onKeyDown returns for the
+     * auto-repeat events -- which this Activity swallows wholesale, because one held REWIND was
+     * otherwise producing five PreviousTrack commands in 200ms. Rather than have the credits depend
+     * on that interaction resolving the way we hope, on remotes we cannot test every model of, the
+     * hold is timed here. It behaves identically on anything that sends a key at all.
+     */
+    private val menuLongRunnable = Runnable {
+        if (nowPlayingScreen.visibility == View.VISIBLE) {
+            menuLongPressed = true
+            nowPlayingScreen.toggleInfoPanel()
         }
-        return super.onKeyLongPress(keyCode, event)
     }
 
     /** Marks a seek as running so [onKeyUp] knows to stop it, and returns the command to send. */
@@ -1052,6 +1061,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** How long Menu must be held to open the credits instead of moving the card. */
+        private const val MENU_LONG_PRESS_MS = 600L
+
         /** Latency every AirPlay sender asks for in SETUP latencyMin: 11025 samples @44.1kHz. */
         private const val BASE_LATENCY_MS = 250
 
