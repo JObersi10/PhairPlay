@@ -16,6 +16,21 @@ import com.phairplay.util.NetworkUtils
  */
 object InfoResponder {
 
+    /**
+     * The device's current media volume as an AirPlay level in dB (-30…0, or -144 when muted).
+     *
+     * AirPlay's scale is the 30 dB window senders use for their slider; Android's is a small
+     * integer step count, so this is a straight proportional map between the two.
+     */
+    private fun currentVolumeDb(context: Context): Double = runCatching {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+        val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (max <= 0) return@runCatching DEFAULT_VOLUME_DB
+        val level = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+        if (level <= 0) return@runCatching MUTED_VOLUME_DB
+        -30.0 + 30.0 * level / max
+    }.getOrDefault(DEFAULT_VOLUME_DB)
+
     fun build(context: Context, width: Int = 1920, height: Int = 1080, pinRequired: Boolean = false): ByteArray {
         val mac = NetworkUtils.getMacAddress()
         // When PIN access control is on, set the "pairing/PIN required" status bit so the sender runs
@@ -36,6 +51,47 @@ object InfoResponder {
             "protovers" to "1.1",
             "keepAliveLowPower" to true,
             "keepAliveSendStatsAsBody" to true,
+
+            // ── Keys a real Apple TV returns that we were omitting ──────────────────────────
+            //
+            // An absent key is not neutral: the sender treats it as "not supported" and silently
+            // withholds the corresponding behaviour, which looks like a receiver bug much further
+            // down the session. These are the ones with observable consequences.
+
+            // Tells the sender the receiver has a UI worth showing for audio-only content. Without
+            // it iOS treats an audio session as headless and does not offer the now-playing screen
+            // it would give an Apple TV.
+            "playbackCapabilities" to mapOf(
+                "supportsFPSSecureStop" to true,
+                "supportsUIForAudioOnlyContent" to true,
+                "supportsInterstitials" to true,
+            ),
+
+            // 2 = absolute. Claiming 1 (relative up/down steps) and then answering every query with
+            // an absolute dB level is a contradiction, and macOS responded to it by re-sending its
+            // volume dozens of times a second — the Music slider "refreshing" on its own without
+            // the level ever changing. We do handle absolute levels, so say so.
+            "volumeControlType" to 2L,
+            // dB, not percent: 0 is full scale and -144 is muted.
+            //
+            // Read from the device rather than hardcoded. A fixed value made the sender's slider
+            // start somewhere the TV was not — it showed 100% while the TV sat at 80% — and only
+            // agreed with reality after the first adjustment forced a round trip.
+            "initialVolume" to currentVolumeDb(context),
+
+            // Screen recording is a sender-side capability we genuinely do not have; saying so
+            // stops senders offering it and then failing.
+            "canRecordScreenStream" to false,
+
+            // Pairing capabilities, stated explicitly. Transient pairing is NOT implemented, and
+            // claiming it would make a sender skip the pairing we do support and then fail.
+            "supportsSystemPairing" to true,
+            "supportsTransientPairing" to false,
+            "supportsHKPairingAndAccessControl" to true,
+
+            // Name provenance: true would tell the sender our name is a factory placeholder and
+            // invite it to rename us.
+            "nameIsFactoryDefault" to false,
             // NOTE: macOS IGNORES this for system-audio AirPlay — it sends ALAC (ct=2) regardless of
             // what we advertise (verified: advertising AAC-only still got ALAC). So we keep the broad
             // set (mirroring negotiates AAC-ELD from it, which works). Audio-only would need a
@@ -77,6 +133,12 @@ object InfoResponder {
     /** Status bit advertising that the receiver requires PIN pairing (0x8 — verify vs macOS). */
     private const val STATUS_FLAG_PIN_REQUIRED = 0x8L
 
-    private const val MODEL = "AppleTV5,3"
-    private const val SOURCE_VERSION = "220.68"
+    private const val MODEL = "AppleTV6,2"
+    private const val SOURCE_VERSION = AirPlayVersion.ADVERTISED
+
+    /** Used when the audio service can't be read at all. */
+    private const val DEFAULT_VOLUME_DB = -20.0
+
+    /** AirPlay's "muted" sentinel — anything at or below -144 dB. */
+    private const val MUTED_VOLUME_DB = -144.0
 }

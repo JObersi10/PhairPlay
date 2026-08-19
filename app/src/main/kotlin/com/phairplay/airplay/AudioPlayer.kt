@@ -27,7 +27,17 @@ import javax.crypto.spec.SecretKeySpec
  *   player.playAudioPacket(encryptedRtpPayload)              // call for each UDP packet
  *   player.release()                                          // call when done
  */
-class AudioPlayer {
+/**
+ * @param extraDelayMs user A/V-sync trim (AppSettings.audioDelayMs) applied to this stream.
+ *
+ * The legacy RAOP path had no delay control at all, so the setting appeared to do nothing whenever
+ * a sender used it — which is every macOS Music session and every audio-only SDP session.
+ */
+class AudioPlayer(private val extraDelayMs: Int = 0) {
+
+    /** Silence still to be written before real audio, in bytes. Zero once the trim is paid. */
+    private var pendingSilenceBytes = 0
+
 
     // Android's audio output — writes decoded PCM audio to hardware
     private var audioTrack: AudioTrack? = null
@@ -102,6 +112,17 @@ class AudioPlayer {
 
         initializeAudioTrack(sampleRate, channels)
 
+        // The trim is paid once, as silence ahead of the first sample. AudioTrack plays what it is
+        // given in order, so putting N ms of zeros in front shifts every later sample by N ms —
+        // which is exactly what an A/V-sync offset is.
+        pendingSilenceBytes = if (extraDelayMs > 0) {
+            val frameBytes = channels * BYTES_PER_SAMPLE
+            (sampleRate * extraDelayMs / 1000) * frameBytes
+        } else {
+            0
+        }
+        if (pendingSilenceBytes > 0) Logger.i("AudioPlayer: delaying audio by ${extraDelayMs}ms")
+
         isInitialized = true
     }
 
@@ -146,6 +167,11 @@ class AudioPlayer {
             // Step 3: Decode ALAC to PCM if this is a lossless stream; otherwise the payload is
             // already PCM (LPCM) and passes through. Skip the packet if ALAC decode fails, and mute
             // the stream entirely if the first frames mostly fail (wrong key → noise suppression).
+            // Once the gate has muted the stream we stop decoding entirely rather than decoding
+            // and discarding: the payload is garbage by definition, and every garbage frame is
+            // another chance for the decoder to misparse. Cheapest correct thing is to not look.
+            if (muted) return
+
             val pcm = alac?.let { dec ->
                 val out = dec.decode(decryptedPayload)
                 if (!decodeHealthDecided) updateDecodeHealth(out != null)
@@ -154,6 +180,7 @@ class AudioPlayer {
             } ?: decryptedPayload
 
             // Step 4: Write to AudioTrack for playback
+            writePendingSilence()
             // WRITE_NON_BLOCKING returns immediately if the buffer is full (prevents stalls)
             audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_NON_BLOCKING)
 
@@ -206,6 +233,21 @@ class AudioPlayer {
         aesKeySpec = SecretKeySpec(key, "AES")
         aesIvSpec = IvParameterSpec(iv)
         Logger.d("AES-128-CBC cipher initialized")
+    }
+
+    /**
+     * Writes out the configured delay as silence, ahead of the first real audio.
+     *
+     * Written in chunks because WRITE_NON_BLOCKING takes only what the buffer has room for; the
+     * remainder rides along with the next few packets, which is fine — it is all still ahead of the
+     * audio it delays.
+     */
+    private fun writePendingSilence() {
+        if (pendingSilenceBytes <= 0) return
+        val track = audioTrack ?: return
+        val chunk = ByteArray(minOf(pendingSilenceBytes, SILENCE_CHUNK_BYTES))
+        val written = track.write(chunk, 0, chunk.size, AudioTrack.WRITE_NON_BLOCKING)
+        if (written > 0) pendingSilenceBytes -= written
     }
 
     /**
@@ -302,6 +344,12 @@ class AudioPlayer {
     }
 
     companion object {
+        /** PCM16 — two bytes per sample per channel. */
+        private const val BYTES_PER_SAMPLE = 2
+
+        /** Cap on one silence write, so a large trim can't block the packet thread. */
+        private const val SILENCE_CHUNK_BYTES = 8192
+
         // AES-128 key length in bytes (128 bits / 8 = 16 bytes)
         private const val AES_KEY_LENGTH_BYTES = 16
 
@@ -314,4 +362,5 @@ class AudioPlayer {
         private const val DECODE_HEALTH_SAMPLE = 24
         private const val DECODE_HEALTH_MIN_RATE = 0.8
     }
+
 }

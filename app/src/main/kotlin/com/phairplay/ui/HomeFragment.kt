@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.service.PhairPlayService
 import com.phairplay.service.Protocol
@@ -116,8 +117,14 @@ class HomeFragment : Fragment() {
      */
     private fun configureProtocolCards() {
         setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
-        setupCard(cardMiracast,  R.drawable.ic_miracast, R.string.protocol_miracast)
         setupCard(cardDlna,      R.drawable.ic_cast,     R.string.protocol_dlna)
+        // Fire TV cannot complete a Miracast session, so the card would sit on "Advertising" for
+        // ever and invite the user to try something that never connects. See DeviceFeatures.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast)
+        } else {
+            cardMiracast.visibility = View.GONE
+        }
     }
 
     private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
@@ -162,6 +169,15 @@ class HomeFragment : Fragment() {
      */
     private fun observeServiceState() {
         val svc = service ?: return
+        // The binding is asynchronous and outlives the view. When onboarding finished it restarted
+        // the service and immediately replaced this fragment, so onServiceConnected landed after
+        // onDestroyView and viewLifecycleOwner threw — taking the whole app down right at the end of
+        // first-run setup. There is nothing to update if the view is gone; the next onViewCreated
+        // will observe again.
+        if (view == null) {
+            Logger.i("HomeFragment: service connected after the view was destroyed — skipping observers")
+            return
+        }
 
         viewLifecycleOwner.lifecycleScope.launch {
             svc.serviceState.collectLatest { state -> updateServiceStateBadge(state) }
@@ -244,6 +260,14 @@ class HomeFragment : Fragment() {
             detail.text = getString(
                 R.string.protocol_detail_last_sender, sender.name, relativeTime(sender.atMs)
             )
+        } else if (detailRes == R.string.protocol_detail_connected) {
+            // This string carries a %1$s for the sender's name. setText(resId) does no formatting,
+            // so the card literally read "Streaming from %1$s" for the whole session. During
+            // pairing there is no name yet, so fall back to a phrasing that doesn't need one.
+            val name = sender?.name
+            detail.text =
+                if (name.isNullOrBlank()) getString(R.string.protocol_detail_connected_unknown)
+                else getString(detailRes, name)
         } else {
             detail.setText(detailRes)
         }

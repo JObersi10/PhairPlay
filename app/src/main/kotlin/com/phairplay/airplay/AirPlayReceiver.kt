@@ -5,6 +5,9 @@ import android.view.Surface
 import com.phairplay.airplay.handshake.AirPlayNtpClient
 import com.phairplay.airplay.handshake.AudioStreamServer
 import com.phairplay.airplay.handshake.BufferedAudioServer
+import com.phairplay.airplay.handshake.EventCipher
+import com.phairplay.airplay.handshake.MediaRemote
+import com.phairplay.airplay.handshake.PlistCodec
 import com.phairplay.airplay.handshake.MirrorStreamServer
 import com.phairplay.service.ProtocolState
 import com.phairplay.util.Logger
@@ -64,11 +67,18 @@ class AirPlayReceiver(
     private val rememberPinPairing: Boolean = true,
     /** User A/V-sync trim added on top of the sender's requested latency (AppSettings.audioDelayMs). */
     private val audioDelayMs: Int = 0,
+    /** AudioTrack hardware buffer in ms (AppSettings.audioBufferMs). */
+    private val audioBufferMs: Int = com.phairplay.settings.AppSettings.DEFAULT_AUDIO_BUFFER_MS,
     /** Extra delay for the beat animation only (AppSettings.beatDelayMs). */
     private val beatDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
+    /**
+     * A sender just opened the control socket. Used to bring the Activity up early so its Surface
+     * exists before the first video packet — see `RtspHandler.onSenderApproaching`.
+     */
+    private val onSenderApproaching: () -> Unit = {},
     /**
      * Offered every sender volume change (dB, −30…0). Return true if the level was applied to the
      * output device, in which case the software gain stays at unity so the two don't compound —
@@ -90,6 +100,14 @@ class AirPlayReceiver(
     /** Called when iOS/macOS clears the currently displayed `/photo`. */
     private val onPhotoCleared: () -> Unit = {},
     /**
+     * True while a video stream is actually negotiated and running.
+     *
+     * The UI shows the video Surface on true and its own screen on false, so this must come from
+     * the receiver rather than be guessed from now-playing metadata — an audio-only session that
+     * never reports a track would otherwise sit on a black Surface forever.
+     */
+    private val onVideoPlayingChanged: (Boolean) -> Unit = {},
+    /**
      * Called with the actual mDNS-registered name after [start].
      *
      * The name may differ from [displayName] if another device on the network already uses
@@ -104,6 +122,8 @@ class AirPlayReceiver(
      */
     private val onNowPlayingChanged: (NowPlayingInfo?) -> Unit = {},
     private val onEnergyChanged: (Float) -> Unit = {},
+    /** Bass, mid and treble levels 0..1 — see AudioStreamServer.onBands. */
+    private val onBandsChanged: (FloatArray) -> Unit = {},
     /** Pairing PIN to show ([pin]) or hide (null) on the TV during SRP pair-setup. */
     private val onPinChanged: (pin: String?) -> Unit = {}
 ) {
@@ -120,6 +140,7 @@ class AirPlayReceiver(
     private var mdnsService: MdnsService? = null
     private var rtspHandler: RtspHandler? = null
     private var timingHandler: TimingHandler? = null
+    private var controlHandler: RaopControlHandler? = null
     private var videoDecoder: VideoDecoder? = null
     private var audioPlayer: AudioPlayer? = null
 
@@ -129,14 +150,67 @@ class AirPlayReceiver(
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
     @Volatile private var mirrorServer: MirrorStreamServer? = null
     @Volatile private var audioServer: AudioStreamServer? = null
+
+    /**
+     * The last gain the sender asked for, kept across audio servers.
+     *
+     * Senders set volume on connect and between tracks, both of which happen while no server
+     * exists. Without this the value was dropped and playback started at the default.
+     */
+    @Volatile private var lastVolumeGain: Float? = null
+
+    /**
+     * Forgets the remembered gain when a session ends.
+     *
+     * Remembering it across the whole process meant a NEW sender inherited the previous one's
+     * volume until it happened to send its own -- the "it grabs from the last session" report. The
+     * value only needs to survive the gap between a sender connecting and its audio server being
+     * built, which is well inside one session.
+     */
+    private fun forgetVolume() { lastVolumeGain = null }
     @Volatile private var bufferedAudioServer: BufferedAudioServer? = null
     @Volatile private var urlVideoPlayer: AirPlayVideoPlayer? = null
 
     // Reverse remote control (TV → sender). Created lazily once a sender advertises DACP-ID.
-    private val dacpClient = DacpClient(context)
+    private val dacpClient = DacpClient(context).apply {
+        onCommandRejected = { command, code ->
+            // One rejection is enough to stop trying: a sender that answers 501 to playpause
+            // answers 501 to all of them, and re-asking costs a 2s HTTP round trip per key press.
+            if (!dacpRejectsCommands) {
+                Logger.i("DACP rejected '$command' with HTTP $code — switching to MediaRemote")
+                dacpRejectsCommands = true
+            }
+            DACP_TO_MEDIA_REMOTE[command]?.let { sendMediaRemoteCommand(it) }
+        }
+    }
+
+    /**
+     * True once the sender has rejected a DACP command.
+     *
+     * iOS 26 advertises a DACP identity, resolves cleanly, and then answers 501 to every transport
+     * command -- so [DacpClient.isAvailable] alone routed every key press into a dead end.
+     */
+    @Volatile private var dacpRejectsCommands = false
     @Volatile private var ntpClient: AirPlayNtpClient? = null
+
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
+    /** Deferred end-of-video, pending a possible renegotiation. See [scheduleMirrorVideoStop]. */
+    @Volatile private var pendingVideoStop: kotlinx.coroutines.Job? = null
+
+    /**
+     * The event channel's encryption state and output stream, held so the TV remote can *send* on
+     * it. The channel is receiver→sender: we issue the requests and the sender answers, which is
+     * why the outbound half is the interesting one here (pyatv, on the sender side, notes it has to
+     * swap its read/write keys for exactly this reason).
+     */
+    @Volatile private var eventCipher: EventCipher? = null
+    @Volatile private var eventOutput: java.io.OutputStream? = null
+    /** Serialises remote-command writes against the reply the read loop is decrypting. */
+    private val eventWriteLock = Any()
+    private val eventCseq = java.util.concurrent.atomic.AtomicInteger(1)
+    /** MediaRemote commands the current sender said it would accept. Empty until it tells us. */
+    @Volatile private var supportedRemoteCommands: Set<Int> = emptySet()
     @Volatile private var mirrorAesKey: ByteArray? = null
     @Volatile private var mirrorEcdhSecret: ByteArray? = null
     @Volatile private var mirrorAesIv: ByteArray? = null
@@ -182,6 +256,8 @@ class AirPlayReceiver(
         scope.launch {
             try {
                 startTimingHandler()
+                startControlHandler()
+                startAudioUdpReceiver()
                 startMdnsService()
                 startRtspHandler()
             } catch (e: Exception) {
@@ -204,9 +280,25 @@ class AirPlayReceiver(
      * connection. Used by Back during a stream — a full receiver restart re-advertised over mDNS
      * fast enough for the sender to reconnect on its own, so the stream never appeared to stop.
      */
+    /** Abandons an in-progress PIN pairing and clears the code from the screen. */
+    fun cancelPinPairing() {
+        rtspHandler?.cancelPinPairing()
+    }
+
     fun endSession() {
         Logger.i("Ending AirPlay session on user request")
+        // NO DACP PAUSE HERE any more. It was sent so the phone would not carry on playing into a
+        // closed socket, and it does stop the audio -- but pause is all it does. The phone stays
+        // SELECTED on this output, showing the receiver as its active AirPlay destination, just
+        // paused. The device log reads as a clean teardown (RTSP closed, media released, mDNS
+        // re-advertised) while the iPad still believes it is connected, which is exactly what
+        // "back doesn't terminate the connection" looked like from the sofa.
+        //
+        // DACP has no "deselect this output" command -- it is a transport protocol. What actually
+        // makes iOS let go of a route is the receiver becoming UNAVAILABLE, which is why the
+        // withdrawal below is now held open for a moment.
         rtspHandler?.disconnectActiveClient()
+        kickUntilMs = System.currentTimeMillis() + KICK_WINDOW_MS
         // Closing the RTSP control socket does not touch the UDP media servers — they are separate
         // sockets and keep receiving and playing whatever the sender is still transmitting, which is
         // why Back looked like it did nothing. Tear the media down explicitly.
@@ -216,9 +308,13 @@ class AirPlayReceiver(
 
     fun stop() {
         Logger.i("AirPlayReceiver stopping")
+        kickUntilMs = 0L
         try {
             rtspHandler?.stop()
             timingHandler?.stop()
+            controlHandler?.stop()
+            runCatching { audioSocket?.close() }
+            audioSocket = null
             mdnsService?.stop()
             dacpClient.stop()
             releaseMediaComponents()
@@ -234,16 +330,133 @@ class AirPlayReceiver(
      * AirPlay sender — e.g. play/pause or skip what the Mac/iPhone is streaming. No-op if no sender
      * has advertised a DACP identity yet.
      */
-    fun sendRemoteCommand(command: String) = dacpClient.sendCommand(command)
+    fun sendRemoteCommand(command: String) {
+        if (dacpClient.isAvailable && !dacpRejectsCommands) {
+            dacpClient.sendCommand(command)
+            return
+        }
+        // Reached either because the sender never advertised a DACP identity, or because it did and
+        // then rejected everything (see [dacpRejectsCommands]). Either way MediaRemote over the
+        // event channel is the remaining path.
+        val mrp = DACP_TO_MEDIA_REMOTE[command]
+        if (mrp == null) {
+            Logger.i("Remote '$command' ignored — no DACP sender and no MediaRemote equivalent")
+            return
+        }
+        sendMediaRemoteCommand(mrp)
+    }
 
-    /** True once a sender has advertised DACP reverse-control (so the TV remote can drive playback). */
-    fun isRemoteControlAvailable(): Boolean = dacpClient.isAvailable
+    /** True once *some* reverse-control path exists — legacy DACP or MediaRemote. */
+    fun isRemoteControlAvailable(): Boolean =
+        dacpClient.isAvailable || (eventCipher != null && supportedRemoteCommands.isNotEmpty())
+
+    /**
+     * Sends one MediaRemote command to the sender over the event channel.
+     *
+     * The message itself is settled: a `ProtocolMessage{type: SEND_COMMAND_MESSAGE}` carrying a
+     * `SendCommandMessage{command}` (see [MediaRemote]). What is *not* settled is the plist wrapper
+     * the AirPlay layer expects around it. The sender→receiver direction uses
+     * `{type: updateMRSupportedCommands, params: {mrSupportedCommandsFromSender: […]}}`, so the
+     * mirror of that naming is the best-supported reading, and it is what we send. The sender's
+     * status line comes back through the read loop above and is logged, so a wrong guess shows up
+     * as a concrete error rather than silence.
+     *
+     * @return false when there is no event channel or the sender did not advertise this command.
+     */
+    fun sendMediaRemoteCommand(command: Int): Boolean {
+        // OFF because there is no known delivery format — NOT because it is harmful.
+        //
+        // The body below addresses /command with two plist keys ("sendCommand" and
+        // "mrCommandFromReceiver") that were guessed by mirroring the sender's own
+        // mrSupportedCommandsFromSender. Neither appears in pyatv, openairplay's receiver,
+        // nto.github.io, emanuelecozzi.net or SteeBono's wiki, and no public implementation sends
+        // receiver->sender commands at all. So it cannot work, and every press writes bytes the
+        // sender will not parse.
+        //
+        // AN EARLIER REVISION OF THIS COMMENT CLAIMED THESE SENDS WERE TEARING DOWN SESSIONS. That
+        // was wrong, and the correction is worth keeping because the reasoning failed in an
+        // instructive way. It rested on two timestamp correlations, and an airplayd capture from the
+        // sender disproves both:
+        //
+        //   * "session died 4s after a burst of sends" -- the sender's own log shows the stream
+        //     perfectly healthy across that gap (buffer fullness 43.55%, time announces on schedule,
+        //     no errors) and then an orderly "RTAE Suspending" / "MediaPlaying stopped" /
+        //     "Starting 480-sec inactivity timer". That is playback ending, not a session being
+        //     killed. The kCanceledErr entries follow the suspend as cleanup, they do not precede it.
+        //   * "socket closed 6ms after a send" -- that send was OUR OWN endSession(), which fires
+        //     CMD_PAUSE and then immediately calls disconnectActiveClient(). We closed that socket.
+        //     Reverse causation, in a path written three commits earlier.
+        //
+        // Correlating our own log against itself was never going to separate those; it took the
+        // other end's log. Keep that in mind before concluding anything about what a sender "does"
+        // in response to us.
+        if (!MRP_SEND_ENABLED) {
+            Logger.i(
+                "MediaRemote ${MediaRemote.name(command)} not sent — no known delivery format, " +
+                    "and sending a guessed one makes the sender ignore it — see sendMediaRemoteCommand"
+            )
+            return false
+        }
+        val cipher = eventCipher
+        val output = eventOutput
+        if (cipher == null || output == null) {
+            Logger.i("MediaRemote ${MediaRemote.name(command)} dropped — no event channel")
+            return false
+        }
+        if (supportedRemoteCommands.isNotEmpty() && command !in supportedRemoteCommands) {
+            Logger.i("MediaRemote ${MediaRemote.name(command)} dropped — sender does not support it")
+            return false
+        }
+        val body = PlistCodec.encode(
+            mapOf(
+                "type" to "sendCommand",
+                "params" to mapOf("mrCommandFromReceiver" to MediaRemote.encodeSendCommand(command)),
+            )
+        )
+        val host = eventClientSocket?.inetAddress?.hostAddress?.substringBefore('%')
+        val head = buildString {
+            // HTTP/1.1, not RTSP/1.0. The first attempt used RTSP/1.0 to match the rest of our
+            // session and drew no reply of any kind, not even an error — and a frame the far end
+            // cannot parse as a request is the best explanation for total silence. `/command` is
+            // an HTTP-style POST rather than an RTSP method, so the protocol token is the cheapest
+            // candidate to flip. `Host` goes with it: an HTTP/1.1 request without one is malformed,
+            // which would produce exactly the same silence for a second reason.
+            append("POST /command HTTP/1.1\r\n")
+            append("Host: ${host ?: "localhost"}\r\n")
+            append("CSeq: ${eventCseq.getAndIncrement()}\r\n")
+            append("Content-Type: application/x-apple-binary-plist\r\n")
+            append("Content-Length: ${body.size}\r\n\r\n")
+        }.toByteArray(Charsets.US_ASCII)
+        // Off the main thread: this is called straight from onKeyDown, and a socket write there is
+        // a NetworkOnMainThreadException — which is thrown *before* a single byte leaves, so the
+        // command silently did nothing while looking like it had been attempted.
+        scope.launch(Dispatchers.IO) {
+            synchronized(eventWriteLock) {
+                runCatching { cipher.write(output, head + body) }
+                    .onSuccess { Logger.i("MediaRemote ${MediaRemote.name(command)} sent (${body.size}B plist)") }
+                    .onFailure { Logger.e("MediaRemote ${MediaRemote.name(command)} failed", it) }
+            }
+        }
+        return true
+    }
 
     // ─── Private: startup ────────────────────────────────────────────────────
 
     private fun startTimingHandler() {
         timingHandler = TimingHandler().also { it.start(scope) }
         Logger.d("Timing handler started on UDP port ${TimingHandler.TIMING_PORT}")
+    }
+
+    /**
+     * Binds the RAOP control port.
+     *
+     * Started alongside the timing handler and kept up for the receiver's whole life, NOT per
+     * session: macOS Music sends its first sync packet within milliseconds of RECORD, and a port
+     * that is bound lazily is still closed when that packet lands. An ICMP port-unreachable there
+     * makes Music abandon the session immediately.
+     */
+    private fun startControlHandler() {
+        controlHandler = RaopControlHandler().also { it.start(scope) }
     }
 
     private fun startMdnsService() {
@@ -266,6 +479,7 @@ class AirPlayReceiver(
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
+            onSupportedRemoteCommands = { supportedRemoteCommands = it },
             onMirrorSetupKeys = { aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
@@ -278,7 +492,15 @@ class AirPlayReceiver(
             onVolume = { v ->
                 // 0f is 0 dB, i.e. unity gain — the right software setting when the hardware is
                 // doing the attenuation for us.
-                audioServer?.setVolume(if (onVolumeRequest(v)) 0f else v)
+                val gain = if (onVolumeRequest(v)) 0f else v
+                // REMEMBERED, not just forwarded. Senders send volume as soon as they connect,
+                // which is BEFORE any audio server exists, so `audioServer?.setVolume` discarded it
+                // through the safe call and the first track played at the default gain -- the
+                // "changing volume before the first play does nothing" report. The same null made
+                // every later session start at default too, because each one builds a fresh server:
+                // that is the volume "resetting". Hold the last value and apply it on creation.
+                lastVolumeGain = gain
+                audioServer?.setVolume(gain)
             },
             onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
                 val changed = title != npTitle || artist != npArtist || album != npAlbum
@@ -292,8 +514,20 @@ class AirPlayReceiver(
                 emitNowPlaying()
             },
             onPlaybackPosition = { pos, dur ->
-                val changed = kotlin.math.abs(pos - npPositionSec) > 2.0 || dur != npDurationSec
-                npPositionSec = pos; npDurationSec = dur
+                // The sender is authoritative, so take its value and show it. There used to be a
+                // 2-second dead zone here, which is precisely wrong while seeking: the TV remote
+                // sends the sender fast-forwarding, our local clock keeps advancing at 1x from a
+                // now-stale anchor, and the correcting push was being swallowed for being close to
+                // the wrong number we were already showing.
+                // ...except on a stream that has no track at all. macOS system-audio AirPlay (the
+                // "AUDIO" output device, not the Music app) still sends progress, but its window is
+                // a rolling live buffer with no beginning or end — which surfaced as a track that
+                // started at 0:25 and ran to 1:36. No title means no track, and no track means no
+                // duration worth showing.
+                val live = npTitle.isNullOrBlank() && npArtist.isNullOrBlank()
+                val shownDur = if (live) 0.0 else dur
+                val changed = displayedSecond(pos) != displayedSecond(npPositionSec) || shownDur != npDurationSec
+                npPositionSec = pos; npDurationSec = shownDur
                 if (changed) emitNowPlaying()
             },
             onPlaybackAnchor = { startTs, _ -> anchorStartTs = startTs },
@@ -314,7 +548,8 @@ class AirPlayReceiver(
                 if (name.isNotBlank()) npSenderName = name
                 npSenderDeviceType = type
                 emitNowPlaying()
-            }
+            },
+            onSenderApproaching = { onSenderApproaching() }
         ).also { it.start(scope) }
         Logger.i("RTSP handler started on port 7000 (audioEnabled=$audioEnabled pinAuth=$pinAuthEnabled)")
     }
@@ -371,12 +606,38 @@ class AirPlayReceiver(
 
         scope.launch {
             try {
-                mdnsService?.restart(displayName.ifBlank { null })
+                // WITHDRAW FIRST, then hold, then re-register.
+                //
+                // The first version of this delayed and *then* called restart() -- but the
+                // withdrawal happens inside restart(), so the receiver stayed fully advertised for
+                // the whole four seconds and only went away for the ~650ms the restart itself takes.
+                // The device log said "Holding mDNS withdrawn for 3992ms" at 01:50:57 and "Stopping
+                // mDNS advertising" at 01:51:01 -- the hold ran before the thing it was supposed to
+                // be holding. iOS never saw us leave, so it kept the route and Back still read as a
+                // pause. The order is the entire fix.
+                val hold = kickUntilMs - System.currentTimeMillis()
+                if (hold > 0) {
+                    Logger.i("Withdrawing mDNS for ${hold}ms so the sender drops the route")
+                    mdnsService?.stop()
+                    kotlinx.coroutines.delay(hold)
+                    mdnsService?.start(displayName.ifBlank { null })
+                } else {
+                    mdnsService?.restart(displayName.ifBlank { null })
+                }
             } catch (e: Exception) {
                 Logger.e("Failed to restart mDNS after streaming", e)
             }
         }
     }
+
+    /**
+     * While now() is under this, the receiver stays off the network after a session ends.
+     *
+     * Only set by the user ending a session by hand. A sender that leaves on its own has already
+     * let go of the route, and making the receiver vanish for several seconds then would just delay
+     * the next connection for no reason.
+     */
+    @Volatile private var kickUntilMs = 0L
 
     // ─── Private: media pipeline ──────────────────────────────────────────────
 
@@ -421,7 +682,7 @@ class AirPlayReceiver(
      * This prevents a zero-key cipher from producing garbage audio (S6-4 fix).
      */
     private fun startAudioPlayer(session: SessionDescription) {
-        audioPlayer = AudioPlayer().also { player ->
+        audioPlayer = AudioPlayer(extraDelayMs = audioDelayMs).also { player ->
             player.initialize(
                 aesKey     = session.aesKey.takeIf { session.isAudioEncrypted },
                 aesIv      = session.aesIv.takeIf  { session.isAudioEncrypted },
@@ -433,8 +694,7 @@ class AirPlayReceiver(
         }
         Logger.i("AudioPlayer started (${session.sampleRate}Hz × ${session.channels}ch, " +
                  "codec=${session.audioCodec}, encrypted=${session.isAudioEncrypted})")
-
-        startAudioUdpReceiver()
+        // The audio socket is NOT opened here -- it is already listening. See startAudioUdpReceiver.
     }
 
     /**
@@ -445,9 +705,19 @@ class AirPlayReceiver(
      * than guaranteed delivery. A missing packet produces a brief audio glitch,
      * which is far less disruptive than the buffering delays that TCP would introduce.
      *
-     * The socket is closed in [releaseMediaComponents] when streaming ends.
+     * WHY IT BINDS AT STARTUP AND NEVER CLOSES BETWEEN SESSIONS: this used to be opened lazily when
+     * the AudioPlayer started, which put a coroutine hop and ~110ms between RECORD and a bound
+     * socket. macOS Music begins sending audio the instant it has sent RECORD, so for that window
+     * every packet drew an ICMP port-unreachable, and Music concluded the receiver was dead and sent
+     * TEARDOWN — 8ms before the socket finished binding. The device log showed the bind line AFTER
+     * the teardown line, which is what finally gave it away. An advertised port must be listening
+     * before it is advertised, not after it is used.
+     *
+     * Packets arriving with no active player are simply dropped: cheap, and far better than the
+     * alternative of the port going away again between sessions.
      */
     private fun startAudioUdpReceiver() {
+        if (audioSocket != null) return
         scope.launch(Dispatchers.IO) {
             try {
                 val socket = DatagramSocket(AUDIO_RTP_PORT)
@@ -480,6 +750,23 @@ class AirPlayReceiver(
      * channel (macOS connects to it), and switch the UI to the streaming surface.
      * @return the event channel's TCP port.
      */
+    /**
+     * Pre-encryption behaviour, kept only for senders that never ran pair-verify: read cleartext
+     * RTSP and answer 200. Modern senders encrypt, so this path should not normally be taken.
+     */
+    private fun drainPlaintextEventChannel(input: java.io.InputStream, output: java.io.OutputStream) {
+        val reader = RtspRequestReader(EVENT_MAX_BYTES, EVENT_MAX_BYTES)
+        while (true) {
+            val req = reader.read(input) ?: return
+            Logger.i("Event channel (plaintext) ${req.method} ${req.uri}")
+            val proto = if (req.protocol.startsWith("HTTP")) "HTTP/1.1" else "RTSP/1.0"
+            val cseq = req.headers["CSeq"] ?: "0"
+            output.write("$proto 200 OK\r\nCSeq: $cseq\r\nContent-Length: 0\r\n\r\n"
+                .toByteArray(Charsets.US_ASCII))
+            output.flush()
+        }
+    }
+
     private fun startMirrorKeys(
         aesKey: ByteArray,
         ecdhSecret: ByteArray,
@@ -492,27 +779,78 @@ class AirPlayReceiver(
         mirrorAesIv = aesIv
         val event = ServerSocket(0)
         eventSocket = event
-        // Accept + drain the event connection. We don't act on events yet, but macOS expects
-        // the advertised event port to be connectable, so keep it open and readable.
+        // Accept and *answer* on the event connection.
+        //
+        // This used to just drain the socket. macOS tolerates that — it only needs the advertised
+        // event port to be connectable — but iOS sends requests here after RECORD and waits for
+        // replies before it will send the SETUP carrying `streams`. Silence meant the iPhone sat
+        // for ever on "connecting" with a black screen while a Mac mirrored to the same build
+        // perfectly. We don't act on the contents; answering 200 is what unblocks the sender.
         scope.launch(Dispatchers.IO) {
             try {
                 event.accept().use { s ->
                     eventClientSocket = s
-                    Logger.i("Event channel: macOS connected from ${s.inetAddress.hostAddress}")
-                    val buf = ByteArray(4096)
+                    Logger.i("Event channel: sender connected from ${s.inetAddress.hostAddress}")
                     val input = s.getInputStream()
-                    while (isActive && input.read(buf) != -1) { /* drain */ }
+                    val output = s.getOutputStream()
+                    // The channel is encrypted from the first byte, keyed off the pair-verify
+                    // secret. Reading it as plaintext (what we did before) yields ciphertext that
+                    // never parses, so the replies went nowhere. If we have no secret — a sender
+                    // that skipped pair-verify — fall back to the old plaintext behaviour rather
+                    // than dropping a session that used to work.
+                    val cipher = runCatching { EventCipher(ecdhSecret) }.getOrNull()
+                    if (cipher == null) {
+                        Logger.w("Event channel: no cipher — falling back to plaintext framing")
+                        drainPlaintextEventChannel(input, output)
+                        return@use
+                    }
+                    eventCipher = cipher
+                    eventOutput = output
+                    while (isActive) {
+                        val frame = runCatching { cipher.read(input) }.getOrElse { e ->
+                            Logger.w("Event channel decrypt failed (${e.message}) — closing")
+                            null
+                        } ?: break
+                        val req = RtspRequestReader(EVENT_MAX_BYTES, EVENT_MAX_BYTES)
+                            .read(frame.inputStream())
+                        if (req == null) {
+                            // Not a request — most often the sender's *answer* to a command we sent.
+                            // Surfacing the status line is the only feedback we get on whether the
+                            // command was understood, so log it rather than the byte count alone.
+                            val head = frame.toString(Charsets.US_ASCII).substringBefore("\r\n")
+                            if (head.startsWith("RTSP/") || head.startsWith("HTTP/")) {
+                                Logger.i("Event channel reply: $head")
+                            } else {
+                                Logger.i("Event channel: ${frame.size}B frame that is not an RTSP request")
+                            }
+                            continue
+                        }
+                        Logger.i("Event channel ${req.method} ${req.uri}")
+                        val proto = if (req.protocol.startsWith("HTTP")) "HTTP/1.1" else "RTSP/1.0"
+                        val cseq = req.headers["CSeq"] ?: "0"
+                        val reply = "$proto 200 OK\r\nCSeq: $cseq\r\nContent-Length: 0\r\n\r\n"
+                        synchronized(eventWriteLock) {
+                            runCatching { cipher.write(output, reply.toByteArray(Charsets.US_ASCII)) }
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 if (eventSocket != null) Logger.d("Event channel closed")
             } finally {
                 eventClientSocket = null
+                eventCipher = null
+                eventOutput = null
+                supportedRemoteCommands = emptySet()
             }
         }
         // AirPlay 2 NTP is receiver-initiated: poll the sender's timing port so macOS proceeds.
         val ntp = AirPlayNtpClient(remoteAddress, senderTimingPort).also { ntpClient = it; it.start(scope) }
         onSenderNameChanged("AirPlay")
         emitState(ProtocolState.CONNECTED)
+        // NOTE: do not wait for the video Surface here. It cannot exist yet — the Surface belongs to
+        // a SurfaceView the Activity only makes visible in response to the CONNECTED state emitted
+        // on the line above, so a wait at this point always runs its full timeout and then adds that
+        // delay to the sender's SETUP round trip. MirrorStreamServer already handles a late Surface.
         Logger.i("Mirror keys set; eventPort=${event.localPort} timingPort=${ntp.localPort}")
         return event.localPort to ntp.localPort
     }
@@ -522,12 +860,17 @@ class AirPlayReceiver(
      * @return the data server's TCP port (macOS connects here to send H.264).
      */
     private fun startMirrorStream(streamConnectionId: Long): Int {
+        // A stream is back: whatever close we were waiting out was a renegotiation, not an ending.
+        pendingVideoStop?.let { it.cancel(); Logger.i("Video stream renegotiated — cancelling pending stop") }
+        pendingVideoStop = null
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         return MirrorStreamServer(
             aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight,
-            // A sender that goes quiet without a TEARDOWN (phone screen off) used to leave the
-            // session "live" with its last frame frozen on the TV. Tear it down ourselves.
+            // A sender that goes quiet without a TEARDOWN (phone screen off, or an app taking over
+            // with its own fullscreen player) used to leave the session "live" with its last frame
+            // frozen on the TV. Tear it down ourselves.
+            onConnectionEnded = { scheduleMirrorVideoStop() },
         )
             .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
             .dataPort
@@ -542,23 +885,55 @@ class AirPlayReceiver(
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
             extraDelayMs = audioDelayMs.toLong(),
+            trackBufferMs = audioBufferMs,
             beatDelayMs = beatDelayMs.toLong(),
             onEnergy = { e -> onEnergyChanged(e) },
+            onBands = { b -> onBandsChanged(b) },
             // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.
             onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
-            .also { audioServer = it; it.start(scope); startPositionTicker() }
+            .also {
+                audioServer = it
+                // Apply whatever the sender asked for before this server existed.
+                lastVolumeGain?.let { g -> it.setVolume(g) }
+                it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it)
+            }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
         return server.dataPort to server.controlPort
     }
 
+    /**
+     * Ends the session when the sender goes completely quiet.
+     *
+     * Not every sender says goodbye. An iPhone that stops playback often sends no TEARDOWN and
+     * leaves the RTSP socket open indefinitely, so the receiver sat "streaming" forever, holding
+     * the screen and refusing the next connection. A *paused* sender still sends keepalive
+     * datagrams, so total silence is unambiguous: it is gone.
+     *
+     * The window is deliberately generous — a few seconds of Wi-Fi trouble must not look like a
+     * disconnect.
+     */
+    private fun startAudioSilenceWatchdog(server: AudioStreamServer) {
+        scope.launch {
+            while (audioServer === server) {
+                delay(AUDIO_SILENCE_POLL_MS)
+                if (audioServer !== server) return@launch
+                if (server.silentForMs < AUDIO_SILENCE_TIMEOUT_MS) continue
+                Logger.i("Sender silent for ${server.silentForMs}ms with no TEARDOWN — ending session")
+                endSession()
+                return@launch
+            }
+        }
+    }
+
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
     private fun stopMirrorAudio() {
         audioServer?.stop()
         audioServer = null
+        forgetVolume()
         audioPlaying = false
         clearNowPlayingMetadata()
         emitNowPlaying()
@@ -566,12 +941,45 @@ class AirPlayReceiver(
     }
 
     /** Stops ONLY the mirror video stream (macOS dynamic-stream TEARDOWN) — audio keeps playing. */
+    /**
+     * The sender closed the video connection. Wait before believing it is over.
+     *
+     * A close is not the same as an ending. Locking the phone closes the connection while the
+     * session stays alive on the sender — it still says "connected" — and an app switching to its
+     * own player closes one stream and negotiates another a beat later. Acting immediately turned
+     * both into a quit, which is worse than the frozen frame it replaced. Any new mirror stream
+     * within the grace window cancels this.
+     */
+    private fun scheduleMirrorVideoStop() {
+        pendingVideoStop?.cancel()
+        pendingVideoStop = scope.launch {
+            delay(MIRROR_RESUME_GRACE_MS)
+            Logger.i("No video stream returned within ${MIRROR_RESUME_GRACE_MS}ms — ending video")
+            stopMirrorVideo()
+        }
+    }
+
     private fun stopMirrorVideo() {
+        pendingVideoStop?.cancel()
+        pendingVideoStop = null
+        // Both a TEARDOWN and the connection ending can land here for one session; the second call
+        // has nothing to do and must not re-emit state.
+        if (!videoPlaying && mirrorServer == null) return
         mirrorServer?.stop()
         mirrorServer = null
         videoPlaying = false
         emitNowPlaying()   // audio may still be playing → now-playing card can take over
-        Logger.i("Mirror video stream stopped (audio playback continues)")
+        // Nothing left playing: drop back to advertising so the overlay actually leaves the screen.
+        // emitNowPlaying alone does not do it — with no metadata it emits null, and the service
+        // reads "null while CONNECTED" as "a video session is running", so stopping mirroring on
+        // the phone left the TV sitting on a frozen last frame. The RTSP session itself stays up,
+        // so an iOS renegotiation re-emits CONNECTED and the picture comes straight back.
+        if (!audioPlaying) {
+            Logger.i("Mirror video stopped and nothing else is playing — session idle")
+            emitState(ProtocolState.ADVERTISING)
+        } else {
+            Logger.i("Mirror video stream stopped (audio playback continues)")
+        }
     }
 
     /**
@@ -580,6 +988,9 @@ class AirPlayReceiver(
      */
     private fun startUrlVideo(url: String, startFraction: Double) {
         onSenderNameChanged("AirPlay")
+        // Marks this as a video session, so emitNowPlaying() won't put the audio-only card over the
+        // picture if the sender also sends track metadata for what it handed us.
+        videoPlaying = true
         emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
         val player = urlVideoPlayer ?: AirPlayVideoPlayer(
             context = context,
@@ -594,6 +1005,7 @@ class AirPlayReceiver(
     private fun stopUrlVideo() {
         urlVideoPlayer?.release()
         urlVideoPlayer = null
+        videoPlaying = false
         onStreamingStopped()
         Logger.i("AirPlay URL video stopped")
     }
@@ -621,14 +1033,16 @@ class AirPlayReceiver(
     /** Clears the video NAL callback, closes the audio socket, and releases media components. */
     private fun releaseMediaComponents() {
         rtspHandler?.onVideoNalUnit = null
-        try { audioSocket?.close() } catch (e: Exception) { /* non-fatal */ }
-        audioSocket = null
+        // Deliberately NOT closing audioSocket here. It belongs to the receiver, not the session --
+        // closing it between sessions reopens the very race that made Music unusable. The player it
+        // feeds is still released below, so packets arriving between sessions are simply dropped.
         mirrorServer?.stop()
         mirrorServer = null
         positionTicker?.cancel(); positionTicker = null
         anchorStartTs = -1L
         audioServer?.stop()
         audioServer = null
+        forgetVolume()
         bufferedAudioServer?.stop()
         bufferedAudioServer = null
         urlVideoPlayer?.release()
@@ -662,6 +1076,11 @@ class AirPlayReceiver(
     /** Pushes the current now-playing state out: a [NowPlayingInfo] when audio plays without video, else null. */
     private fun emitNowPlaying() {
         val show = audioPlaying && !videoPlaying
+        // The receiver is the only thing that KNOWS whether a video stream was negotiated. The
+        // service used to infer it from "is there now-playing metadata yet", which is false at
+        // CONNECTED for every session — so an audio-only sender that never produced metadata (a
+        // stalled Apple Music stream, say) left a black video surface on screen indefinitely.
+        onVideoPlayingChanged(videoPlaying)
         onNowPlayingChanged(
             if (show) NowPlayingInfo(
                 senderName = npSenderName,
@@ -685,11 +1104,27 @@ class AirPlayReceiver(
      * position exact and self-correcting: it advances at precisely the rate samples leave the
      * speaker, and holds still during a pause without needing to be told.
      */
+    /**
+     * The whole second the UI renders for a position. Emitting on a change of *this* rather than on
+     * a raw delta keeps the counter moving every second without redrawing four times a second for
+     * digits nobody sees.
+     */
+    private fun displayedSecond(seconds: Double): Long = seconds.toLong()
+
     private fun startPositionTicker() {
         positionTicker?.cancel()
         positionTicker = scope.launch {
             while (isActive) {
                 delay(POSITION_TICK_MS)
+                // FREEZE WHILE PAUSED. A paused sender's empty keepalives never reach the point
+                // where lastRtpTs advances, so the numerator is genuinely still -- but
+                // playingRtpTimestamp() also subtracts AudioTrack's pending frames, and those
+                // DRAIN to zero over about a second once the queue stops feeding. That drain shows
+                // up as the position walking a second forward, and getTimestamp() jittering around
+                // the drained value walks it back again: the progress bar creeping +1s and back
+                // for as long as the track sits paused. Nothing is moving except the measurement,
+                // so stop measuring.
+                if (npPaused) continue
                 val start = anchorStartTs
                 val playing = audioServer?.playingRtpTimestamp() ?: -1L
                 if (start < 0 || playing < 0) continue
@@ -697,10 +1132,13 @@ class AirPlayReceiver(
                 // A track change lands the anchor and the clock on different timelines for a moment;
                 // an impossible position is that, not a seek, so wait for the next progress push.
                 if (elapsed < 0 || (npDurationSec > 0 && elapsed > npDurationSec + 1)) continue
-                if (kotlin.math.abs(elapsed - npPositionSec) > 0.25) {
-                    npPositionSec = elapsed
-                    emitNowPlaying()
-                }
+                // Emit whenever the second the user can actually see changes. The old test was
+                // "moved more than 0.25s", which at normal speed is exactly one tick's worth of
+                // progress — so it sat on its own threshold and dropped updates unpredictably,
+                // making the counter stutter instead of counting.
+                val changed = displayedSecond(elapsed) != displayedSecond(npPositionSec)
+                npPositionSec = elapsed
+                if (changed) emitNowPlaying()
             }
         }
     }
@@ -731,6 +1169,67 @@ class AirPlayReceiver(
     }
 
     companion object {
+        /**
+         * How long the receiver stays off the network after the user ends a session by hand.
+         *
+         * Long enough for a Bonjour goodbye plus the sender's own route bookkeeping to settle;
+         * short enough that reconnecting deliberately still feels immediate.
+         */
+        private const val KICK_WINDOW_MS = 4000L
+
+
+        /**
+         * Whether to POST MediaRemote commands on the event channel. See sendMediaRemoteCommand:
+         * the delivery format is unknown, so a guessed one cannot be parsed by any sender.
+         */
+        private const val MRP_SEND_ENABLED = false
+
+
+        /**
+         * DACP command → MediaRemote `Command`, so one TV-remote key press works against either
+         * kind of sender. Volume is absent on purpose: AirPlay volume is an RTSP `SET_PARAMETER`,
+         * not a transport command, and it already has its own path.
+         */
+        private val DACP_TO_MEDIA_REMOTE = mapOf(
+            DacpClient.CMD_PLAY_PAUSE to MediaRemote.TOGGLE_PLAY_PAUSE,
+            DacpClient.CMD_PLAY_RESUME to MediaRemote.PLAY,
+            DacpClient.CMD_PAUSE to MediaRemote.PAUSE,
+            DacpClient.CMD_NEXT to MediaRemote.NEXT_TRACK,
+            DacpClient.CMD_PREV to MediaRemote.PREVIOUS_TRACK,
+            DacpClient.CMD_FF to MediaRemote.BEGIN_FAST_FORWARD,
+            DacpClient.CMD_FF_STOP to MediaRemote.END_FAST_FORWARD,
+            DacpClient.CMD_REW to MediaRemote.BEGIN_REWIND,
+            DacpClient.CMD_REW_STOP to MediaRemote.END_REWIND,
+        )
+
+        /**
+         * How long a closed video connection is given to come back before the session is ended.
+         * Long enough to cover locking the phone briefly or an app handing over to its own player;
+         * short enough that a real disconnect does not leave the TV waiting.
+         */
+        private const val MIRROR_RESUME_GRACE_MS = 8_000L
+
+        /** How often the silence watchdog looks. Cheap — it reads one volatile long. */
+        private const val AUDIO_SILENCE_POLL_MS = 2_000L
+
+        /** Total silence for this long means the sender is gone, not paused or briefly stalled. */
+        /**
+         * How long an audio stream may go silent before the session is torn down.
+         *
+         * Was 15s, which killed sessions that were merely PAUSED. The device log caught it exactly:
+         * PiP entered at 00:26:13, "Sender silent for 16181ms with no TEARDOWN — ending session" at
+         * 00:26:56 — a healthy paused stream dropped while the user was looking at it.
+         *
+         * A paused sender and a vanished sender look identical from here: both stop sending audio
+         * and neither says why. Since the cost of waiting is only a delayed cleanup of an already
+         * dead session, while the cost of firing early is disconnecting someone mid-listen, this is
+         * long enough that no realistic pause reaches it.
+         */
+        private const val AUDIO_SILENCE_TIMEOUT_MS = 300_000L
+
+        /** Event-channel requests are tiny plists; this is a sanity bound, not a real limit. */
+        private const val EVENT_MAX_BYTES = 256 * 1024
+
         /** How often position is re-read from the audio clock. Fast enough to look continuous. */
         private const val POSITION_TICK_MS = 250L
 

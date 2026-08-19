@@ -41,6 +41,15 @@ object PlistCodec {
             ?: throw IllegalArgumentException("plist root is not a dictionary")
     }
 
+    /**
+     * Decodes a plist whose root may be any type, not just a dictionary.
+     *
+     * SETPEERS' body is a bare ARRAY of addresses, so [decode] rejects it outright. Rather than
+     * loosening [decode] — whose dictionary guarantee the rest of the RTSP layer relies on — this
+     * returns the root as-is and leaves the shape check to the caller that knows what it expects.
+     */
+    fun decodeRoot(bytes: ByteArray): Any? = fromNs(PropertyListParser.parse(bytes))
+
     private fun toNs(value: Any?): NSObject = when (value) {
         null -> NSString("")
         is NSObject -> value

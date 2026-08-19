@@ -1,6 +1,8 @@
 package com.phairplay.airplay.handshake
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Assert.assertFalse
 import org.junit.Test
 
@@ -40,13 +42,26 @@ class FairPlayTest {
     }
 
     @Test
-    fun `v2 phase 1 returns the v2 reply with the mode byte patched at offset 13`() {
-        for (mode in 0..3) {
-            val res = FairPlay().setup(phase1(0x02, mode))
-            assertEquals(142, res.size)
-            assertEquals(0x02, res[4].toInt() and 0xFF)    // FPLY version 2
-            assertEquals(0x02, res[6].toInt() and 0xFF)    // phase-2 reply blob
-            assertEquals(mode, res[13].toInt() and 0xFF)   // mode patched in
+    fun `v2 phase 1 answers mode 2 and refuses every other mode`() {
+        val res = FairPlay().setup(phase1(0x02, 2))
+        assertEquals(142, res.size)
+        assertEquals(0x02, res[4].toInt() and 0xFF)    // FPLY version 2
+        assertEquals(0x02, res[6].toInt() and 0xFF)    // phase-2 reply blob
+        assertEquals(2, res[13].toInt() and 0xFF)      // mode patched in
+
+        // The old version of this test asserted that modes 0, 1 and 3 also returned a reply, with
+        // the mode byte patched into the SAME captured table. That is what the code used to do and
+        // it was wrong: only mode 2's reply was ever captured, so the other modes were answered
+        // with mode 2's key material wearing a different mode byte. The sender accepts the
+        // handshake and the audio is garbage, which is far worse than a clean refusal -- a 400
+        // makes the sender give up visibly instead.
+        for (mode in intArrayOf(0, 1, 3)) {
+            try {
+                FairPlay().setup(phase1(0x02, mode))
+                fail("v2 mode $mode should be refused, not answered with mode 2's table")
+            } catch (expected: IllegalArgumentException) {
+                assertTrue(expected.message!!.contains("not supported"))
+            }
         }
     }
 
@@ -64,7 +79,8 @@ class FairPlayTest {
     @Test
     fun `negotiated version is recorded`() {
         val fp = FairPlay()
-        fp.setup(phase1(0x02, 0)); assertEquals(0x02, fp.negotiatedVersion)
+        // Mode 2: the only v2 mode with a captured reply table — see the refusal test above.
+        fp.setup(phase1(0x02, 2)); assertEquals(0x02, fp.negotiatedVersion)
         fp.setup(phase1(0x03, 0)); assertEquals(0x03, fp.negotiatedVersion)
     }
 

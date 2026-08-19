@@ -25,4 +25,12 @@ class SharedMediaPlayer(context: Context?) {
     fun stop() {}
     fun seekTo(ms: Long) {}
     fun release() {}
+
+    // Volume state is real here, not inert: the RenderingControl tests assert that SetVolume is
+    // applied and read back rather than acknowledged and dropped, which was the bug.
+    @Volatile var volumePercent: Int = 100; private set
+    @Volatile var muted: Boolean = false; private set
+
+    fun setVolumePercent(percent: Int) { volumePercent = percent.coerceIn(0, 100) }
+    fun setMuted(mute: Boolean) { muted = mute }
 }

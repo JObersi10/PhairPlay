@@ -25,6 +25,7 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -218,22 +219,46 @@ class OnboardingFragment : Fragment() {
                         granted = hasPermission(Manifest.permission.POST_NOTIFICATIONS),
                     ) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ) }
                 }
-                addPermissionRow(
-                    R.string.onboarding_perm_location,
-                    R.string.onboarding_perm_location_why,
-                    granted = hasWifiDirectPermission(),
-                ) { requestPermissions(wifiDirectPermissions(), REQ) }
+                // Wi-Fi Direct exists here for Miracast and nothing else, so on a build that never
+                // starts Miracast this asks for location — the most alarming permission we show —
+                // in exchange for no capability at all. See DeviceFeatures.
+                if (DeviceFeatures.MIRACAST_SUPPORTED) {
+                    addPermissionRow(
+                        R.string.onboarding_perm_location,
+                        R.string.onboarding_perm_location_why,
+                        granted = hasWifiDirectPermission(),
+                    ) { requestPermissions(wifiDirectPermissions(), REQ) }
+                }
+                // Both rows above are conditional, and on a Fire TV below API 33 with Miracast off
+                // neither applies — which left the page showing "PhairPlay needs these to receive
+                // streams at all" above nothing at all, reading like the list had failed to load.
+                if (itemsContainer.childCount == 0) {
+                    bodyView.setText(R.string.onboarding_required_none)
+                }
             }
             PAGE_OPTIONAL -> {
                 titleView.setText(R.string.onboarding_optional_title)
                 bodyView.setText(R.string.onboarding_optional_body)
                 primaryButton.setText(R.string.onboarding_next)
-                addPermissionRow(
-                    R.string.onboarding_perm_overlay,
-                    R.string.onboarding_perm_overlay_why,
-                    granted = canDrawOverlays(),
-                    actionLabelRes = R.string.onboarding_open_settings,
-                ) { openOverlaySettings() }
+                // No "Open settings" button here any more. Fire OS resolves
+                // ACTION_MANAGE_OVERLAY_PERMISSION to CTSDummyIntentHandler -- a stub that exists to
+                // pass Android's compatibility suite and does nothing at all. There is no screen to
+                // send the user to, so offering a button that cannot work is worse than saying so.
+                // When the permission IS somehow granted the row reports it; otherwise it explains
+                // what is lost and how to grant it from a computer.
+                if (canDrawOverlays()) {
+                    addPermissionRow(
+                        R.string.onboarding_perm_overlay,
+                        R.string.onboarding_perm_overlay_why,
+                        granted = true,
+                    ) { }
+                } else {
+                    addPermissionRow(
+                        R.string.onboarding_perm_overlay,
+                        R.string.onboarding_overlay_adb_hint,
+                        granted = false,
+                    ) { }
+                }
             }
             PAGE_PREFS -> {
                 titleView.setText(R.string.onboarding_prefs_title)
@@ -261,7 +286,7 @@ class OnboardingFragment : Fragment() {
      * Settings, so this is about surfacing the choices rather than being the only way to make them.
      */
     private fun renderPrefs() {
-        val d = draft ?: return
+        if (draft == null) return
 
         addSectionLabel(R.string.onboarding_prefs_pin)
         // Three states rather than a toggle, because "PIN on" hides a real trade-off: asked once and
@@ -288,10 +313,13 @@ class OnboardingFragment : Fragment() {
             R.string.protocol_airplay, isCheckbox = true,
             isSelectedProvider = { draft?.airPlayEnabled == true },
         ) { updateDraft { it.copy(airPlayEnabled = !it.airPlayEnabled) } }
-        addChoiceRow(
-            R.string.protocol_miracast, isCheckbox = true,
-            isSelectedProvider = { draft?.miracastEnabled == true },
-        ) { updateDraft { it.copy(miracastEnabled = !it.miracastEnabled) } }
+        // Offered only where the hardware can actually complete a WFD session — see DeviceFeatures.
+        if (DeviceFeatures.MIRACAST_SUPPORTED) {
+            addChoiceRow(
+                R.string.protocol_miracast, isCheckbox = true,
+                isSelectedProvider = { draft?.miracastEnabled == true },
+            ) { updateDraft { it.copy(miracastEnabled = !it.miracastEnabled) } }
+        }
         addChoiceRow(
             R.string.protocol_dlna, isCheckbox = true,
             isSelectedProvider = { draft?.dlnaEnabled == true },
@@ -511,23 +539,34 @@ class OnboardingFragment : Fragment() {
 
     private fun hasWifiDirectPermission() = wifiDirectPermissions().any { hasPermission(it) }
 
-    private fun canDrawOverlays(): Boolean =
-        Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(requireContext())
-
     /**
-     * Fire TV has no in-app path to the overlay grant, so this hands off to system settings. Some
-     * Fire OS builds don't expose the per-app screen; fall back to the app details page.
+     * Whether the overlay appop is explicitly allowed.
+     *
+     * Deliberately NOT `Settings.canDrawOverlays()`. That reports true whenever the appop is
+     * MODE_DEFAULT and the manifest declares SYSTEM_ALERT_WINDOW — which is precisely the state a
+     * fresh install starts in, and precisely the state in which the service's background activity
+     * launch is refused. So onboarding drew the row as already-granted and offered no way to turn
+     * it on, while PhairPlay silently failed to open itself when a sender connected.
+     *
+     * Ask the appop directly and accept only an explicit allow.
      */
-    private fun openOverlaySettings() {
-        val pkg = requireContext().packageName
-        val attempts = listOf(
-            Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$pkg")),
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$pkg")),
-        )
-        for (intent in attempts) {
-            if (runCatching { startActivity(intent); true }.getOrDefault(false)) return
+    private fun canDrawOverlays(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        val ctx = requireContext()
+        val ops = ctx.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
+        val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ops.unsafeCheckOpNoThrow(
+                android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                android.os.Process.myUid(), ctx.packageName,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            ops.checkOpNoThrow(
+                android.app.AppOpsManager.OPSTR_SYSTEM_ALERT_WINDOW,
+                android.os.Process.myUid(), ctx.packageName,
+            )
         }
-        Logger.w("No settings screen available for the overlay permission on this build")
+        return mode == android.app.AppOpsManager.MODE_ALLOWED
     }
 
     // ─── Small helpers ───────────────────────────────────────────────────────

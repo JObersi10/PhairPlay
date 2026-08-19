@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Requests FORCE_LOCK and nothing else.
+
+  force-lock is what lockNow() needs so HomeKit's "off" can blank the display. Every other policy
+  (wipe-data, limit-password, disable-camera, watch-login) is deliberately absent: they would each
+  add a line to the system's device-admin consent screen, and none of them has anything to do with
+  turning a TV off.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <force-lock />
+    </uses-policies>
+</device-admin>

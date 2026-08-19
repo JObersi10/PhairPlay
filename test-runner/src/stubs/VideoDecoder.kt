@@ -38,7 +38,8 @@ class VideoDecoder(outputSurface: Any?) {
         fun parseSpsResolution(sps: ByteArray): Pair<Int, Int>? {
             try {
                 if (sps.size < 4) return null
-                val reader = SpsBitReader(sps, startOffset = 1)  // skip NAL type byte (0x67)
+                val rbsp = spsToRbsp(sps) ?: return null
+                val reader = SpsBitReader(rbsp, startOffset = 0)
 
                 val profileIdc = reader.readBits(8)
                 reader.readBits(8)   // constraint flags + 2 reserved zeros
@@ -136,6 +137,39 @@ class VideoDecoder(outputSurface: Any?) {
          *
          * Kept as a companion-object nested class to match the production API used by tests.
          */
+        /**
+         * Mirror of the real VideoDecoder.spsToRbsp — see that file for why this exists. Callers
+         * pass the NAL with an Annex-B start code (MediaCodec's csd-0 wants one), so the payload
+         * offset has to be detected, and emulation-prevention bytes removed, before reading bits.
+         */
+        private fun spsToRbsp(sps: ByteArray): ByteArray? {
+            var i = 0
+            if (sps.size >= 4 && sps[0] == 0.toByte() && sps[1] == 0.toByte()) {
+                i = when {
+                    sps[2] == 1.toByte() -> 3
+                    sps[2] == 0.toByte() && sps[3] == 1.toByte() -> 4
+                    else -> 0
+                }
+            }
+            if (i >= sps.size) return null
+            if ((sps[i].toInt() and 0x1F) == 7) i++
+
+            val out = ByteArray(sps.size - i)
+            var n = 0
+            var zeros = 0
+            while (i < sps.size) {
+                val b = sps[i]
+                if (zeros >= 2 && b == 3.toByte()) {
+                    zeros = 0
+                } else {
+                    out[n++] = b
+                    zeros = if (b == 0.toByte()) zeros + 1 else 0
+                }
+                i++
+            }
+            return if (n < 4) null else out.copyOf(n)
+        }
+
         class SpsBitReader(private val data: ByteArray, startOffset: Int) {
             private var bytePos = startOffset
             private var bitPos = 7  // MSB first

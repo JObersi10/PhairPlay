@@ -57,10 +57,24 @@ class AudioStreamServer(
     private val latencyMinSamples: Int = 11025,
     /** User A/V trim, also applied to the beat pulse so the visual matches what is heard. */
     private val extraDelayMs: Long = 0,
+    /**
+     * AudioTrack hardware buffer in ms (AppSettings.audioBufferMs). Charged against the sender's
+     * latency budget, so raising it shortens the packet queue by the same amount — see
+     * [targetDepthFrames].
+     */
+    private val trackBufferMs: Int = TARGET_BUFFER_MS,
     /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
     private val beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
+    /**
+     * Called alongside [onEnergy] with three normalised band levels — bass, mid, treble — so the
+     * backdrop can react to different parts of the music rather than to one loudness figure.
+     *
+     * Always a fresh array: it crosses to the main thread, and reusing one buffer would let the UI
+     * read a half-written frame.
+     */
+    val onBands: (FloatArray) -> Unit = {},
     /**
      * True when audio packets have stopped arriving, false when they resume.
      *
@@ -102,8 +116,19 @@ class AudioStreamServer(
      * the delay the sender expects. Capped at half the queue so there is still headroom to absorb
      * jitter before the overflow eviction kicks in.
      */
-    private val targetDepthFrames: Int =
-        (latencyMinSamples / framesPerPacket.coerceAtLeast(1)).coerceIn(4, AUDIO_QUEUE_CAPACITY / 2)
+    private val targetDepthFrames: Int = run {
+        // latencyMin is the sender's budget for the WHOLE path, not for this one stage. AudioTrack
+        // is written with WRITE_BLOCKING, so its buffer runs essentially full the entire time and
+        // its capacity is real, audible delay on top of whatever the queue holds. Priming the queue
+        // to the full latencyMin therefore paid the same 250ms twice, and on a Bluetooth output —
+        // which adds its own ~150ms — the total landed near a second.
+        //
+        // Charge the AudioTrack buffer against the budget and prime the queue with the remainder.
+        val trackSamples = sampleRate * trackBufferMs / 1000
+        val queueSamples = (latencyMinSamples - trackSamples).coerceAtLeast(0)
+        (queueSamples / framesPerPacket.coerceAtLeast(1))
+            .coerceIn(MIN_QUEUE_FRAMES, AUDIO_QUEUE_CAPACITY / 2)
+    }
 
     // RTP duplicate suppression. macOS sends each realtime-audio packet 2–3× for redundancy
     // (same 16-bit sequence number). Decoding every copy feeds the AAC decoder duplicate frames
@@ -138,8 +163,59 @@ class AudioStreamServer(
     /** Consecutive payload-free packets seen; resets on the first real audio frame. */
     private var keepaliveRun = 0
 
+    /**
+     * When the last datagram of ANY kind arrived on the data socket.
+     *
+     * A *paused* sender keeps sending payload-free keepalives, so this is the one signal that
+     * separates "user hit pause" from "the sender is gone". Some senders — an iPhone that stops
+     * playback without tearing down — leave the RTSP socket open forever, so socket closure alone
+     * never ends the session; this is what does.
+     */
+    @Volatile private var lastPacketAtMs = System.currentTimeMillis()
+
+    /** How long since anything at all arrived, in milliseconds. */
+    val silentForMs: Long get() = System.currentTimeMillis() - lastPacketAtMs
+
     // Beat detection state (playback thread only).
     private var lowPass = 0.0
+
+    // ── Three-band filter bank ───────────────────────────────────────────────────────────────
+    // A filter bank rather than an FFT, and worth being precise about why: we need three numbers
+    // ten times a second, not a spectrum. Four one-pole filters give real frequency separation for
+    // a handful of multiply-adds per sample, where a windowed FFT would cost a transform per block
+    // on the same thread that feeds AudioTrack -- the thread whose stalls are audible.
+    //
+    //   bass   = lp160                                  (kick, bassline)
+    //   vocal  = band(500-3400) of mid, minus that of side (centre-panned voice)
+    //   treble = mid - lp4000                            (cymbals, sibilance, air)
+    private var lp160 = 0.0
+    private var lp4000 = 0.0
+    // Vocal band, taken twice: once from mid, once from side. See the mid/side note in emitEnergy.
+    private var lpM300 = 0.0
+    private var lpM3400 = 0.0
+    private var lpS300 = 0.0
+    private var lpS3400 = 0.0
+
+    /**
+     * Per-band automatic gain, decaying.
+     *
+     * Absolute band levels are useless to a visual: treble sits an order of magnitude below bass on
+     * most material, so a fixed scale leaves the treble orb permanently dead and the bass orb
+     * permanently saturated. Each band is normalised against its own recent peak instead, so all
+     * three use their full range, and a quiet passage still animates. The peak decays so the bank
+     * re-adapts when the material changes.
+     */
+    private val bandPeak = DoubleArray(3) { BAND_PEAK_FLOOR }
+
+    /** Slow per-band average the swell is measured against. Zero until the first window seeds it. */
+    private val bandBase = DoubleArray(3)
+
+    /** Long-run average of each band's OUTPUT, used to even the three up against one another. */
+    private val bandAvg = FloatArray(3) { BAND_AVG_TARGET }
+
+    /** What the orbs actually see: [bandLevel] after the cross-band evening-up. */
+    private val bandOut = FloatArray(3)
+    private val bandLevel = FloatArray(3)
     private val history = DoubleArray(100)
     private var historyIdx = 0
     private var lastOnsetMs = 0L
@@ -224,7 +300,14 @@ class AudioStreamServer(
                     if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
                     continue
                 }
-                if (audioIdle) { audioIdle = false; onAudioIdle(false) }
+                // NO RESUME HERE. This used to clear audioIdle on any datagram at all, and a
+                // paused sender's keepalives ARE datagrams -- ~128 of them a second. So pause was
+                // set by handleRtpPacket after its 12-packet run and cleared again by the very next
+                // keepalive arriving on this line, over and over, for as long as the track sat
+                // paused. Downstream that flapping unfroze the position clock for a tick at a time,
+                // which is the progress bar still twitching after the clock itself was fixed.
+                // Only a packet with actual audio in it means playback resumed, and
+                // handleRtpPacket is the only place that can tell.
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
@@ -269,28 +352,35 @@ class AudioStreamServer(
         }
         keepaliveRun = 0
         if (audioIdle) { audioIdle = false; onAudioIdle(false) }
+        // Counted here rather than in the data-socket loop. Retransmitted packets arrive on the
+        // CONTROL channel and reach playback through this same function, so a stream being carried
+        // by resends looked completely silent to the session watchdog even while it was playing.
+        lastPacketAtMs = System.currentTimeMillis()
         val seq = ((src[offset + 2].toInt() and 0xFF) shl 8) or (src[offset + 3].toInt() and 0xFF)
-        // RTP timestamp (bytes 4..7) is the sender's own playback clock. When a sender re-syncs
-        // mid-stream — an iPad "correcting itself" — it jumps, and everything already queued
-        // belongs to the old timeline. Playing it out drifts us permanently off. Drop the stale
-        // audio and re-prime so we line up with the new clock instead.
+        // RTP timestamp (bytes 4..7) is the sender's own playback clock.
         val rtpTs = ((src[offset + 4].toInt() and 0xFF).toLong() shl 24) or
                     ((src[offset + 5].toInt() and 0xFF).toLong() shl 16) or
                     ((src[offset + 6].toInt() and 0xFF).toLong() shl 8) or
                     (src[offset + 7].toInt() and 0xFF).toLong()
-        if (lastRtpTs >= 0) {
-            val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
-            val drift = Math.abs(rtpTs - expected)
-            if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
-                Logger.i("Audio: sender clock jumped ${drift} samples — reprimimg")
-                frameQueue.clear()
-                synchronized(reorderLock) { reorder.clear(); nextSeq = -1; maxSeq = -1 }
+        // A timestamp discontinuity USED TO clear the queue and re-prime here. That was my change and
+        // it made playback worse, not better: the reorder buffer already absorbs out-of-order and
+        // resent packets, so the only thing the reset added was an audible gap every time it fired --
+        // and it fired constantly, because a resend arriving off the control channel legitimately
+        // carries an old timestamp. Detection stays, purely as a log line; the buffer is left alone.
+        synchronized(reorderLock) {
+            val inSequence = nextSeq < 0 || seq == nextSeq
+            if (lastRtpTs >= 0 && inSequence) {
+                val expected = (lastRtpTs + framesPerPacket) and 0xFFFFFFFFL
+                val drift = Math.abs(rtpTs - expected)
+                if (drift > RESYNC_JUMP_SAMPLES && drift < 0xF0000000L) {
+                    Logger.i("Audio: sender timestamp jumped $drift samples (buffer left intact)")
+                }
             }
+            if (inSequence) lastRtpTs = rtpTs
         }
-        lastRtpTs = rtpTs
         // RAOP RTP: 12-byte header, then AES-128-CBC-encrypted audio payload (copied out of src).
         val payload = src.copyOfRange(offset + RTP_HEADER, offset + length)
-        var resend: IntArray? = null
+        var resend: IntArray?
         synchronized(reorderLock) {
             if (isDuplicateSeq(seq)) { dupCount++; return }
             resend = enqueueInOrder(seq, payload)
@@ -364,6 +454,16 @@ class AudioStreamServer(
      */
     private fun runPlayback() {
         try {
+            // Audio priority, so the UI cannot starve playback.
+            //
+            // Playback already runs on its own thread, which is why it survives most main-thread
+            // work -- but a PiP transition resizes the window and saturates the CPU on a stick that
+            // is also decoding ALAC, and a default-priority thread loses that fight. The device log
+            // shows exactly that: entering PiP takes the queue from 21 to 132 in two seconds with
+            // underrun climbing, meaning the writer stopped being scheduled while packets kept
+            // arriving. URGENT_AUDIO is the priority the platform's own audio paths use, and it is
+            // what stops a redraw from outranking the thread feeding the speakers.
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
             initDecoder()
             initAudioTrack()
             awaitPrimedQueue()
@@ -376,6 +476,7 @@ class AudioStreamServer(
                     if (running) Logger.e("Audio: frame decode error", e)
                 }
                 resyncIfBacklogged()
+                logHealth()
             }
         } catch (e: Exception) {
             if (running) Logger.e("Audio playback error", e)
@@ -452,23 +553,83 @@ class AudioStreamServer(
      * the recent running mean. The result is a punch that decays, which is what reads as a beat.
      */
     private fun emitEnergy(pcm: ByteArray) {
-        // Window energy, mono, low-passed to ~130Hz with a one-pole filter.
+        // Window energy, mono, low-passed to ~130Hz with a one-pole filter. The same pass also runs
+        // the three-band bank below, so the PCM is walked once rather than four times.
+        val a160 = alphaFor(160.0)
+        val a300 = alphaFor(VOCAL_LOW_HZ)
+        val a3400 = alphaFor(VOCAL_HIGH_HZ)
+        val a4000 = alphaFor(4000.0)
         var sum = 0.0
+        var sumBass = 0.0
+        var sumVocalMid = 0.0
+        var sumVocalSide = 0.0
+        var sumTreble = 0.0
         var count = 0
         var i = 0
         while (i + 1 < pcm.size) {
-            var sample = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
+            val left = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
             i += 2
-            if (channels >= 2 && i + 1 < pcm.size) {
-                sample = (sample + ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort()) / 2.0
+            val right = if (channels >= 2 && i + 1 < pcm.size) {
+                val v = ((pcm[i + 1].toInt() shl 8) or (pcm[i].toInt() and 0xFF)).toShort().toDouble()
                 i += 2
-            }
-            lowPass += LP_ALPHA * (sample - lowPass)
+                v
+            } else left
+
+            // MID/SIDE, kept separate instead of collapsed to mono immediately.
+            //
+            // This loop used to average L and R on its first line and discard the difference, which
+            // threw away the one cue that distinguishes a voice from everything else sharing its
+            // frequency range. A band-pass over 300-2500Hz catches vocals, but it equally catches
+            // rhythm guitar, synths, snare body and piano -- so the "mid" orb was really a
+            // "most of the music" orb. Lead vocals are almost always panned dead centre, so they
+            // live in mid and are nearly absent from side; guitars, pads and reverb are spread.
+            val mid = (left + right) / 2.0
+            val side = (left - right) / 2.0
+
+            lowPass += LP_ALPHA * (mid - lowPass)
             sum += lowPass * lowPass
+
+            lp160 += a160 * (mid - lp160)
+            lp4000 += a4000 * (mid - lp4000)
+            sumBass += lp160 * lp160
+            sumTreble += (mid - lp4000) * (mid - lp4000)
+
+            // THE LOW CORNER USED TO BE 300Hz, AND THAT IS WHY THE VOCAL ORB ANSWERED THE DROP.
+            //
+            // A bass drop is centre-panned by construction, so almost none of it appears in side.
+            // Mid-minus-side therefore hands the whole of it to the vocal band, and at 300Hz the
+            // band-pass was still wide open to the kick's harmonics. On the device the vocal orb
+            // lit on every drop, which is the one thing it is not supposed to track. Starting at
+            // 500Hz costs nothing a voice needs -- the fundamental of a low male voice is around
+            // 85Hz but its formants, the part that makes it audible in a mix, sit far above this.
+            //
+            // The same band taken from mid and from side. Comparing their ENERGIES below
+            // is what isolates the voice, and doing it on the band rather than per-sample keeps the
+            // maths linear -- subtracting sample by sample would clip the waveform and invent
+            // harmonics that the filters would then dutifully report.
+            lpM300 += a300 * (mid - lpM300)
+            lpM3400 += a3400 * (mid - lpM3400)
+            lpS300 += a300 * (side - lpS300)
+            lpS3400 += a3400 * (side - lpS3400)
+            val midBand = lpM3400 - lpM300
+            val sideBand = lpS3400 - lpS300
+            sumVocalMid += midBand * midBand
+            sumVocalSide += sideBand * sideBand
             count++
         }
         if (count == 0) return
         val level = Math.sqrt(sum / count) / 32768.0
+        // Centre-dominant energy in the vocal band: what is in mid and NOT in side. Floored at zero
+        // because a wide stereo pad can hold more energy in side than in mid, and "negative vocal"
+        // is not a thing. On a mono source side is silent and this degrades to a plain band-pass,
+        // which is the right fallback rather than a special case.
+        val vocal = (Math.sqrt(sumVocalMid / count) - Math.sqrt(sumVocalSide / count))
+            .coerceAtLeast(0.0) / 32768.0
+        updateBands(
+            Math.sqrt(sumBass / count) / 32768.0,
+            vocal,
+            Math.sqrt(sumTreble / count) / 32768.0,
+        )
 
         // Running mean/variance over roughly the last second of windows.
         history[historyIdx % history.size] = level
@@ -499,6 +660,136 @@ class AudioStreamServer(
         // emitting immediately made the backdrop flash ahead of the beat.
         emitDelayed(envelope)
     }
+
+
+    /**
+     * One-pole coefficient for a cutoff of [hz] at the current sample rate.
+     *
+     * Cheap enough to recompute per block (three exp() calls per ~10ms of audio) and correct across
+     * a rate change, which a hard-coded constant is not — the same filter would sit at a different
+     * frequency for 44.1k and 48k material.
+     */
+    private fun alphaFor(hz: Double): Double {
+        val sr = sampleRate.coerceAtLeast(8000).toDouble()
+        return 1.0 - Math.exp(-2.0 * Math.PI * hz / sr)
+    }
+
+    /**
+     * Turns the three raw band RMS figures into 0..1 levels.
+     *
+     * Measured as a RISE ABOVE THE BAND'S OWN RECENT AVERAGE, not as a fraction of its peak.
+     *
+     * Level-against-peak is the obvious construction and it has a ceiling problem that only shows
+     * up on real music: a band that is *steadily* loud -- bass on anything four-on-the-floor --
+     * sits at its own decaying peak, so the ratio is ~1 continuously and the orb is pinned bright
+     * and motionless. It is lit, it is arithmetically correct, and it shows the viewer nothing.
+     * That is the "maxing out too fast" report, and no amount of decay tuning fixes it: the
+     * quantity being measured is wrong.
+     *
+     * Against a slow baseline, "at its own average" means ZERO. It takes a genuine kick to light
+     * up and the orb settles between hits, which is the thing that reads as being on the beat.
+     */
+    private fun updateBands(bass: Double, mid: Double, treble: Double) {
+        val raw = RAW_BANDS
+        raw[0] = bass; raw[1] = mid; raw[2] = treble
+        for (b in 0 until 3) {
+            // ~1.5s follow. Seeded on the first window rather than from zero: starting at zero
+            // makes the first second of every track one enormous false swell.
+            if (bandBase[b] <= 0.0) bandBase[b] = raw[b].coerceAtLeast(BAND_BASE_FLOOR)
+            else bandBase[b] += BAND_BASE_FOLLOW * (raw[b] - bandBase[b])
+            val base = bandBase[b].coerceAtLeast(BAND_BASE_FLOOR)
+            // Headroom matters. Divide by a tight ceiling and ordinary hits clip flat at 1 again,
+            // which is the very thing the baseline was introduced to stop.
+            val swell = ((raw[b] / base) - 1.0).coerceIn(0.0, BAND_EXCESS_MAX) / BAND_EXCESS_MAX
+            // ASYMMETRIC reference peak: jump straight to a new loudest, fall away very slowly.
+            //
+            // A symmetric decay makes the AGC fight itself. A transient sets a high reference, the
+            // ordinary material that follows normalises against it and reads near zero, the reference
+            // then decays until the same material reads high again -- so the level oscillates on a
+            // cycle that has nothing to do with the music. The device log showed bass stepping
+            // 0.02, 0.51, 0.00, 0.22, 0.17, 0.36, 0.88 across consecutive samples, which is that
+            // oscillation, not a beat. Holding the reference for several seconds removes it.
+            val peak = bandPeak[b]
+            bandPeak[b] = if (raw[b] > peak) raw[b] else {
+                (peak * BAND_PEAK_DECAY).coerceAtLeast(BAND_PEAK_FLOOR)
+            }
+            val presence = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            // VOCALS ARE THE EXCEPTION, and they have to be.
+            //
+            // Swell is right for bass and treble because those read as hits. A held vocal note is
+            // not a hit: it is one sustained tone, so its swell is ~0 for the whole of the phrase
+            // and the middle orb went dark exactly while someone was singing -- the opposite of
+            // what it is for. The vocal band therefore also takes an ABSOLUTE presence term, so it
+            // is lit whenever centre-panned voice is there at all, with swell still adding on top.
+            // Bass and treble stay pure-swell or they become a constant glow and stop pulsing.
+            //
+            // The presence term needs its OWN floor, or it becomes a permanent glow. At 0.9 of a
+            // raw peak ratio the vocal orb sat between 0.3 and 0.9 continuously on the device --
+            // never dark, never really moving, the middle orb "always big". Centre-panned energy
+            // is present in almost every mix at some level; what should light the orb is that
+            // energy being HIGH for this track, so the ratio is gated well above zero first and
+            // then re-expanded, and it contributes rather less than the swell it competes with.
+            val gated = ((presence - BAND_PRESENCE_GATE) / (1.0 - BAND_PRESENCE_GATE))
+                .coerceIn(0.0, 1.0)
+            val combined =
+                if (b == BAND_VOCAL) Math.max(swell, gated * BAND_PRESENCE_WEIGHT) else swell
+            // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
+            // costs no headroom at the top.
+            val norm = ((combined - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
+            val shaped = Math.pow(norm, BAND_CURVE).toFloat()
+            // Envelope follower, fast up and slow down -- how a VU meter behaves, and how a glow
+            // should. A raw per-block figure is far too twitchy to drive anything visual: it is
+            // measured over ~10ms of audio, so it chatters at a rate the eye reads as noise. Rising
+            // quickly keeps the hit on the beat; falling slowly is what makes the decay look smooth.
+            val follow = if (shaped > bandLevel[b]) BAND_ATTACK else BAND_RELEASE
+            bandLevel[b] += (shaped - bandLevel[b]) * follow
+
+            // AND FINALLY, MAKE THE THREE COMPARABLE TO EACH OTHER.
+            //
+            // Everything above normalises each band against ITSELF, which makes each one honest in
+            // isolation and says nothing about how they compare. On the device that came out as
+            // vocals averaging 0.39 against bass 0.24 and treble 0.18 -- so the middle orb simply
+            // glowed harder than its neighbours all the time, whatever the music was doing. Three
+            // orbs that are individually correct and visibly mismatched is worse than three that
+            // are approximate and even, because the eye reads the brightest one as the important
+            // one and it is the same one every time.
+            //
+            // A slow gain per band pulls each one's long-run average toward a common target. The
+            // averaging window is tens of seconds, far longer than any beat, so this cannot flatten
+            // a hit or chase the music; it only corrects the standing offset between the three.
+            // Clamped hard, because a band that is genuinely silent for a while must not have its
+            // noise floor amplified into a glow while it waits.
+            bandAvg[b] += BAND_AVG_FOLLOW * (bandLevel[b] - bandAvg[b])
+            val gain = (BAND_AVG_TARGET / Math.max(bandAvg[b], BAND_AVG_FLOOR))
+                .coerceIn(BAND_GAIN_MIN, BAND_GAIN_MAX)
+            bandOut[b] = (bandLevel[b] * gain).coerceIn(0f, 1f)
+        }
+        // Periodic proof that the bank is alive and separating. "Are the orbs actually reacting?" is
+        // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
+        // one. Three numbers a couple of times a second settle it: if they move independently the
+        // orbs are following the music, and if one sits at 0.00 that band is the thing to fix.
+        val now = System.currentTimeMillis()
+        if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
+            lastBandLogMs = now
+            Logger.i(
+                "Bands bass=%.2f vocal=%.2f treble=%.2f".format(bandOut[0], bandOut[1], bandOut[2])
+            )
+        }
+        // Rate-limited. This fired once per PCM BLOCK -- around 100 times a second -- so it was
+        // posting 100 runnables a second onto the main thread to animate something that redraws at
+        // 60fps, and the smoothing constants downstream were tuned for a far slower callback. 30/sec
+        // is more than the display can show.
+        if (now - lastBandEmitMs < BAND_EMIT_INTERVAL_MS) return
+        lastBandEmitMs = now
+        val snapshot = floatArrayOf(bandOut[0], bandOut[1], bandOut[2])
+        val delay = beatEmitDelayMs()
+        if (delay <= 0L) energyHandler.post { onBands(snapshot) }
+        else energyHandler.postDelayed({ onBands(snapshot) }, delay)
+    }
+
+    private val RAW_BANDS = DoubleArray(3)
+    private var lastBandLogMs = 0L
+    private var lastBandEmitMs = 0L
 
 
     private fun initDecoder() {
@@ -546,8 +837,27 @@ class AudioStreamServer(
         while (running && frameQueue.size < targetDepthFrames && System.currentTimeMillis() < deadline) {
             Thread.sleep(5)
         }
+        // Waiting for "at least N" is not the same as starting at N. Packets arrive far faster than
+        // realtime at stream start, so the queue routinely blew past the target before this loop
+        // next looked — observed 34 frames against a target of 4. AudioTrack is written with
+        // WRITE_BLOCKING, which paces at exactly realtime and therefore never drains a backlog, so
+        // every one of those extra frames became permanent delay. Drop the overshoot before the
+        // first sample is played: cheap here, impossible to recover later.
+        // A prime that timed out with nothing in the queue means the sender opened the stream and
+        // sent no audio. Starting playback from empty guarantees an immediate underrun, so say so
+        // rather than pretending the buffer is at its target.
+        if (frameQueue.isEmpty()) {
+            Logger.w("Audio: prime timed out with an empty queue — sender opened the stream but sent nothing")
+            return
+        }
+        val overshoot = frameQueue.size - targetDepthFrames
+        if (overshoot > 0) {
+            repeat(overshoot) { frameQueue.poll() }
+            Logger.i("Audio: dropped $overshoot frame(s) of prime overshoot " +
+                "(~${overshoot * framesPerPacket * 1000 / sampleRate}ms that would never drain)")
+        }
         Logger.i("Audio: primed with ${frameQueue.size}/$targetDepthFrames frames " +
-            "(~${targetDepthFrames * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
+            "(~${frameQueue.size * framesPerPacket * 1000 / sampleRate}ms presentation latency)")
     }
 
     /**
@@ -558,8 +868,93 @@ class AudioStreamServer(
      * overflow eviction becomes the only relief — one audible glitch per dropped frame, forever.
      * Discarding a block in one go costs a single artefact and puts latency back where it belongs.
      */
+    /**
+     * One line a second saying whether WE are the problem or the sender is.
+     *
+     * Every audio complaint so far has been diagnosed by inference, and the Mac path in particular
+     * has had two contradictory explanations (our buffer vs the sender's timing) with no measurement
+     * to settle it. These four numbers separate them:
+     *
+     *  - `queue` far below target and `underrun` climbing → the sender is not feeding us fast
+     *    enough. Nothing on this side can fix that.
+     *  - `queue` at the ceiling with `qDrop` climbing → we are not draining fast enough, which is
+     *    ours to fix.
+     *  - `underrun` flat with both mid-range → the path is healthy and the lag is presentation
+     *    latency, i.e. a buffer-size question, not a bug.
+     *
+     * `getUnderrunCount` is the platform's own count of times the track ran dry, which is the one
+     * number that cannot be argued with. Logged at info because Fire OS drops debug for this package.
+     */
+    private fun logHealth() {
+        val now = System.currentTimeMillis()
+        if (now - lastHealthLogMs < HEALTH_LOG_INTERVAL_MS) return
+        lastHealthLogMs = now
+        val underruns = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+        Logger.i(
+            "Audio health: queue=${frameQueue.size}/$targetDepthFrames " +
+                "underrun=$underruns (+${underruns - lastUnderrunCount}) " +
+                "qDrop=$qDropCount resendReq=$resendReqCount resendFill=$resendFillCount",
+        )
+        lastUnderrunCount = underruns
+    }
+
+    /** When the queue first went over the backlog threshold, or 0 while it is healthy. */
+    private var backloggedSinceMs = 0L
+    /** Underrun count when the backlog timer armed — see [resyncIfBacklogged]. */
+    private var underrunsAtBacklogStart = 0
+    private var lastHealthLogMs = 0L
+    private var lastUnderrunCount = 0
+
     private fun resyncIfBacklogged() {
-        if (frameQueue.size < targetDepthFrames * 2) return
+        // Only step in for a backlog well clear of normal jitter. At 2x the target this triggered
+        // constantly and the "cure" — one artefact per resync — was worse than the latency it was
+        // treating.
+        // SUSTAINED backlog, not instantaneous. The 4x trigger never fired in practice: the device
+        // log shows the queue parking at 58-61 against a target of 18 for minute after minute with
+        // qDrop=0, because 4x18 is 72 and it never quite got there. Forty extra frames is ~320ms of
+        // permanent added latency -- exactly the "laggy over Mac" complaint, and the resync that was
+        // supposed to relieve it sat one frame under its own threshold the entire time.
+        //
+        // Lowering the multiple alone would bring back what it was raised to fix: a 2x trigger fires
+        // on ordinary jitter and each firing is an audible artefact. Requiring the backlog to PERSIST
+        // separates the two cases — a jitter spike drains on its own within a second, a real backlog
+        // does not drain at all, because WRITE_BLOCKING paces playback at exactly realtime.
+        // Two thresholds, not one. The first version armed and disarmed on the same number, so a
+        // backlog hovering around it reset the timer on every dip and the trim never happened:
+        // the device log shows the queue sitting at 27-37 against a 36 threshold for NINETEEN
+        // seconds -- audible lag the whole time -- and only firing once a second spike pushed it to
+        // 97 and held it there. Disarming only when the queue is genuinely healthy again means a
+        // backlog that hovers still gets trimmed on schedule.
+        val depth = frameQueue.size
+        if (depth < targetDepthFrames * RESYNC_CLEAR_MULTIPLE) {
+            backloggedSinceMs = 0L
+            return
+        }
+        if (depth < targetDepthFrames * RESYNC_TRIGGER_MULTIPLE && backloggedSinceMs == 0L) return
+        val now = System.currentTimeMillis()
+        if (backloggedSinceMs == 0L) {
+            backloggedSinceMs = now
+            underrunsAtBacklogStart = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+            return
+        }
+        if (now - backloggedSinceMs < RESYNC_SUSTAIN_MS) return
+
+        // Do not trim a queue that is OSCILLATING. The device log shows this stream swinging
+        // 0 -> 50 -> 0 -> 70 with underruns climbing the whole time and resendFill in the hundreds:
+        // heavy packet loss, with retransmits arriving in bursts. That is not a standing backlog,
+        // it is the buffer doing its job. Dropping frames off the peak guarantees the next trough
+        // underruns, so trimming here actively makes the audio worse -- 300+ frames had been
+        // dropped by the end of that log and the underrun count still climbed.
+        //
+        // A genuine backlog is high AND quiet. If the track ran dry even once while the timer was
+        // running, the depth is oscillation, so leave it alone and start the clock over.
+        val underruns = runCatching { audioTrack?.underrunCount ?: 0 }.getOrDefault(0)
+        if (underruns > underrunsAtBacklogStart) {
+            Logger.i("Audio: queue is high but oscillating (underrun +${underruns - underrunsAtBacklogStart}) — not trimming")
+            backloggedSinceMs = 0L
+            return
+        }
+        backloggedSinceMs = 0L
         var dropped = 0
         while (frameQueue.size > targetDepthFrames && frameQueue.poll() != null) dropped++
         if (dropped > 0) {
@@ -576,15 +971,35 @@ class AudioStreamServer(
      * is not exposed by Android and is not included; the user's audio trim covers that.
      */
     private fun emitDelayed(value: Float) {
-        val track = audioTrack
-        val bufferedMs = if (track != null) {
-            val queuedFrames = frameQueue.size * framesPerPacket
-            val trackFrames = runCatching { track.bufferSizeInFrames }.getOrDefault(0)
-            ((queuedFrames + trackFrames).toLong() * 1000L / sampleRate.coerceAtLeast(1))
-        } else 0L
-        val delay = bufferedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
+        val delay = beatEmitDelayMs()
         if (delay <= 0L) { onEnergy(value); return }
         energyHandler.postDelayed({ onEnergy(value) }, delay)
+    }
+
+    /**
+     * How long to hold a beat measurement before showing it, so the visual lands with the sound.
+     *
+     * Shared by [emitDelayed] and the band emission: both describe the same PCM, so they must be
+     * delayed by the same amount or the orbs would react on a different beat from the pulse.
+     */
+    private fun beatEmitDelayMs(): Long {
+        // OUR queue only. AudioTrack's own holding is [outputLatencyMs] below and must not be
+        // counted twice.
+        //
+        // This added `track.bufferSizeInFrames` as well, which is wrong on both counts: it is the
+        // buffer's CAPACITY rather than how much is actually sitting in it, and whatever is really
+        // in it is precisely what getTimestamp() already reports as pending. So the visuals were
+        // held back by roughly a full AudioTrack buffer beyond the true latency — a fixed couple of
+        // hundred milliseconds, which is about half a beat at 160 BPM and reads exactly like "the
+        // orbs are not on the beat" while every band level is perfectly correct.
+        // AND NOT OUR QUEUE EITHER. The measurement is taken in emitEnergy(), which runs *after*
+        // the frame has been polled off frameQueue, decoded, and written to AudioTrack -- so the
+        // queue depth is the delay on packets that have not been measured yet, not on this one.
+        // Adding it held every visual back by the queue's whole depth, which the logs show sitting
+        // at 14-40 packets: at 352 frames each that is 110-320ms of pure, self-inflicted lag, and
+        // it drifts with the queue. What is genuinely still ahead of this PCM is what AudioTrack
+        // has not played yet, and nothing else.
+        return extraDelayMs + beatDelayMs + outputLatencyMs()
     }
 
     /**
@@ -625,7 +1040,20 @@ class AudioStreamServer(
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
     fun setVolume(airplayVolume: Float) {
-        volumeGain = if (airplayVolume <= -144f) 0f else ((airplayVolume + 30f) / 30f).coerceIn(0f, 1f)
+        // dB -> AMPLITUDE, not a straight line through the dB range.
+        //
+        // The sender's scale is decibels: its slider maps linearly onto -30..0 dB. AudioTrack.setVolume
+        // takes a linear amplitude multiplier. Treating (db+30)/30 as that multiplier silently
+        // equates the two, which puts -15 dB -- the middle of the sender's slider -- at 0.5 amplitude
+        // when it should be 0.178. Every position except the two ends was wrong, and wrong in the
+        // direction that makes everything sound too loud until the very bottom of the travel. That is
+        // the "volume doesn't tally" report: the ends matched, so it looked close, and nothing in
+        // between did.
+        volumeGain = when {
+            airplayVolume <= -144f -> 0f                       // the sender's mute sentinel
+            airplayVolume >= 0f -> 1f
+            else -> Math.pow(10.0, (airplayVolume / 20f).toDouble()).toFloat().coerceIn(0f, 1f)
+        }
         runCatching { audioTrack?.setVolume(volumeGain) }
     }
 
@@ -638,7 +1066,7 @@ class AudioStreamServer(
         // hits its 96-frame ceiling and evicts (observed queue=89, qDrop=10 — audible glitches).
         // The sender advertises latencyMin=11025 (250ms), so it expects far more buffering than the
         // ~40ms floor. Take the larger of the floor and TARGET_BUFFER_MS.
-        val targetBytes = bytesPerSec * TARGET_BUFFER_MS / 1000
+        val targetBytes = bytesPerSec * trackBufferMs / 1000
         val bufferBytes = maxOf(minBuf, targetBytes)
         Logger.i("AudioTrack: minBuf=${minBuf}B (~${minBuf * 1000 / bytesPerSec}ms), " +
             "buffer=${bufferBytes}B (~${bufferBytes * 1000 / bytesPerSec}ms latency)")
@@ -682,6 +1110,27 @@ class AudioStreamServer(
         // added latency to ~this many frames; in-order traffic adds zero). ~32 ≈ 0.25–0.35 s.
         private const val MAX_REORDER_HOLD = 32
 
+        /** How far past the target the queue must run before a resync is worth its artefact. */
+        /**
+         * Backlog multiple that starts the clock.
+         *
+         * Was 4 (never reached), then 2 -- and 2 was still too high. The device log shows the queue
+         * parking at 26-34 against a target of 18 for fifteen seconds during PiP: above the clear
+         * point so it never disarmed, below the 36 trigger so it never armed either. Ten extra
+         * frames is ~80ms of latency that simply lived there. 1.5x arms on that.
+         */
+        private const val RESYNC_TRIGGER_MULTIPLE = 1.5f
+
+        /**
+         * Backlog multiple the queue must fall back to before the timer disarms.
+         *
+         * Below the trigger, so the arm and disarm points differ — see [resyncIfBacklogged].
+         */
+        private const val RESYNC_CLEAR_MULTIPLE = 1.15f
+
+        /** How long a backlog must persist before it counts as real rather than jitter. */
+        private const val RESYNC_SUSTAIN_MS = 3_000L
+
         // Don't ask for an absurd resend range (a huge gap = a real stall, not a few lost packets).
         private const val MAX_RESEND_RANGE = 128
 
@@ -691,10 +1140,31 @@ class AudioStreamServer(
         // because targetDepthFrames is clamped to half the capacity.
         private const val AUDIO_QUEUE_CAPACITY = 1024
 
+        /**
+         * Floor on the jitter buffer, in frames (~90ms at 352 samples/frame).
+         *
+         * Wi-Fi delivers audio in bursts, and a queue shallower than this cannot absorb one — it
+         * either starves or trips the backlog resync. The old floor of 4 frames was 32ms, which is
+         * less than a single burst.
+         */
+        private const val MIN_QUEUE_FRAMES = 11
+
         /** AudioTrack buffer target. The sender's advertised latencyMin is 250ms; stay under it. */
-        private const val TARGET_BUFFER_MS = 300
+        /**
+         * AudioTrack buffer size.
+         *
+         * Deliberately modest. This is a hardware buffer whose only job is to survive a scheduling
+         * hiccup between writes; network jitter is the queue's job. At 300ms it swallowed the whole
+         * of the sender's latency budget, which left the queue at its 4-frame floor — 32ms — and
+         * the backlog resync fired on every gust of Wi-Fi jitter, dropping 4-35 frames at a time,
+         * continuously. Each of those is an audible glitch.
+         */
+        private const val TARGET_BUFFER_MS = 100
 
         private const val PRIME_TIMEOUT_MS = 700L
+
+        /** One health line a second — frequent enough to see a glitch, quiet enough to read. */
+        private const val HEALTH_LOG_INTERVAL_MS = 1_000L
 
         /** Silence on the audio stream that means "paused" rather than "a packet was late". */
         // Backstop only: a sender that goes completely silent (disconnect, sleep) rather than
@@ -715,6 +1185,104 @@ class AudioStreamServer(
         /** One-pole low-pass coefficient for ~130Hz at 44.1kHz — keeps bass, drops the rest. */
         private const val LP_ALPHA = 0.018
         /** How far above the running mean a window must sit to count as a beat. */
+        /**
+         * Band AGC: how fast a band's reference peak falls when nothing louder arrives. PER CALL,
+         * and updateBands runs once per PCM block — roughly 100 times a second.
+         *
+         * This has now been wrong in BOTH directions, which is worth recording because the two
+         * failures look nothing alike on screen. At 0.985 the reference fell by 0.22 every second,
+         * collapsed onto the current level, and every band pinned near 1.00 — orbs permanently at
+         * full size with no headroom to pulse. Overcorrecting to 0.99985 held the reference for the
+         * better part of a minute, so one loud transient early in a track left everything after it
+         * normalising against that peak: the log then showed bass living at 0.10–0.30 and the orbs
+         * barely grew at all.
+         *
+         * 0.9995 is ~0.95 per second — the reference tracks the last few seconds of music, which is
+         * the timescale a listener judges "loud" against.
+         */
+        private const val BAND_PEAK_DECAY = 0.9995
+        /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
+        private const val BAND_PEAK_FLOOR = 1e-4
+
+        /**
+         * Shaping exponent, just under 1.
+         *
+         * 1.5 was chosen to fight the pinned-at-1.0 symptom, but it EXPANDS the top of the range by
+         * crushing the bottom — and once the AGC bug above was fixed, the bottom was where the music
+         * actually lived. A measured 0.34 came out as 0.20, so the curve was removing most of the
+         * movement the filter bank had just found. Slightly below 1 lifts the quiet end instead,
+         * which is the correction that was wanted all along; the AGC and the noise gate handle range.
+         */
+        private const val BAND_CURVE = 0.9
+
+        /**
+         * Fraction of the reference peak treated as silence. Room tone and codec noise otherwise
+         * keep a band a few percent off zero forever, which the expansion curve then lifts back into
+         * visible glow on a track that has stopped.
+         */
+        private const val BAND_NOISE_FLOOR = 0.06
+
+        /** Index of the vocal band -- the one that also gets an absolute presence term. */
+        private const val BAND_VOCAL = 1
+
+        /** Baseline EMA coefficient, ~1.5s at the ~30/sec emission rate. */
+        private const val BAND_BASE_FOLLOW = 0.02
+
+        /** Keeps the baseline off zero so silence cannot divide its way to a full-scale swell. */
+        private const val BAND_BASE_FLOOR = 1.0e-4
+
+        /**
+         * How far above its own average a band has to rise to read as full scale.
+         *
+         * Generous on purpose. At ~0.65 every ordinary hit reaches the top and clips flat, which
+         * is the pinned look this whole scheme exists to avoid; a bit over 1.0 puts normal hits in
+         * the middle of the range and leaves the top for the genuinely big ones.
+         */
+        private const val BAND_EXCESS_MAX = 1.1
+
+        /** How much of the vocal band's absolute presence counts, before swell is added on top. */
+        private const val BAND_PRESENCE_WEIGHT = 0.40
+
+        /** How loud centre content has to be, against the band's own peak, before it counts at all. */
+        private const val BAND_PRESENCE_GATE = 0.55
+
+        /**
+         * Vocal band-pass corners.
+         *
+         * The low corner is the important one, and it is set by what must be EXCLUDED rather than
+         * by what a voice contains: see the note in the filter loop about bass drops arriving
+         * centre-panned and therefore landing entirely in mid-minus-side.
+         */
+        private const val VOCAL_LOW_HZ = 500.0
+        private const val VOCAL_HIGH_HZ = 3400.0
+        private const val BAND_LOG_INTERVAL_MS = 2000L
+        private const val BAND_EMIT_INTERVAL_MS = 33L
+
+        /** Envelope follower, per call at ~100 calls/sec. Fast attack, slow release. */
+        private const val BAND_ATTACK = 0.42f
+        private const val BAND_RELEASE = 0.11f
+
+        // ── Cross-band levelling ────────────────────────────────────────────────────────────────
+        /** Averaging speed, ~30/sec. Deliberately tens of seconds: it must not track the music. */
+        private const val BAND_AVG_FOLLOW = 0.0015f
+
+        /** The long-run level every band is nudged toward. */
+        private const val BAND_AVG_TARGET = 0.28f
+
+        /** Stops a silent band dividing its way to a huge gain. */
+        private const val BAND_AVG_FLOOR = 0.05f
+
+        /** Correction limits. Wide enough to close a 2x mismatch, tight enough to keep silence dark. */
+        private const val BAND_GAIN_MIN = 0.6f
+        private const val BAND_GAIN_MAX = 1.8f
+
+        // ── Onset detection ─────────────────────────────────────────────────────────────────────
+        //
+        // A tempo ESTIMATOR used to live here as well -- harmonic interval scoring, confidence
+        // hysteresis, octave folding, the lot -- and nothing ever read its answer. It logged a BPM
+        // figure and that was all it did, so every wrong number it produced was a bug report about
+        // a feature that did not exist. The onset detector below stays because the beat envelope
+        // is driven from it; the tempo it implied is gone.
         private const val ONSET_SIGMA = 1.5
         private const val REFRACTORY_MS = 120L
         private const val DECAY_MS = 250f

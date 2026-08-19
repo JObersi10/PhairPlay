@@ -4,6 +4,12 @@ Version: 2.2
 Status: Active
 Date: 2026-03-23
 
+> **Protocol scope has changed since this document was written.** Google Cast was removed
+> (see `docs/archive/CAST_APP_ID.md`), and Miracast is now built only for the Google TV flavour —
+> Fire TV cannot complete a WFD session. The Cast and Fire-TV-Miracast requirements below are kept
+> as a record of what was planned, not as a description of what ships.
+
+
 ---
 
 ## 1. Functional Requirements

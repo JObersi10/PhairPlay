@@ -30,7 +30,9 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.content.res.AppCompatResources
 import com.phairplay.R
+import com.phairplay.util.Logger
 import com.phairplay.airplay.NowPlayingInfo
+import com.phairplay.settings.BackdropTheme
 import com.phairplay.airplay.SenderDeviceType
 import timber.log.Timber
 
@@ -147,17 +149,48 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Updates the PiP progress bar once a second.
+     *
+     * Separate from [positionTick], which runs at 4Hz to animate a full-size bar and format two
+     * timestamps. In a window this size a bar moves by well under a pixel per second, so 4Hz would
+     * be three wasted wakeups out of four on hardware that is also decoding audio.
+     */
+    private val compactTick = object : Runnable {
+        override fun run() {
+            if (durationMs > 0L) {
+                val elapsed = if (positionBaseEpoch > 0L)
+                    (SystemClock.elapsedRealtime() - positionBaseEpoch) * seekMultiplier else 0f
+                val now = (positionBaseMs + elapsed.toLong()).coerceAtMost(durationMs)
+                compactProgress.setValue(((now.toFloat() / durationMs) * 10000).toInt())
+            }
+            handler.postDelayed(this, COMPACT_TICK_MS)
+        }
+    }
+
     override fun onAttachedToWindow() { super.onAttachedToWindow(); handler.post(positionTick) }
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         handler.removeCallbacks(positionTick)
+        handler.removeCallbacks(compactTick)
         handler.removeCallbacks(stopSeekRunnable)
         cancelScreensaver()
     }
 
     // ── Dynamic blob background ───────────────────────────────────────────────
     private val dynamicBg: DynamicBackground
-    fun setEnergy(e: Float) = dynamicBg.setEnergy(e)
+    fun setEnergy(e: Float) {
+        // Dropped while compact: the beat-reactive background cannot be seen in a PiP window, and
+        // repainting for it burns CPU the audio decoder needs more.
+        if (isCompact) return
+        dynamicBg.setEnergy(e)
+    }
+
+    /** Bass/mid/treble levels for the per-band orbs. Dropped while compact, same reasoning. */
+    fun setBands(bands: FloatArray) {
+        if (isCompact) return
+        dynamicBg.setBands(bands)
+    }
 
     // ── Views ────────────────────────────────────────────────────────────────
     private val artworkView: ImageView
@@ -172,7 +205,28 @@ class NowPlayingScreen @JvmOverloads constructor(
     private val pillLabel: TextView
 
     /** The whole art + text block. Held as a field so the screensaver can drift and dim it. */
+    /**
+     * The artwork, full-bleed and darkened, shown ONLY in PiP.
+     *
+     * At full size the artwork is a framed tile and the backdrop is the colour-blob view. A PiP
+     * window has no room for a tile, so the art becomes the background instead -- which is what
+     * makes the compact view read as artwork-plus-title rather than as a shrunken screen.
+     */
+    /**
+     * A progress bar pinned to the bottom edge, for PiP only.
+     *
+     * The full-size progress bar lives inside the text column, so in a PiP window it sits directly
+     * under the artist with the whole lower half of the window empty below it. This one is a child
+     * of the root frame instead, so it can hold the bottom edge while the title and artist stay
+     * centred -- which is what actually fills the window.
+     */
+    private val compactProgress: ProgressView
+    private val compactArtBg: ImageView
     private val contentGroup: LinearLayout
+    /** The 340dp artwork tile. Held so PiP can drop it — it alone is wider than a PiP window. */
+    private val artWrapper: FrameLayout
+    /** The title/artist/progress column. Held so PiP can centre it. */
+    private val textColumn: LinearLayout
     private val pillWrapper: FrameLayout
 
     /** "Back of the record sleeve" — the extended credits panel toggled with the Menu key. */
@@ -192,6 +246,22 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
         addView(dynamicBg)
 
+        compactArtBg = ImageView(context).apply {
+            layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            // Darkened so white text stays readable over any album cover, however bright.
+            setColorFilter(Color.argb(150, 0, 0, 0), android.graphics.PorterDuff.Mode.SRC_ATOP)
+            visibility = GONE
+        }
+        addView(compactArtBg)
+
+        compactProgress = ProgressView(context).apply {
+            visibility = GONE
+        }
+        addView(compactProgress, LayoutParams(LayoutParams.MATCH_PARENT, dp(4)).also {
+            it.gravity = Gravity.BOTTOM
+        })
+
         // ── Content ──────────────────────────────────────────────────────────
         contentGroup = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -201,7 +271,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         }
 
         // Album art
-        val artWrapper = FrameLayout(context).apply {
+        artWrapper = FrameLayout(context).apply {
             layoutParams = LinearLayout.LayoutParams(dp(340), dp(340)).also { it.rightMargin = dp(64) }
             elevation = dp(24).toFloat()
         }
@@ -297,6 +367,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         right.addView(progressBar)
         right.addView(timeRow)
 
+        textColumn = right
         contentGroup.addView(right)
         addView(contentGroup)
 
@@ -376,6 +447,24 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun runScrollPass(view: TextView) {
         scrollAnimators.remove(view)?.cancel()
         view.scrollTo(0, 0)
+        // No scrolling in a PiP window. The pass is computed from the view's width, and a PiP window
+        // both starts narrow and gets resized while it is open, so a long title spent its time
+        // sliding around and re-measuring -- which is the compact "glitching" rather than any
+        // rendering fault. Ellipsis is the honest treatment at this size: it does not move, and a
+        // truncated title in a thumbnail is readable in a way a moving one is not.
+        if (isCompact) {
+            // Horizontal scrolling has to go, not just the animation. A TextView with
+            // setHorizontallyScrolling(true) does not apply ellipsize at all and can still hold a
+            // scroll offset, so the "static, truncated" title was neither: it kept whatever offset
+            // it was left with and rendered blank. Turn scrolling off, park it at zero, then
+            // ellipsize.
+            view.setHorizontallyScrolling(false)
+            view.scrollTo(0, 0)
+            view.ellipsize = android.text.TextUtils.TruncateAt.END
+            return
+        }
+        view.setHorizontallyScrolling(true)
+        view.ellipsize = null
         val overflow = (view.layout?.getLineWidth(0)?.toInt() ?: 0) -
             (view.width - view.paddingLeft - view.paddingRight)
         if (overflow <= 0 || view.visibility != View.VISIBLE) return
@@ -392,23 +481,31 @@ class NowPlayingScreen @JvmOverloads constructor(
             interpolator = DecelerateInterpolator()
             addUpdateListener { view.scrollTo(it.animatedValue as Int, 0) }
         }
+        // onAnimationEnd fires on CANCEL as well as on completion, so cancelling the outward pass
+        // used to immediately start the return pass -- which then kept writing scrollTo using an
+        // offset computed for the OLD width, on a view the compact branch had already walked away
+        // from. That is the title parking itself off its own edge in PiP, and it is why cancelling
+        // the animator was not enough to stop it. Only chain the return pass on a real completion.
+        var cancelled = false
         out.addListener(object : android.animation.AnimatorListenerAdapter() {
+            override fun onAnimationCancel(animation: android.animation.Animator) { cancelled = true }
             override fun onAnimationEnd(animation: android.animation.Animator) {
-                if (view.isAttachedToWindow) { scrollAnimators[view] = back; back.start() }
+                if (cancelled || isCompact || !view.isAttachedToWindow) return
+                scrollAnimators[view] = back
+                back.start()
             }
         })
-        back.addListener(object : android.animation.AnimatorListenerAdapter() {
-            override fun onAnimationEnd(animation: android.animation.Animator) {
-                // Rest at the start for a beat, then read it through again.
-                if (view.isAttachedToWindow) view.postDelayed({ runScrollPass(view) }, SCROLL_REST_MS)
-            }
-        })
+        // Out, back, done. It used to loop forever after a rest, which is movement on screen for the
+        // whole length of a track with nothing new to show -- the text has already been read once.
+        // A new pass only happens when the text itself changes, via restartScrolls().
         scrollAnimators[view] = out
         out.start()
     }
 
     /** Restarts every scroll pass — called when the displayed text changes. */
     private fun restartScrolls() = scrollTrackedViews.forEach { scheduleScroll(it) }
+
+    private val restartScrollsRunnable = Runnable { restartScrolls() }
 
     // ── Info panel ("back of the sleeve") ─────────────────────────────────────
 
@@ -502,6 +599,109 @@ class NowPlayingScreen @JvmOverloads constructor(
     }
 
     /**
+     * Where the now-playing card sits and how big it is.
+     *
+     * FULL is the normal screen-filling layout. The five MINI_* entries are the same card at
+     * [MINI_SCALE], parked centred or in one of the four corners, with everything except the
+     * artwork, title and artist stripped out — so the card can be pushed out of the way of whatever
+     * else is on screen without losing what is playing.
+     */
+    enum class LayoutPreset { FULL, MINI_CENTER, MINI_TOP_LEFT, MINI_TOP_RIGHT, MINI_BOTTOM_LEFT, MINI_BOTTOM_RIGHT }
+
+    private var layoutPreset = LayoutPreset.FULL
+
+    /**
+     * Advances Menu through the six layouts: full, small centred, then the four corners, then back
+     * to full.
+     *
+     * Menu also opens the credits panel, and both cannot live on a single press. The panel moved to
+     * a LONG press (see MainActivity) because it is the rarer of the two — you read the credits
+     * once, whereas moving the card out of the way is something you do while looking at the screen.
+     */
+    fun cycleLayoutPreset(): Boolean {
+        wakeFromScreensaver()
+        dismissInfoPanel()
+        val all = LayoutPreset.values()
+        layoutPreset = all[(layoutPreset.ordinal + 1) % all.size]
+        Logger.i("NowPlaying layout → $layoutPreset")
+        applyCompactState()
+        applyPresetTransform(animate = true)
+        // AFTER the move, not during it. A scroll pass is sized from the view's measured width, and
+        // switching preset re-lays the artwork tile at a new size while a 460ms transform is still
+        // running -- so the pass that started here was computed against a width the card no longer
+        // had by the time it played, and the title slid to a stop somewhere off its own edge. That
+        // is the mini-mode "glitchy marquee". Wait for the layout to settle, then measure once.
+        handler.removeCallbacks(restartScrollsRunnable)
+        handler.postDelayed(restartScrollsRunnable, PRESET_MOVE_MS + PRESET_SETTLE_MS)
+        return true
+    }
+
+    /** The scale the card is drawn at right now — 1 at full size, [MINI_SCALE] otherwise. */
+    private fun presetScale() = if (layoutPreset == LayoutPreset.FULL) 1f else MINI_SCALE
+
+    /**
+     * Positions and scales the card for the current preset.
+     *
+     * Done as a SCALE about a pivot rather than by re-laying-out the card at a smaller size. The
+     * card is a horizontal row whose text column is weight=1, so shrinking its layout bounds does
+     * not shrink it proportionally — it reflows, and at half width the artwork tile alone eats the
+     * row and the text collapses to nothing, which is precisely the bug documented in
+     * [applyCompactState] for PiP. Scaling the composed result keeps every proportion the full-size
+     * card was designed with and simply makes it smaller.
+     *
+     * The pivot is the corner the card should collapse toward, so gravity comes for free: scaling
+     * a MATCH_PARENT view about its top-left corner leaves it occupying the top-left of the frame.
+     */
+    private fun applyPresetTransform(animate: Boolean = false) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        val s = presetScale()
+
+        // PIVOT STAYS CENTRED and the corner is reached by TRANSLATION.
+        //
+        // Moving the pivot to the corner is the obvious way to do this and it cannot be animated:
+        // pivot is not an animatable property, so changing it teleports the view to its new frame of
+        // reference and the scale animation then runs from the wrong place. With a fixed centre
+        // pivot the scaled card is a rect of w*s x h*s centred in the view, and putting it in a
+        // corner is just arithmetic — which interpolates cleanly.
+        val margin = dp(24).toFloat()
+        val dx = (w - w * s) / 2f - margin
+        val dy = (h - h * s) / 2f - margin
+        val tx = when (layoutPreset) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> -dx
+            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> dx
+            else -> 0f
+        }
+        val ty = when (layoutPreset) {
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> -dy
+            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> dy
+            else -> 0f
+        }
+
+        contentGroup.animate().cancel()
+        contentGroup.pivotX = w / 2f
+        contentGroup.pivotY = h / 2f
+        if (!animate) {
+            // A resize has no "before" worth animating from, and the screensaver owns an animator on
+            // this same view — two of them on one property is what made the card jump on every drift.
+            contentGroup.scaleX = s; contentGroup.scaleY = s
+            contentGroup.translationX = tx; contentGroup.translationY = ty
+            contentGroup.alpha = 1f
+            return
+        }
+        contentGroup.animate()
+            .scaleX(s).scaleY(s).translationX(tx).translationY(ty).alpha(1f)
+            .setDuration(PRESET_MOVE_MS)
+            // Overshoot, lightly. The card is being thrown to a corner, and landing dead-still
+            // reads as a jump-cut however long the duration is; a small settle reads as weight.
+            // Tension is well under the 2.0 default — at that value a half-screen card visibly
+            // bounces off the edge of the screen.
+            .setInterpolator(android.view.animation.OvershootInterpolator(0.9f))
+            .start()
+    }
+
+    /**
      * Shows/hides the credits panel. Returns true if the key was consumed — the caller uses this to
      * decide whether Menu did anything, so it can fall through to default handling when the panel
      * isn't applicable.
@@ -576,15 +776,33 @@ class NowPlayingScreen @JvmOverloads constructor(
             text = info.artist ?: ""; visibility = if (info.artist.isNullOrBlank()) View.GONE else View.VISIBLE
         }
         albumView.apply {
-            text = info.album ?: ""; visibility = if (info.album.isNullOrBlank()) View.GONE else View.VISIBLE
+            text = info.album ?: ""
+            // `&& !isCompact` is the whole fix for "the album name is still there in PiP". Senders
+            // push now-playing several times a second, and each push re-ran this line and undid what
+            // setCompact had just hidden -- so the album and the composer/year row came back, took
+            // the space in a 384px window, and pushed the title out of view entirely.
+            visibility = if (info.album.isNullOrBlank() || isCompact) View.GONE else View.VISIBLE
         }
+        // Re-assert compact AFTER the render below has had its say. Senders push now-playing
+        // several times a second and each push rewrites visibility and text; anything compact had
+        // hidden came straight back. Rather than sprinkle `&& !isCompact` through every line and
+        // hope none is ever missed, the state is simply applied again at the end of the render.
         val secondaryParts = listOfNotNull(info.year?.toString(), info.genre?.takeIf { it.isNotBlank() })
         metaSecondaryView.apply {
             text = secondaryParts.joinToString(" · ")
-            visibility = if (secondaryParts.isEmpty()) View.GONE else View.VISIBLE
+            visibility = if (secondaryParts.isEmpty() || isCompact) View.GONE else View.VISIBLE
         }
 
-        Timber.d("NowPlaying senderType=${info.senderDeviceType} name=${info.senderName}")
+        // Logged only when it CHANGES. This render runs on every progress tick — roughly 30 times a
+        // second — and the line is about identity, which changes maybe twice a session. Unthrottled
+        // it emitted ~30 entries/sec into the diagnostic ring buffer, which holds only a few
+        // hundred: every other event, including the whole RTSP handshake, was evicted within
+        // seconds, so `curl :8001` returned nothing but this one line repeated.
+        val senderKey = "${info.senderDeviceType}/${info.senderName}"
+        if (senderKey != lastSenderKey) {
+            lastSenderKey = senderKey
+            Timber.i("NowPlaying senderType=${info.senderDeviceType} name=${info.senderName}")
+        }
         if (info.senderName == "DLNA") {
             pillIcon.setImageResource(R.drawable.ic_cast)
             pillLabel.text = if (info.title != null) "Playing via DLNA" else "Audio via DLNA"
@@ -603,7 +821,20 @@ class NowPlayingScreen @JvmOverloads constructor(
         updateInfoPanel(info)
 
         if (info.title != currentTitle) {
+            val hadTitle = currentTitle != null
             currentTitle = info.title
+            // A track change is the one moment the card has something to say, so let it move. The
+            // text is already updated by the time this runs -- this lifts and fades the NEW text in
+            // rather than animating the old one out, which would need a snapshot to be honest about.
+            // Only when a title is being replaced: on the first track of a session the whole card is
+            // already arriving, and animating it again reads as a stutter.
+            if (hadTitle && !isCompact) {
+                textColumn.animate().cancel()
+                textColumn.alpha = 0f
+                textColumn.translationY = dp(10).toFloat()
+                textColumn.animate().alpha(1f).translationY(0f)
+                    .setDuration(TEXT_SWAP_MS).setInterpolator(DecelerateInterpolator()).start()
+            }
             if (!isPaused) positionBaseEpoch = SystemClock.elapsedRealtime()
             // Seed from the sender's reported position rather than 0. Returning from Home clears
             // currentTitle, so the same track looked like a new one and the elapsed time snapped
@@ -619,11 +850,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         // arriving. Inferring it from progress-push timing gave false pauses on sparse senders and
         // could never detect resume, because a paused sender stops sending the updates the
         // detector was watching.
-        if (isPaused && info.positionSec > lastReportedPositionSec && lastReportedPositionSec >= 0.0) {
-            isPaused = false
-            positionBaseEpoch = SystemClock.elapsedRealtime()
-            positionBaseMs = senderPositionMs(info.positionSec)
-        }
+        // The old progress-timing resume heuristic lived here and is gone. It fought info.paused:
+        // a paused iOS sender keeps pushing progress, and senderPositionMs subtracts a presentation
+        // latency derived from the audio queue, which keeps moving on keepalive packets. So
+        // positionSec crept up, this cleared isPaused and re-anchored the clock, the next push set
+        // it back -- and the bar twitched and the remaining time flicked by a second, forever.
+        // info.paused tracks whether audio packets are actually arriving and is authoritative.
         lastReportedPositionSec = info.positionSec
 
         if (info.durationSec > 0) {
@@ -635,9 +867,15 @@ class NowPlayingScreen @JvmOverloads constructor(
             // 2000ms of slack used to be necessary because position was extrapolated from sparse,
             // whole-second sender pushes. It now comes from the receiver's audio clock four times a
             // second and is exact, so the tolerance only needs to cover local animation jitter.
-            if (Math.abs(newPosMs - expectedMs) > 400L) {
+            // NOT WHILE PAUSED. A paused iOS sender keeps pushing progress, and senderPositionMs
+            // subtracts the presentation latency derived from the audio queue -- which keeps moving
+            // as the queue drains and refills on keepalive packets. Frozen display vs drifting
+            // measurement crosses the 400ms tolerance every couple of seconds, so the bar jumped
+            // back about a second, sat still, and jumped again, forever. Nothing is seeking; a
+            // paused position is simply not a thing that needs resyncing.
+            if (!isPaused && Math.abs(newPosMs - expectedMs) > 400L) {
                 positionBaseMs = newPosMs
-                if (!isPaused) positionBaseEpoch = SystemClock.elapsedRealtime()
+                positionBaseEpoch = SystemClock.elapsedRealtime()
                 seekMultiplier = 1f
             }
         } else if (!info.title.isNullOrBlank() && positionBaseEpoch == 0L && !isPaused) {
@@ -648,6 +886,17 @@ class NowPlayingScreen @JvmOverloads constructor(
         progressBar.visibility   = if (timerRunning && durationMs > 0L) View.VISIBLE else View.GONE
         timeElapsed.visibility   = if (timerRunning) View.VISIBLE else View.GONE
         timeRemaining.visibility = if (timerRunning && durationMs > 0L) View.VISIBLE else View.GONE
+
+        // THE remaining compact glitch was right here. These three lines run on every metadata push
+        // -- several a second -- and two of them had no compact check at all, so the progress bar
+        // and elapsed time reappeared inside the PiP window seconds after setCompact hid them,
+        // shoving the title around as the column re-laid itself out.
+        //
+        // Adding a third `&& !isCompact` would have fixed these three and left the next author to
+        // trip over the same thing. Re-applying the whole compact state after the render is what
+        // actually makes the bug class impossible: the render says what it wants, then compact has
+        // the final word.
+        applyCompactState()
     }
 
     /**
@@ -658,15 +907,78 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun applyArtwork(bytes: ByteArray?) {
         val key = bytes?.contentHashCode()
         if (key == artworkKey && currentArtDrawable != null) return
-        artworkKey = key
 
+        // HOLD THE OUTGOING COVER instead of clearing it the instant art goes away.
+        //
+        // Between tracks a sender drops artwork for a moment and sends the next image shortly after,
+        // and a DLNA lookup takes a second or two to answer. Clearing immediately made the card flash
+        // the grey placeholder in both cases -- a visible stutter that says "we lost it" when nothing
+        // was lost. So an EMPTY update is deferred: if real art arrives inside the grace period the
+        // placeholder is never shown at all, and if none does, the card falls back once, calmly.
+        artworkClear?.let { removeCallbacks(it); artworkClear = null }
+        if ((bytes == null || bytes.isEmpty()) && currentArtDrawable != null) {
+            val pending = Runnable {
+                artworkClear = null
+                artworkKey = null
+                applyArtworkNow(null)
+            }
+            artworkClear = pending
+            postDelayed(pending, ARTWORK_HOLD_MS)
+            return
+        }
+
+        artworkKey = key
+        applyArtworkNow(bytes)
+    }
+
+    /** Pending "no artwork" fallback, cancelled the moment a real image turns up. */
+    private var artworkClear: Runnable? = null
+
+    /** Last logged sender identity, so the line above fires on change rather than on every render. */
+    private var lastSenderKey: String? = null
+
+    /**
+     * Releases the cross-fade once it has played, so the outgoing cover can be collected.
+     * Re-reads [currentArtDrawable] rather than capturing it, so a track change during the fade
+     * lands on the newest art instead of resurrecting the one it interrupted.
+     */
+    private val dropFadeRunnable = Runnable {
+        val current = currentArtDrawable
+        if (current != null && artworkView.drawable is TransitionDrawable) {
+            artworkView.setImageDrawable(current)
+        }
+    }
+
+    /**
+     * Decodes cover art at roughly the size it will be shown at, not at whatever the sender sent.
+     *
+     * Senders push covers at their own resolution -- 600x600 is common and Apple goes to 1400 --
+     * and the tile is 340dp. A 1400x1400 ARGB_8888 bitmap is 7.8 MB held for the length of a
+     * track to fill about a third of that in pixels. inSampleSize only halves, so this lands
+     * within a factor of two of the target and never below it: sharp at the size it is drawn,
+     * without the memory of an image nothing can display.
+     */
+    private fun decodeArtwork(payload: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeByteArray(payload, 0, payload.size, bounds) }
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        val opts = BitmapFactory.Options()
+        if (longest > 0) {
+            var sample = 1
+            while (longest / (sample * 2) >= ARTWORK_TARGET_PX) sample *= 2
+            opts.inSampleSize = sample
+        }
+        return runCatching {
+            BitmapFactory.decodeByteArray(payload, 0, payload.size, opts)
+        }.getOrNull()
+    }
+
+    private fun applyArtworkNow(bytes: ByteArray?) {
         // Senders push a 0-byte "image/none" placeholder between tracks (visible in the RTSP log as
         // `artwork (0B, image/none)`). Treat it as "no art yet" rather than decoding it, so it can't
         // clear real cover art that is about to arrive a few milliseconds later.
         val payload = bytes?.takeIf { it.isNotEmpty() }
-        val bitmap = payload?.let {
-            runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull()
-        }
+        val bitmap = payload?.let { decodeArtwork(it) }
         Timber.d("applyArtwork bytes=${bytes?.size ?: -1} decoded=${bitmap != null} " +
                  "size=${bitmap?.width}x${bitmap?.height}")
         if (payload != null && bitmap == null) {
@@ -703,8 +1015,30 @@ class NowPlayingScreen @JvmOverloads constructor(
             fade.isCrossFadeEnabled = true
             artworkView.setImageDrawable(fade)
             fade.startTransition(ARTWORK_FADE_MS)
+            // AND TAKE IT BACK OFF AGAIN once the fade is over. A TransitionDrawable holds both
+            // layers for as long as it is the ImageView's drawable, and nothing ever replaced it --
+            // so every previous cover stayed reachable for the whole of the next track, and the app
+            // sat on two full-size bitmaps instead of one, forever. Handing the view the new
+            // drawable on its own is what lets the old one go.
+            handler.removeCallbacks(dropFadeRunnable)
+            handler.postDelayed(dropFadeRunnable, ARTWORK_FADE_MS.toLong() + 200L)
+            // A crossfade alone reads as a slideshow. Letting the tile settle in from slightly
+            // under-size gives the new cover a moment of physicality, and it is the same gesture
+            // the text does beside it, so the two land as one event rather than two.
+            artWrapper.animate().cancel()
+            artWrapper.scaleX = ART_SWAP_SCALE
+            artWrapper.scaleY = ART_SWAP_SCALE
+            artWrapper.animate().scaleX(1f).scaleY(1f)
+                .setDuration(ARTWORK_FADE_MS.toLong() + 140L)
+                .setInterpolator(android.view.animation.OvershootInterpolator(1.1f))
+                .start()
         }
         currentArtDrawable = next
+        // A SEPARATE drawable instance, not the same one the tile shows. ImageView.setColorFilter
+        // writes the filter into the Drawable, and Drawables share state until mutated -- so the
+        // backdrop's darkening filter followed the artwork onto the full-size tile and it never came
+        // back to normal brightness after leaving PiP.
+        compactArtBg.setImageDrawable(next?.constantState?.newDrawable()?.mutate() ?: next)
     }
 
     /**
@@ -735,6 +1069,19 @@ class NowPlayingScreen @JvmOverloads constructor(
     fun setBeatPulse(level: Int) {
         dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
     }
+
+    /** What fills the screen behind the card — see [DynamicBackground.setTheme]. */
+    fun setBackdropTheme(theme: BackdropTheme) {
+        if (backdropTheme == theme) return
+        backdropTheme = theme
+        dynamicBg.setTheme(theme)
+        // Re-apply so the album-art backdrop is dropped (or restored) straight away rather than at
+        // the next compact transition, which might be minutes later or never.
+        applyCompactState()
+    }
+
+    private var backdropTheme = BackdropTheme.DYNAMIC
+    private val projectorMode get() = backdropTheme == BackdropTheme.PROJECTOR
 
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {
         screensaverEnabled = enabled
@@ -788,9 +1135,14 @@ class NowPlayingScreen @JvmOverloads constructor(
         handler.removeCallbacks(driftRunnable)
         dynamicBg.animate().alpha(1f).setDuration(WAKE_MS).start()
         pillWrapper.animate().alpha(1f).setDuration(WAKE_MS).start()
-        contentGroup.animate()
-            .alpha(1f).translationX(0f).translationY(0f).scaleX(1f).scaleY(1f)
-            .setDuration(WAKE_MS).setInterpolator(DecelerateInterpolator()).start()
+        // Back to the PRESET, not to "full size, centred". Waking restored scale 1 and translation
+        // 0 unconditionally, so on any MINI_* preset the card silently grew to fill the screen and
+        // slid back to the middle the first time the idle timer fired. The transform is one place
+        // now, so there is no second copy of this to forget.
+        // One animator, not two: a View has a single ViewPropertyAnimator, so starting an alpha
+        // fade here and then calling applyPresetTransform -- which cancels before it builds -- would
+        // throw the fade away and leave the card dimmed. applyPresetTransform restores alpha itself.
+        applyPresetTransform(animate = true)
     }
 
     /**
@@ -843,6 +1195,12 @@ class NowPlayingScreen @JvmOverloads constructor(
      */
     fun clear() {
         cancelScreensaver()
+        // Layout is per-session. Parking the card in a corner is something you do for the thing you
+        // are watching right now; inheriting it silently on the next connect means the next stream
+        // starts in a corner for no reason the user can see.
+        layoutPreset = LayoutPreset.FULL
+        applyCompactState()
+        applyPresetTransform()
         infoPanel.visibility = View.GONE
         pillWrapper.alpha = 1f
         positionBaseEpoch = 0L; positionBaseMs = 0L; durationMs = 0L
@@ -851,6 +1209,20 @@ class NowPlayingScreen @JvmOverloads constructor(
         progressBar.visibility = View.GONE
         timeElapsed.visibility = View.GONE
         timeRemaining.visibility = View.GONE
+        // The bottom-edge bar is no longer PiP-only, so it has to be torn down here as well. Its
+        // ticker keys off durationMs, which this method has just zeroed — leaving the bar on screen
+        // frozen at whatever fraction the last track ended on.
+        compactProgress.setValue(0)
+        compactProgress.visibility = View.GONE
+        handler.removeCallbacks(compactTick)
+        handler.removeCallbacks(restartScrollsRunnable)
+        handler.removeCallbacks(dropFadeRunnable)
+        textColumn.animate().cancel()
+        textColumn.alpha = 1f
+        textColumn.translationY = 0f
+        artWrapper.animate().cancel()
+        artWrapper.scaleX = 1f
+        artWrapper.scaleY = 1f
     }
 
     private fun darken(color: Int, f: Float) = Color.rgb(
@@ -867,6 +1239,54 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        // Text sizes for the PiP-compact swap. See [setCompact].
+        //
+        // FULL_* must match the sizes the views are CONSTRUCTED with, or the first exit from PiP
+        // silently restyles a screen the user never asked to change. Title is built at 36sp.
+        //
+        // COMPACT_* are small because a PiP window is a real window a few hundred pixels wide, not a
+        // scaled-down screenshot of the full one.
+        /** A window narrower than this is a PiP window, not a television. */
+        private const val COMPACT_MAX_WIDTH_DP = 500
+
+        /**
+         * How big a MINI_* preset draws the card, as a fraction of the full layout.
+         *
+         * 0.5 rather than smaller: the card is scaled as a composed bitmap, so the title's text
+         * size shrinks with it, and below about half the artist line stops being readable from a
+         * sofa. The corner presets already leave three quarters of the screen clear at this size.
+         */
+        private const val MINI_SCALE = 0.5f
+
+        /** How long the card takes to fly between layout presets. */
+        private const val PRESET_MOVE_MS = 460L
+
+        /** Track-change text lift. Short -- this fires on every song, so it must not feel ceremonial. */
+        private const val TEXT_SWAP_MS = 340L
+
+        /** How far under-size a new cover starts before settling. Subtle by design. */
+        private const val ART_SWAP_SCALE = 0.94f
+
+        /** Longest edge we keep cover art at. The tile is 340dp; this is comfortably above it. */
+        private const val ARTWORK_TARGET_PX = 640
+
+        /** Artwork tile: full-screen, and the deliberately smaller one the mini presets use. */
+        private const val FULL_ART_DP = 340
+        private const val FULL_ART_GAP_DP = 64
+        private const val MINI_ART_DP = 220
+        private const val MINI_ART_GAP_DP = 36
+
+        /** Slack after the preset move before the marquee is allowed to re-measure. */
+        private const val PRESET_SETTLE_MS = 90L
+
+        /** The PiP progress bar moves imperceptibly, so it does not need the 4Hz treatment. */
+        private const val COMPACT_TICK_MS = 1_000L
+
+        private const val FULL_TITLE_SP = 36f
+        private const val FULL_ARTIST_SP = 22f
+        private const val COMPACT_TITLE_SP = 21f
+        private const val COMPACT_ARTIST_SP = 14f
+
         // Info-panel row labels. These double as the keys of `infoRows`, so they are plain
         // constants rather than string resources — a locale switch must not orphan the map.
         private const val FIELD_TRACK    = "TRACK"
@@ -883,6 +1303,13 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         private const val ARTWORK_FADE_MS = 450
 
+        /**
+         * How long the previous cover stays up after artwork disappears, waiting for a replacement.
+         * Long enough to cover a track change on a sender and an online cover lookup; short enough
+         * that a genuinely art-less track does not look stuck on the wrong image.
+         */
+        private const val ARTWORK_HOLD_MS = 2500L
+
         /** Screensaver default, mirrored by AppSettings.screensaverTimeoutMin. */
         const val DEFAULT_SCREENSAVER_MINUTES = 15
 
@@ -895,9 +1322,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         private const val BREATHE_MS = 7000L
 
         /** Overflow scroll pacing: speed, the pause at each end, and the rest before repeating. */
-        private const val SCROLL_MS_PER_PX = 14f
-        private const val SCROLL_HOLD_MS = 1_500L
-        private const val SCROLL_REST_MS = 4_000L
+        /** Slow enough to read while it moves. Was 14f, which scrolled faster than you could follow. */
+        private const val SCROLL_MS_PER_PX = 30f
+        private const val SCROLL_HOLD_MS = 2_000L
 
         private const val SCREENSAVER_MIN_ALPHA = 0.32f
         private const val SCREENSAVER_SCALE = 0.82f
@@ -912,4 +1339,226 @@ class NowPlayingScreen @JvmOverloads constructor(
             -1f to 1f, -1f to 0f, -1f to -1f, 0f to -1f, 1f to -1f,
         )
     }
+
+    /**
+     * Switches between the full-screen layout and the compact one used inside a PiP window.
+     *
+     * PiP renders the whole Activity scaled down, so without this the user got the entire
+     * now-playing screen shrunk to thumbnail size -- album art, progress bar, elapsed/remaining
+     * times, the info pill and the secondary metadata all fighting for a window a few hundred pixels
+     * wide, with every text size chosen for a television. Legible at 1080p, unreadable at PiP size.
+     *
+     * A PiP window is glanceable, not interactive: the useful content is artwork plus what is
+     * playing. Everything that exists to be read from across a room, or pressed, is hidden and the
+     * remaining text is scaled up relative to the window. The screensaver is suspended too -- a PiP
+     * window dimming itself to a screensaver would be absurd, and the idle timer has no idea the
+     * window shrank.
+     */
+    /**
+     * Switches on the window actually being small, rather than trusting the PiP callback alone.
+     *
+     * The callback fires on the Activity, and every failure of this feature so far has come from
+     * something between that callback and these views -- ordering, a screen that was not the visible
+     * one, a size that had not been applied yet. The window's own width cannot be wrong about
+     * whether it is small, so it is the trigger, and [setCompact] stays idempotent.
+     */
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w <= 0) return
+        val small = w < COMPACT_MAX_WIDTH_DP * resources.displayMetrics.density
+        Logger.i("NowPlaying window ${w}x$h — compact=$small")
+        setCompact(small)
+        // The pivot is in pixels, so it is only meaningful for the size it was computed at.
+        applyPresetTransform()
+        // Every resize, not only the compact transition. A PiP window can be resized by the user
+        // while it stays a PiP window (the log shows 384x216 → 728x410 → 384x216), and setCompact
+        // early-returns on those because compact has not changed -- so the marquee kept a scroll
+        // offset computed for the old width and the title sat parked off its own edge. That is the
+        // title "disappearing" that survived the last two fixes.
+        restartScrolls()
+    }
+
+    /**
+     * Records the compact state and re-applies the layout.
+     *
+     * Split from [applyCompactState] deliberately. The old version did both here AND early-returned
+     * when the flag had not changed, which made compact a one-shot transition: anything that ran
+     * afterwards and touched these views won, permanently. That is the same bug three times over --
+     * the album row reappearing on every metadata push, the title parked off-screen after a PiP
+     * resize, styles from one branch never undone. State changes are rare; re-applying is cheap and
+     * idempotent, so the apply is now something anything can call whenever it might have been
+     * disturbed.
+     */
+    fun setCompact(compact: Boolean) {
+        if (isCompact != compact) {
+            Logger.i("NowPlaying compact → $compact")
+            isCompact = compact
+            // Only on a real transition: the marquee has to recompute against the new width, and
+            // restarting it on every metadata push would make the title jump constantly.
+            restartScrolls()
+        }
+        applyCompactState()
+    }
+
+    /**
+     * Puts every view into the state [isCompact] implies. Safe to call at any time, any number of
+     * times -- both branches of every property are set explicitly, so nothing can be left behind.
+     */
+    private fun applyCompactState() {
+        val compact = isCompact
+        dynamicBg.setLowPower(compact)
+
+        // THIS is what was actually wrong, and no amount of text sizing was ever going to fix it.
+        //
+        // The layout is a horizontal row: a 340dp artwork tile, a 64dp gap, then the text column on
+        // weight=1, inside 72dp of padding. The device log measured the PiP window at 384x216 px --
+        // about 192dp wide. The artwork tile alone is nearly twice that, so it consumed the entire
+        // row and the text column was laid out at ZERO width. Every field was VISIBLE, correctly
+        // styled, and had no space to occupy. That reads exactly like "compact mode does nothing".
+        //
+        // In a window this size the artwork cannot be shown as a tile at all, which is fine: the
+        // dark album-art backdrop is already behind everything and carries the artwork on its own.
+        artWrapper.visibility = if (compact) GONE else VISIBLE
+        // Kept in PiP even in projector mode. Suppressing it did make the thumbnail pure black, but
+        // a PiP window is a thumbnail on someone's TV, not a projected image -- the album cover is
+        // what makes it recognisable at that size, and there is no edge to hide.
+        compactArtBg.visibility = if (compact && currentArtDrawable != null) VISIBLE else GONE
+        // MINI IS NOT JUST "THE SAME CARD, SMALLER".
+        //
+        // The preset transform scales the composed card uniformly, so at MINI_SCALE the 340dp
+        // artwork tile and its 64dp gap still claim the same *fraction* of the row they do at full
+        // size -- over half of it. On a card parked in a corner that is the wrong split: the tile
+        // is already unmistakable at 110dp, and the half-row it leaves is what forces every title
+        // into a scroll. Re-laying the tile smaller for the mini presets hands the difference to
+        // the text column, which is the only part of a parked card anyone is still reading.
+        val mini = !compact && layoutPreset != LayoutPreset.FULL
+        (artWrapper.layoutParams as? LinearLayout.LayoutParams)?.let { lp ->
+            val side = if (mini) dp(MINI_ART_DP) else dp(FULL_ART_DP)
+            val gap = if (mini) dp(MINI_ART_GAP_DP) else dp(FULL_ART_GAP_DP)
+            if (lp.width != side || lp.rightMargin != gap) {
+                lp.width = side; lp.height = side; lp.rightMargin = gap
+                artWrapper.layoutParams = lp
+            }
+        }
+        val pad = if (compact) dp(12) else if (mini) dp(40) else dp(72)
+        val padV = if (compact) dp(8) else if (mini) dp(28) else dp(60)
+        contentGroup.setPadding(pad, padV, pad, padV)
+        contentGroup.gravity = if (compact) android.view.Gravity.CENTER else android.view.Gravity.CENTER_VERTICAL
+        textColumn.gravity =
+            if (compact) android.view.Gravity.CENTER
+            else android.view.Gravity.CENTER_VERTICAL or android.view.Gravity.START
+
+        // Compact shows the song and who made it, and nothing else.
+        //
+        // A MINI_* preset wants exactly the same reduction for a different reason — the card is
+        // being parked out of the way, so the progress bar, the credits line and the "Audio from…"
+        // pill are noise — so both drive the same set. The artwork tile is the one difference: PiP
+        // has no room for it, a mini preset is built around it.
+        val stripped = compact || layoutPreset != LayoutPreset.FULL
+        albumView.visibility = if (stripped) GONE else VISIBLE
+        metaSecondaryView.visibility = if (stripped) GONE else VISIBLE
+        progressBar.visibility = if (stripped) GONE else VISIBLE
+        timeElapsed.visibility = if (stripped) GONE else VISIBLE
+        timeRemaining.visibility = if (stripped) GONE else VISIBLE
+        pillWrapper.visibility = if (stripped) GONE else VISIBLE
+        debugView.visibility = if (compact) GONE else debugView.visibility
+
+        // The info panel is opened by a key press, which cannot happen in PiP -- but it can already
+        // be open when the window shrinks, and it would cover the artwork entirely.
+        if (compact) infoPanel.visibility = GONE
+
+        // SIZES GO DOWN, NOT UP. The previous attempt set 96sp here on the theory that PiP scales the
+        // rendered activity like a thumbnail, so text had to be made larger to survive the shrink.
+        // That theory was wrong. PiP is a real window resize -- the activity is re-laid-out at a few
+        // hundred pixels wide, which is exactly why `configChanges` covers screenSize -- so 96sp text
+        // simply overflowed the window and nothing was visible. Television sizes are too big for a
+        // PiP window, not too small.
+        titleView.textSize = if (compact) COMPACT_TITLE_SP else FULL_TITLE_SP
+        artistView.textSize = if (compact) COMPACT_ARTIST_SP else FULL_ARTIST_SP
+
+        // Long titles already scroll: enableMarquee() set up a custom single-line side-scroll at
+        // construction. The earlier code fought it here, switching on Android's own looping MARQUEE
+        // ellipsize and then trying to undo that on the way out -- which is how the full-size title
+        // ended up centred and wrapping to two lines instead of scrolling. Nothing about the marquee
+        // needs to change for PiP, so this now only touches alignment.
+        titleView.gravity = if (compact) android.view.Gravity.CENTER else android.view.Gravity.START
+        artistView.gravity = titleView.gravity
+
+        // Compact polish: the title carries the whole window, so it goes heavier and tighter, and
+        // the artist steps back rather than competing with it. Restored explicitly on the way out --
+        // a style set only in one branch is the bug that made the title vanish the first time.
+        titleView.letterSpacing = if (compact) -0.01f else -0.02f
+        titleView.setShadowLayer(
+            if (compact) dp(3).toFloat() else 0f, 0f, dp(1).toFloat(), Color.argb(180, 0, 0, 0))
+        artistView.setTextColor(Color.argb(if (compact) 200 else 180, 255, 255, 255))
+
+        // The dynamic background samples audio energy and repaints continuously. In a thumbnail it
+        // is invisible and still costs the same CPU, which is exactly the wrong trade on a Fire TV
+        // stick that is also decoding audio. Artwork alone carries the look at this size.
+        // GONE, not just idle. setEnergy(0f) stopped it REACTING but it kept animating: three
+        // infinite ValueAnimators driving an onDraw that repaints a full-window gradient every
+        // frame. In PiP it is completely hidden behind the artwork backdrop, so all of that work
+        // was invisible by definition -- and it was competing with the audio writer on a stick that
+        // is also decoding ALAC. The log shows what that cost: three "backlog resync — dropped 64
+        // frames" inside two seconds of entering PiP, which is the audio cutting out.
+        dynamicBg.setEnergy(0f)
+        dynamicBg.visibility = if (compact) GONE else VISIBLE
+
+        // "It ONLY shows the album art" is the screensaver, not the layout.
+        //
+        // The backdrop is a child of the root frame, but the title and artist live inside
+        // contentGroup -- and the screensaver dims contentGroup to 32% alpha and scales it to 82%.
+        // Restoring that is the job of wakeFromScreensaver(), which early-returns unless it believes
+        // the screensaver is active, and whose restore is an ANIMATION that a window resize can
+        // interrupt. Either path leaves a nearly invisible text column over a perfectly visible
+        // backdrop, which is exactly what a PiP window showing only artwork looks like.
+        //
+        // Set directly rather than animated, and unconditionally rather than through the state
+        // machine: in a PiP window there is no screensaver, so full opacity is simply the truth.
+        if (compact) {
+            contentGroup.animate().cancel()
+            contentGroup.alpha = 1f
+            // A PiP window is already as small as it gets; a mini preset on top of that would
+            // shrink the card to a quarter of a thumbnail. Full scale is right here whatever the
+            // preset says — [applyPresetTransform] restores it when the window grows back.
+            contentGroup.scaleX = 1f
+            contentGroup.scaleY = 1f
+            contentGroup.translationX = 0f
+            contentGroup.translationY = 0f
+            // The track-change lift is skipped in PiP, so a resize landing mid-animation would
+            // otherwise strand the text column part-faded and offset for the rest of the session.
+            textColumn.animate().cancel()
+            textColumn.alpha = 1f
+            textColumn.translationY = 0f
+        }
+
+        // A Mac mirroring session sends no now-playing metadata at all -- the log shows artwork
+        // "0B, image/none" and not one now-playing push -- so the title is whatever it was, which on
+        // a fresh session is nothing. At full size the artwork and pill still say something is
+        // playing; in compact those are gone and the window renders completely empty.
+        if (compact && titleView.text.isNullOrBlank()) {
+            titleView.text = context.getString(R.string.now_playing_audio)
+        }
+
+        // PiP ONLY. Briefly this was shown in every layout so the mini presets would have something
+        // tracking position; at full size a hairline spanning the whole screen reads as a stray UI
+        // artifact rather than as part of the card, so it is back to the window that has no room for
+        // the inline bar. The mini presets simply go without.
+        //
+        // Also gated on a duration: a Mac mirroring session never sends one, and an empty bar pinned
+        // to the bottom edge is worse than no bar at all.
+        compactProgress.visibility = if (compact && durationMs > 0L) VISIBLE else GONE
+        handler.removeCallbacks(compactTick)
+        if (compact && durationMs > 0L) handler.post(compactTick)
+
+        // The 4Hz position ticker formats two timestamps and repaints the progress bar. All three of
+        // those are GONE in compact, so it was pure main-thread work for something nobody can see.
+        handler.removeCallbacks(positionTick)
+        if (!compact) handler.post(positionTick)
+
+        if (compact) cancelScreensaver() else notifyActivity()
+    }
+
+    private var isCompact = false
+
 }

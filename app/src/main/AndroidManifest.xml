@@ -24,11 +24,35 @@
 
     <!-- Network permissions — local LAN only, no internet required -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+        REQUEST_INSTALL_PACKAGES — lets the "Check for updates" row hand a downloaded APK to the
+        system installer. It does NOT install anything: the user still confirms on Android's own
+        installer screen. A Fire TV has no usable browser, so linking out to a release page would be
+        a dead end.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <!-- Grants the background-activity-launch exemption so PhairPlayService can open
          MainActivity directly when a sender connects. Without this, Android 10+ blocks the
          start and auto-open silently degrades to a heads-up notification. -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!--
+         Package visibility (Android 11+). Without this, queryIntentActivities returns an EMPTY list
+         and getLeanbackLaunchIntentForPackage returns null, so the HomeKit app-shortcut picker would
+         show nothing and the shortcuts would never launch. Scoped to launchable activities only —
+         we ask which apps the user can open, not what is installed.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -70,9 +94,15 @@
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
+    <!--
+        Leanback is declared but NOT required. Marking it required makes every non-TV device —
+        phones and tablets included — ineligible: the app is filtered out of their launchers even
+        after a successful adb install. The app itself only needs a screen and a network, so the
+        TV launcher still picks it up via LEANBACK_LAUNCHER below while tablets can run it too.
+    -->
     <uses-feature
         android:name="android.software.leanback"
-        android:required="true" />
+        android:required="false" />
     <uses-feature
         android:name="android.hardware.wifi"
         android:required="false" />
@@ -117,6 +147,8 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+                <!-- The icon on phones/tablets. TV launchers ignore this and use LEANBACK_LAUNCHER. -->
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
@@ -148,6 +180,50 @@
             </intent-filter>
         </receiver>
 
+        <!--
+          Optional, and never activated automatically. HomeKit's "off" uses lockNow() to blank the
+          display, which needs an active device-admin component; the policy file requests force-lock
+          only. If the user declines, HomeKit "off" just ends the session.
+        -->
+        <!--
+            System-wide remote control for the HomeKit D-pad. Off until the user (or adb) enables
+            it; PhairPlay works without it, just confined to its own window.
+        -->
+        <service
+            android:name=".service.PhairPlayAccessibilityService"
+            android:exported="true"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service" />
+        </service>
+
+        <receiver
+            android:name=".service.PhairPlayDeviceAdmin"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+
+        <!-- Serves the downloaded update APK to the system installer. Cache dir only. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.updates"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/update_paths" />
+        </provider>
     </application>
 
 </manifest>

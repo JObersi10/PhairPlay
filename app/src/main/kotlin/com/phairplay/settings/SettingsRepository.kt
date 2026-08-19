@@ -111,6 +111,7 @@ class SettingsRepository(private val context: Context) {
         airPlayEnabled     = this[Keys.AIRPLAY_ENABLED]         ?: true,
         miracastEnabled    = this[Keys.MIRACAST_ENABLED]        ?: true,
         dlnaEnabled        = this[Keys.DLNA_ENABLED]            ?: true,
+        homeKitEnabled     = this[Keys.HOMEKIT_ENABLED]         ?: false,
         airPlayPinAuthEnabled = this[Keys.AIRPLAY_PIN_AUTH]     ?: false,
         startOnBoot        = this[Keys.START_ON_BOOT]           ?: false,
         showDebugOverlay   = this[Keys.SHOW_DEBUG_OVERLAY]      ?: false,
@@ -123,10 +124,14 @@ class SettingsRepository(private val context: Context) {
                 else -> BackAction.STOP_STREAM
             },
         audioDelayMs       = this[Keys.AUDIO_DELAY_MS]           ?: 0,
+        audioBufferMs      = this[Keys.AUDIO_BUFFER_MS]          ?: AppSettings.DEFAULT_AUDIO_BUFFER_MS,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
         beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
+        // Stored as one delimited string rather than a DataStore string set, because slot ORDER is
+        // the identity here — slot 2 is a different HomeKit input from slot 1 — and a set has none.
+        inputApps          = this[Keys.INPUT_APPS]?.split('\u0000')?.filter { it.isNotBlank() } ?: emptyList(),
         mirrorAudioEnabled = this[Keys.MIRROR_AUDIO_ENABLED]    ?: true,
         screensaverEnabled = this[Keys.SCREENSAVER_ENABLED]     ?: true,
         screensaverTimeoutMin = this[Keys.SCREENSAVER_TIMEOUT]  ?: 15,
@@ -134,7 +139,18 @@ class SettingsRepository(private val context: Context) {
         onboardingComplete = this[Keys.ONBOARDING_COMPLETE] ?: false,
         lastSenderName = this[Keys.LAST_SENDER_NAME] ?: "",
         lastSenderAtMs = this[Keys.LAST_SENDER_AT] ?: 0L,
-        rememberPinPairing = this[Keys.REMEMBER_PIN_PAIRING] ?: true
+        rememberPinPairing = this[Keys.REMEMBER_PIN_PAIRING] ?: true,
+        // remoteEnabled was declared in AppSettings but never appeared here or in
+        // fromAppSettings, so the Settings toggle wrote a value that was thrown away and the
+        // field always read its default. Persisted now.
+        remoteEnabled      = this[Keys.REMOTE_ENABLED]          ?: false,
+        // Migration: BACKDROP_THEME replaced the projectorMode boolean, which could only say
+        // "orbs on black" or "not that" and had no way to express "nothing at all".
+        backdropTheme      = this[Keys.BACKDROP_THEME]?.let { BackdropTheme.fromName(it) }
+            ?: if (this[Keys.PROJECTOR_MODE] == true) BackdropTheme.PROJECTOR
+               else BackdropTheme.DYNAMIC,
+        artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
+        streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
     /**
@@ -146,15 +162,18 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AIRPLAY_ENABLED]      = settings.airPlayEnabled
         this[Keys.MIRACAST_ENABLED]     = settings.miracastEnabled
         this[Keys.DLNA_ENABLED]         = settings.dlnaEnabled
+        this[Keys.HOMEKIT_ENABLED]      = settings.homeKitEnabled
         this[Keys.AIRPLAY_PIN_AUTH]     = settings.airPlayPinAuthEnabled
         this[Keys.START_ON_BOOT]        = settings.startOnBoot
         this[Keys.SHOW_DEBUG_OVERLAY]   = settings.showDebugOverlay
         this[Keys.BACK_ACTION]          = settings.backAction.name
         this[Keys.AUDIO_DELAY_MS]       = settings.audioDelayMs
+        this[Keys.AUDIO_BUFFER_MS]      = settings.audioBufferMs
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
         this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
+        this[Keys.INPUT_APPS] = settings.inputApps.joinToString("\u0000")
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
         this[Keys.SCREENSAVER_ENABLED]  = settings.screensaverEnabled
         this[Keys.SCREENSAVER_TIMEOUT]  = settings.screensaverTimeoutMin
@@ -163,6 +182,10 @@ class SettingsRepository(private val context: Context) {
         this[Keys.LAST_SENDER_NAME]     = settings.lastSenderName
         this[Keys.LAST_SENDER_AT]       = settings.lastSenderAtMs
         this[Keys.REMEMBER_PIN_PAIRING] = settings.rememberPinPairing
+        this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
+        this[Keys.BACKDROP_THEME]       = settings.backdropTheme.name
+        this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
+        this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
     /**
@@ -176,18 +199,27 @@ class SettingsRepository(private val context: Context) {
         val AIRPLAY_ENABLED     = booleanPreferencesKey("airplay_enabled")
         val MIRACAST_ENABLED    = booleanPreferencesKey("miracast_enabled")
         val DLNA_ENABLED        = booleanPreferencesKey("dlna_enabled")
+        val HOMEKIT_ENABLED     = booleanPreferencesKey("homekit_enabled")
         val AIRPLAY_PIN_AUTH    = booleanPreferencesKey("airplay_pin_auth")
         val START_ON_BOOT       = booleanPreferencesKey("start_on_boot")
         val SHOW_DEBUG_OVERLAY  = booleanPreferencesKey("show_debug_overlay")
         // Legacy, read-only: superseded by BACK_ACTION but still consulted when migrating.
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
+        val REMOTE_ENABLED      = booleanPreferencesKey("remote_enabled")
+        /** Legacy, read-only: superseded by BACKDROP_THEME but still consulted when migrating. */
+        val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
+        val BACKDROP_THEME      = stringPreferencesKey("backdrop_theme")
+        val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
+        val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
+        val AUDIO_BUFFER_MS     = intPreferencesKey("audio_buffer_ms")
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
         val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
+        val INPUT_APPS = stringPreferencesKey("input_apps")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")
         val SCREENSAVER_ENABLED = booleanPreferencesKey("screensaver_enabled")
         val SCREENSAVER_TIMEOUT = intPreferencesKey("screensaver_timeout_min")

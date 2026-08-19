@@ -5,14 +5,40 @@ Fire TV receiver for AirPlay 2, Miracast and DLNA. Views are plain Android
 
 ## Build
 
+Build **from the checkout you are editing** — `~/Documents/Claude/Projects/Fire AirPlay`:
+
 ```bash
-JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
-/Volumes/SABRENT/PhairPlay/gradlew -p /Volumes/SABRENT/PhairPlay app:assembleFiretvDebug
+cd ~/Documents/Claude/Projects/"Fire AirPlay" && \
+JAVA_HOME="/Volumes/SABRENT/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
+ANDROID_HOME="/Volumes/SABRENT/Applications/AndroidSDK" \
+./gradlew :app:assembleFiretvDebug
 ```
 
-**Always the `firetv` flavor. Never `googletv`.**
+**`/Volumes/SABRENT/PhairPlay` is a stale fork, not the live tree.** This file used to
+say to build there. It is a separate git repo whose last commit is from early August;
+the project moved to the MacBook and that copy was left behind. Building it succeeds,
+reports `BUILD SUCCESSFUL`, and produces an APK without any of your changes in it —
+there is no error anywhere to notice. Only the toolchain still lives on SABRENT.
 
-APK: `app/build/outputs/apk/firetv/debug/app-firetv-debug.apk`
+There is **no system JDK and no system Android SDK** — both live on the SABRENT
+drive, along with `adb` (`$ANDROID_HOME/platform-tools/adb`). Without those two
+environment variables the wrapper fails with "JAVA_HOME is set to an invalid
+directory".
+
+**`firetv` for the Fire TV** (minSdk 25). Use `googletv` (minSdk 29) *only* for a
+phone or tablet — installing it on the Fire TV fails with `INSTALL_FAILED_OLDER_SDK`,
+and the reverse leaves a TV build on a tablet. They are separate application IDs
+(`com.phairplay.firetv` / `com.phairplay.googletv`) and can coexist.
+
+Never pipe a Gradle run through `tail`: it buffers everything until exit, so a
+build that is working looks identically dead to one that is hung. Redirect to a
+file instead.
+
+APK: `/Volumes/SABRENT/phairplay-build/app/outputs/apk/firetv/debug/app-firetv-debug.apk`
+
+Build output is redirected off the internal disk by `layout.buildDirectory` in the root
+`build.gradle.kts`, so there is **no `app/build/outputs`** in the tree and the in-repo
+path that used to be documented here simply does not exist.
 
 ### ⚠️ Verify the native library before every install
 
@@ -26,7 +52,7 @@ exFAT has no journal, so nothing detects the mismatch. Only native rebuilds are
 affected — Kotlin-only changes never invoke the linker.
 
 ```bash
-unzip -p app/build/outputs/apk/firetv/debug/app-firetv-debug.apk \
+unzip -p /Volumes/SABRENT/phairplay-build/app/outputs/apk/firetv/debug/app-firetv-debug.apk \
   lib/armeabi-v7a/libalac.so | head -c 4 | xxd -p   # must be 7f454c46
 ```
 
@@ -38,7 +64,7 @@ permanent, not a workaround to remove later.
 
 ## Device
 
-- Fire TV at `192.168.1.246:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
+- Fire TV at `192.168.0.11:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
 - App ID `com.phairplay.firetv`
 - The SABRENT drive must be mounted first
 - Install with `adb install -r`. **Do not** `am start` afterwards — that is what
@@ -48,7 +74,7 @@ permanent, not a workaround to remove later.
 
 ## Diagnostics
 
-`curl -s http://192.168.1.246:8001/` — full dump. `:8002` — streaming tail.
+`curl -s http://192.168.0.11:8001/` — full dump. `:8002` — streaming tail.
 
 The buffer only holds events since the app last started, and it is small. To
 capture something, reproduce **first**, then curl. An empty `grep` usually means
@@ -71,6 +97,13 @@ the event never happened, not that the server is broken.
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
+`docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app
+GitHub-Releases updater — read it before touching that code, and before publishing a release:
+three of its four bugs were silent, and one printed a log line that lied. Projector mode, the band/tempo
+analysis and the Now Playing card are written up for
+reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
+constants that only look arbitrary until you have shipped the wrong one.
+
 Google Cast was removed entirely. Port 8009 is permanently held by
 `com.amazon.cast.sink`, and a receiver must answer `DeviceAuthMessage` with a
 Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it.
@@ -80,24 +113,137 @@ Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it
 | Protocol | Port | Status |
 |----------|------|--------|
 | AirPlay RTSP + audio | 7000 | Working — ALAC and AAC |
-| AirPlay screen mirror | — | **Freezes:** see below |
+| AirPlay screen mirror | — | Working (iPhone + macOS) — see "cold first connect" below |
 | Miracast | 7236 | Advertising; needs `ACCESS_FINE_LOCATION` granted at runtime on API < 33 |
 | DLNA/UPnP MediaRenderer | 8200 | Working, including GENA eventing |
 
-## Open bug — mirroring freeze (iOS 26.1)
+## Open bugs
 
-The only substantive bug left. One frame decodes, then every subsequent payload
-arrives as **type 5** (~372 B P-frames and ~25 KB I-frames), gets dropped, and the
-sender resets after ~38 s: `in=300 dropped=0 (0%) 0fps`. The SPS also parses as
-garbage (`32x66912`, `profile=0`).
+### Cold first connect shows nothing (mirroring)
 
-`MirrorStreamServer` logs the first 12 unknown payloads as hex. To capture: mirror
-**first**, then `curl -s http://192.168.1.246:8001/ | grep UNHANDLED`.
+Mirroring works, but the **first** attempt after the app has been cold-started
+often stays black until the user disconnects and reconnects. Chain:
 
-Do **not** feed an unknown payload type through `cipher.update()` to "see what
-happens" — that advances the AES-CTR keystream and corrupts every later frame.
+1. A `SurfaceView` has no `Surface` until it is visible.
+2. The overlay is made visible in response to `CONNECTED`.
+3. By then the sender has already sent the single IDR it will emit for the next
+   several seconds, so `MirrorStreamServer` parks on `awaitingKeyframe`.
+4. The reconnect works because the Activity is warm and the Surface already exists.
+
+Two attempts so far. Blocking the mirror `SETUP` reply until the Surface appeared
+**did not work and was reverted** — the Surface cannot exist at that point by
+construction, so the wait always ran its full timeout and added that delay to the
+sender's round trip (`Connect timing: RECORD +3380ms`). The current attempt is
+`PhairPlayService.setSurfacePreparer` → `MainActivity.prepareVideoSurface()`,
+called from `onSenderApproaching` when the control socket opens, which puts the
+black SurfaceView up before anyone knows the session type. **Unverified.**
+
+If that is still not early enough, the next honest option is asking the sender for
+a keyframe rather than racing it.
+
+### The event channel is encrypted and we treat it as plaintext
+
+`AirPlay Documentation.html` (project folder, not the repo) is explicit: after SETUP the sender
+connects to the event port and **enables encryption**. Keys come from the pair-verify secret —
+salt `Events-Salt`, info `Events-Write-Encryption-Key` (output) and `Events-Read-Encryption-Key`
+(input), with the two reversed on the sender side. The channel is logically *receiver → sender*
+even though the sender opens the socket.
+
+Our handler reads raw bytes off that socket and replies in cleartext RTSP, so it has never parsed
+anything real. The doc also says the receiver is expected to `POST /command` with a
+`updateInfo` plist over this channel once RECORD completes, which we never send.
+
+### Remote play/pause/skip — SOLVED, and it was the advertised version all along
+
+**Fixed 2026-08-18.** Working on iOS 26.1:
+
+```
+DACP configured: id=40BDA1669DF38307 — discovering iTunes_Ctrl_40BDA1669DF38307
+DACP resolved: 192.168.0.6:54394
+GET /info granted remote authority: DACP-ID=40BDA1669DF38307 (srcvers 350.0)
+DACP playpause → HTTP 200
+```
+
+The mechanism was never exotic. Remote control **is** DACP, exactly as pyatv, UxPlay,
+openairplay and every other reference says, and it requires the sender to send `DACP-ID`
++ `Active-Remote` so the receiver can find the sender's `_dacp._tcp` service. Modern iOS
+withholds both unless the receiver advertises an OLD ENOUGH `srcvers` — the
+shairport-sync #2014 workaround.
+
+That workaround had been applied to `_raop._tcp` (350.0) and appeared not to work.
+**It was only half-applied**: `_airplay._tcp` was still advertising `377.40.00`, a current
+Apple TV. The sender reads both services, saw the modern generation on one of them, and
+withheld remote authority. Aligning both to `DACP_CAPABLE` in `AirPlayVersion.kt` is the
+entire fix.
+
+The confusing part was that our own log line prints the srcvers we ADVERTISE, so
+`WITHOUT DACP-ID — sender withheld remote authority (srcvers 350.0)` read as "the
+workaround is applied and ineffective" when it in fact only described one of two records.
+
+**Cost:** `ADVERTISED_AIRPLAY` is deliberately a lie about our generation, so any AirPlay 2
+feature a sender gates on a newer version is off the table. Mirroring and audio are
+unaffected in testing. One-line revert to `APPLE_TV_CURRENT` if something turns up.
+
+**The MediaRemote/MRP work was a dead end and is still disabled** (`MRP_SEND_ENABLED =
+false` in `AirPlayReceiver`). Its two payload key names were invented and appear in no
+public implementation. Do not revive it — DACP is the answer and it works. External
+references, and which are already-checked dead ends, are in `docs/PROTOCOL_RESOURCES.md`.
+
+### macOS audio backlog churn
+
+`Audio: backlog resync — dropped N frames` fires ~12 times in 3 seconds on Mac
+system audio. The Mac delivers faster than realtime and the queue is trimmed
+repeatedly. Audible as the "laggy and weird" playback.
+
+### FairPlay v2 (RAOP audio) key derivation
+
+`ALACDecoder.Decode failed: -50`, "decoded only 4/24 frames" — silence from the
+macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
 
 ## Hard-won details
+
+- **Ending a session must make the receiver DISAPPEAR, not just pause the sender.**
+  Back used to send DACP pause and close the RTSP socket. That stops the audio and
+  leaves the phone SELECTED on this output, paused — the log reads as a clean teardown
+  (RTSP closed, media released, mDNS re-advertised) while the iPad still shows itself
+  connected. DACP is a transport protocol; it has no "deselect output". What makes iOS
+  let go is the service going away, so `onStreamingStopped` withdraws mDNS and holds it
+  withdrawn for `KICK_WINDOW_MS` on a user-initiated end.
+  **The first attempt got the order backwards** — it delayed and *then* called
+  `restart()`, but the withdrawal happens inside `restart()`, so the receiver stayed
+  advertised for the whole hold and vanished only for the ~650ms the restart itself
+  takes. `Holding mDNS withdrawn for 3992ms` at 01:50:57 and `Stopping mDNS
+  advertising` at 01:51:01 in the same log is what that looks like.
+- **Store suffixes break MusicBrainz lookups.** Apple reports singles as
+  `"Bluewave - Single"`, which is how the *store* lists it, not how MusicBrainz
+  catalogues the release — so the fielded query matched nothing. In the log that is
+  indistinguishable from the album not being in the database, and it is why the cover
+  lookup appeared to work "about a quarter of the time": it failed on exactly the
+  singles and EPs. `CoverArtFinder.cleanRelease` strips them, and the search retries
+  without the artist term before giving up.
+
+
+- **`setText(resId)` does not format.** `protocol_detail_connected` is
+  `"Streaming from %1$s"`; passed to `setText(resId)` the card literally displayed
+  the placeholder. Use `getString(resId, arg)`. Anything with a `%` needs an arg
+  and a no-arg fallback for when the name is not known yet.
+- **iOS needs `pk` in the mDNS TXT record.** Without the Ed25519 public key,
+  iPhones and iPads leave the receiver out of the AirPlay picker entirely while
+  macOS connects happily — which reads as a network problem and is not one.
+  Verify what is actually on the wire with `dns-sd -Z _airplay._tcp`, and force-stop
+  the app first: an `adb install -r` restarts the process but the old record can
+  still be cached.
+- **A bodyless 200 is not the same as an empty plist.** Answering
+  `POST /command` with `PlistCodec.encode(emptyMap())` made iOS abandon mirroring
+  silently after `RECORD`; replying with no body at all, the way an Apple TV does,
+  is what finally made the `streams` SETUP arrive.
+- **`leanback` marked `required="true"` filters the app off every non-TV device**,
+  even after a successful `adb install`. It is declared `required="false"` with both
+  `LEANBACK_LAUNCHER` and `LAUNCHER` categories so tablets get an icon too.
+- **A wedged Gradle daemon looks exactly like a slow build.** One sat at 230–312%
+  CPU for three hours and silently blocked every later invocation; `pkill -f
+  GradleDaemon` did not take, `kill -9 <pid>` did. Check `ps aux | grep GradleDaemon`
+  and its accumulated CPU time before believing a build is merely slow.
 
 - **Pause = empty packets, not absent ones.** A paused iOS sender keeps transmitting at the full
   ~128 packets/sec with its RTP clock still advancing in real time; the packets are just 44 bytes

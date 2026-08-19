@@ -149,12 +149,39 @@ class StreamingScreen @JvmOverloads constructor(
             if (videoRatio > containerRatio) cw to (cw / videoRatio).toInt()   // fit width, bars top/bottom
             else (ch * videoRatio).toInt() to ch                              // fit height, bars left/right
         }
-        if (targetW == lastSurfaceW && targetH == lastSurfaceH) return
+        // The container dimensions are part of the cache key, not just the computed size.
+        // Leaving PiP changes the container from a thumbnail to full screen, and the old key --
+        // computed size alone -- could come back identical (a 16:9 video in a 16:9 window scales to
+        // the same numbers relative to a stale container read). The early return then skipped the
+        // whole apply, INCLUDING the gravity, so the surface kept whatever position the PiP layout
+        // had left it in and the video sat off-centre until the stream stopped and reset it.
+        if (targetW == lastSurfaceW && targetH == lastSurfaceH &&
+            cw == lastContainerW && ch == lastContainerH
+        ) return
         lastSurfaceW = targetW
         lastSurfaceH = targetH
+        lastContainerW = cw
+        lastContainerH = ch
         surfaceView.layoutParams = (surfaceView.layoutParams as LayoutParams).apply {
             width = targetW; height = targetH; gravity = Gravity.CENTER
         }
+    }
+
+    private var lastContainerW = -1
+    private var lastContainerH = -1
+
+    /**
+     * Forces the next aspect-fit pass to re-apply, whatever it computes.
+     *
+     * Called on a PiP transition: the container is resized by the system around the same moment,
+     * and a pass that runs against the old dimensions would otherwise cache a result the new layout
+     * never revisits.
+     */
+    fun invalidateAspectFit() {
+        lastSurfaceW = -1
+        lastSurfaceH = -1
+        lastContainerW = -1
+        lastContainerH = -1
     }
 
     override fun onAttachedToWindow() {

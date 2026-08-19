@@ -310,13 +310,14 @@ class VideoDecoder(private val outputSurface: Surface) {
          *
          * Exposed as `internal` for unit testing without an Android runtime.
          *
-         * @param sps The raw SPS NAL unit bytes (first byte is the NAL type, 0x67).
+         * @param sps The SPS NAL unit bytes, with or without a leading Annex-B start code.
          * @return (width, height) in pixels, or null if parsing fails.
          */
         internal fun parseSpsResolution(sps: ByteArray): Pair<Int, Int>? {
             try {
                 if (sps.size < 4) return null
-                val reader = SpsBitReader(sps, startOffset = 1)  // skip NAL type byte (0x67)
+                val rbsp = spsToRbsp(sps) ?: return null
+                val reader = SpsBitReader(rbsp, startOffset = 0)
 
                 val profileIdc = reader.readBits(8)
                 reader.readBits(8)   // constraint flags + 2 reserved zeros
@@ -421,6 +422,49 @@ class VideoDecoder(private val outputSurface: Surface) {
          * @param data        The raw SPS byte array (including NAL type header).
          * @param startOffset Byte offset to start reading from (typically 1 to skip NAL type).
          */
+        /**
+         * Strips an SPS NAL down to the RBSP payload the bit reader expects: drops any Annex-B
+         * start code, drops the NAL header byte, and removes emulation-prevention bytes.
+         *
+         * Callers hand us the NAL in whichever shape they already have — MirrorStreamServer
+         * passes `startCode + sps` because that is what MediaCodec's csd-0 wants. Assuming the
+         * payload began at a fixed offset made the parser read the start code as profile_idc and
+         * report nonsense (2560x1440 sessions came out as 32x83296), so it fell back to the hint
+         * on every single connection. Detect the start code instead of assuming it away.
+         *
+         * Emulation prevention: an encoder inserts a 0x03 after any 00 00 that would otherwise
+         * look like a start code. Those bytes are not part of the syntax and must come out before
+         * any bit is read, or every field past the first one is shifted.
+         */
+        private fun spsToRbsp(sps: ByteArray): ByteArray? {
+            var i = 0
+            if (sps.size >= 4 && sps[0] == 0.toByte() && sps[1] == 0.toByte()) {
+                i = when {
+                    sps[2] == 1.toByte() -> 3
+                    sps[2] == 0.toByte() && sps[3] == 1.toByte() -> 4
+                    else -> 0
+                }
+            }
+            if (i >= sps.size) return null
+            // The NAL header byte itself (0x67) carries no SPS syntax — skip it too.
+            if ((sps[i].toInt() and 0x1F) == 7) i++
+
+            val out = ByteArray(sps.size - i)
+            var n = 0
+            var zeros = 0
+            while (i < sps.size) {
+                val b = sps[i]
+                if (zeros >= 2 && b == 3.toByte()) {
+                    zeros = 0   // emulation-prevention byte: drop it, do not emit
+                } else {
+                    out[n++] = b
+                    zeros = if (b == 0.toByte()) zeros + 1 else 0
+                }
+                i++
+            }
+            return if (n < 4) null else out.copyOf(n)
+        }
+
         class SpsBitReader(private val data: ByteArray, startOffset: Int) {
             private var bytePos = startOffset
             private var bitPos  = 7  // MSB first (bit 7 = most significant)

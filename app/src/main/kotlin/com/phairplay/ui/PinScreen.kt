@@ -49,9 +49,18 @@ class PinScreen @JvmOverloads constructor(
             gravity = Gravity.CENTER
             setPadding(0, dp(24), 0, 0)
         }
+        // The pairing overlay covers every other screen, so the way out has to be on it.
+        val cancelHint = TextView(context).apply {
+            text = context.getString(R.string.pairing_pin_cancel_hint)
+            setTextColor(color(R.color.text_tertiary))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            gravity = Gravity.CENTER
+            setPadding(0, dp(32), 0, 0)
+        }
         column.addView(label)
         column.addView(pinView)
         column.addView(hint)
+        column.addView(cancelHint)
         addView(column, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.CENTER
         })

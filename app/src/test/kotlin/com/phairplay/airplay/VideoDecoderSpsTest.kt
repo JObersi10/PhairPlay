@@ -165,6 +165,46 @@ class VideoDecoderSpsTest {
         assertEquals(Pair(1280, 1440), VideoDecoder.parseSpsResolution(sps))
     }
 
+    // ─── Real-world NAL framing ──────────────────────────────────────────────
+    //
+    // MirrorStreamServer hands the decoder `startCode + sps` (that is what MediaCodec's csd-0
+    // expects), so the parser must cope with Annex-B framing. It previously assumed the payload
+    // always began at byte 1 and read the start code as profile_idc, which is why every real
+    // mirroring session logged an implausible size and silently fell back to the hint.
+
+    @Test
+    fun `parseSpsResolution accepts a 4-byte Annex-B start code`() {
+        val sps = buildBaselineSps(profileIdc = 66, levelIdc = 31,
+                                   widthInMbs = 79, heightInMapUnits = 44)
+        val framed = byteArrayOf(0x00, 0x00, 0x00, 0x01) + sps
+        assertEquals(Pair(1280, 720), VideoDecoder.parseSpsResolution(framed))
+    }
+
+    @Test
+    fun `parseSpsResolution accepts a 3-byte Annex-B start code`() {
+        val sps = buildBaselineSps(profileIdc = 77, levelIdc = 40,
+                                   widthInMbs = 119, heightInMapUnits = 67)
+        val framed = byteArrayOf(0x00, 0x00, 0x01) + sps
+        assertEquals(Pair(1920, 1088), VideoDecoder.parseSpsResolution(framed))
+    }
+
+    @Test
+    fun `parseSpsResolution strips emulation-prevention bytes`() {
+        // Encoders insert 0x03 after any 00 00 in the payload so it cannot be mistaken for a
+        // start code. It carries no syntax: leaving it in shifts every field that follows.
+        val sps = buildBaselineSps(profileIdc = 66, levelIdc = 31,
+                                   widthInMbs = 79, heightInMapUnits = 44)
+        val escaped = ArrayList<Byte>(sps.size + 4)
+        var zeros = 0
+        for (b in sps) {
+            if (zeros >= 2) { escaped.add(0x03); zeros = 0 }
+            escaped.add(b)
+            zeros = if (b == 0.toByte()) zeros + 1 else 0
+        }
+        val framed = byteArrayOf(0x00, 0x00, 0x00, 0x01) + escaped.toByteArray()
+        assertEquals(Pair(1280, 720), VideoDecoder.parseSpsResolution(framed))
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     /**

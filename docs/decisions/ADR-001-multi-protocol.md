@@ -1,7 +1,16 @@
 # ADR-001: Multi-Protocol Support (AirPlay + Miracast + Cast)
 
 **Date:** 2026-03-23
-**Status:** Accepted
+**Status:** Accepted — superseded in part
+
+> **Superseded in part.** Google Cast was dropped: port 8009 is permanently held by
+> `com.amazon.cast.sink` on Fire TV, and a receiver must answer Google's `DeviceAuthMessage` with a
+> certificate chain signed by a Google CA that an open-source project cannot obtain. Miracast was
+> later narrowed to the Google TV flavour for the same class of reason — Fire OS keeps Wi-Fi Direct
+> behind its own display stack, so the WFD session never completes.
+>
+> The decision below is left intact deliberately. An ADR records what was decided and why at the
+> time; the correction belongs beside it, not in place of it.
 
 ---
 

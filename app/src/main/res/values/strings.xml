@@ -37,6 +37,8 @@
     <string name="protocol_detail_waiting">Waiting for sender…</string>
     <!-- %1$s = sender display name -->
     <string name="protocol_detail_connected">Streaming from %1$s</string>
+    <!-- Same card, before the sender's name is known (during pairing). -->
+    <string name="protocol_detail_connected_unknown">Streaming</string>
     <string name="protocol_detail_error">Check Wi-Fi settings</string>
 
     <!-- ── Service states (header badge) ───────────────────────── -->
@@ -81,6 +83,50 @@
     <string name="setting_airplay_subtitle">Accept connections from macOS</string>
     <string name="setting_miracast_enabled">Miracast Receiver</string>
     <string name="setting_miracast_subtitle">Accept connections from Windows and Android</string>
+    <string name="setting_homekit_enabled">HomeKit</string>
+    <string name="setting_homekit_subtitle">Add PhairPlay to the Home app as a TV. Lets you use the iPhone remote and Siri.</string>
+    <string name="setting_homekit_code">Pairing code: %1$s</string>
+    <string name="setting_homekit_paired">Paired with your Home</string>
+    <string name="setting_homekit_off">Turn HomeKit on to see the pairing code</string>
+    <string name="setting_homekit_reset">Reset HomeKit pairing</string>
+    <string name="setting_homekit_reset_subtitle">Removes PhairPlay from your Home so it can be added again.</string>
+
+    <!-- HomeKit setup flow -->
+    <string name="hk_ask_title">Add to Apple Home?</string>
+    <string name="hk_ask_body">HomeKit lets you turn this TV on and off from the Home app, control it with the remote on your iPhone\'s Control Center, and use Siri. Everything works over your local network — no account and no internet needed.</string>
+    <string name="hk_ask_yes">Yes, set it up</string>
+    <string name="hk_ask_no">Not now</string>
+
+    <string name="hk_code_title">Add it in the Home app</string>
+    <string name="hk_code_body">On your iPhone or iPad, follow these steps. Scan the code with the camera to skip the typing.</string>
+    <string name="hk_code_body_named">On your iPhone or iPad, follow these steps. This TV appears as \"%1$s\" — that is its hardware name, not the AirPlay name. Scan the code with the camera to skip the typing.</string>
+    <string name="hk_step_open_home">Open the Home app</string>
+    <string name="hk_step_add">Tap + then Add Accessory</string>
+    <string name="hk_step_more_options">Tap More options…</string>
+    <string name="hk_step_pick">Pick this TV from the list</string>
+    <string name="hk_step_pick_named">Pick \"%1$s\" from the list</string>
+    <string name="hk_step_enter_code">Enter the code below, or scan it</string>
+    <string name="hk_code_label">Setup code</string>
+    <string name="hk_code_scan_hint">Point your camera at the square to enter it automatically.</string>
+    <string name="hk_code_starting">Starting HomeKit — the code will appear in a moment…</string>
+    <string name="hk_pending_title">Not paired yet</string>
+    <string name="hk_pending_body">HomeKit is on and this TV is visible to the Home app. You can finish adding it whenever you like — the code stays the same. To see these instructions again, go to Settings and choose HomeKit setup.</string>
+    <string name="hk_code_unavailable">No code yet — HomeKit is still starting. Go back and try again in a moment.</string>
+    <string name="hk_uncertified_note">iOS will warn that this is an uncertified accessory. That is expected: PhairPlay is not an Apple-licensed product. Choose Add Anyway.</string>
+    <string name="hk_code_done">Done</string>
+    <string name="hk_later">Finish later</string>
+
+    <string name="hk_done_title">Paired</string>
+    <string name="hk_done_body">PhairPlay is in your Home. You can now:</string>
+    <string name="hk_cap_power">Turn the TV on and off from the Home app</string>
+    <string name="hk_cap_remote">Use the remote in Control Center on your iPhone</string>
+    <string name="hk_cap_volume">Change the volume from your phone</string>
+    <string name="hk_cap_siri">Ask Siri to turn the TV on or off</string>
+    <string name="hk_finish">Finish</string>
+
+    <string name="accessibility_service_description">Lets the remote in your iPhone\'s Control Center control the whole Fire TV, not just PhairPlay. PhairPlay does not read anything on your screen — this is only used to move the selection and press buttons when you ask it to.</string>
+    <string name="setting_homekit_setup">HomeKit setup</string>
+    <string name="setting_homekit_setup_subtitle">Show the pairing code and step-by-step instructions again.</string>
     <string name="setting_dlna_enabled">DLNA Renderer</string>
     <string name="setting_dlna_subtitle">Accept connections from VLC, Plex, BubbleUPnP</string>
     <string name="setting_mirror_audio">Mirror audio</string>
@@ -113,7 +159,21 @@
     <string name="back_action_exit_app_detail">Ends the stream and stops receiving entirely</string>
     <string name="setting_force_high_res">Higher resolution (1440p)</string>
     <string name="setting_force_high_res_subtitle">Sharper mirroring; uses more CPU. Off = 1080p</string>
+    <string name="setting_audio_buffer">Audio buffer</string>
+    <string name="setting_audio_buffer_subtitle">Lower = less delay, higher = fewer glitches</string>
+    <string name="setting_audio_buffer_default">%1$d ms (default)</string>
     <string name="setting_version">Version</string>
+    <string name="setting_update">Check for updates</string>
+    <string name="setting_update_checking">Checking…</string>
+    <string name="setting_update_uptodate">Up to date (%1$s)</string>
+    <string name="setting_update_available">%1$s available</string>
+    <string name="setting_update_failed">Check failed</string>
+    <string name="setting_update_no_asset">Release %1$s has no APK attached, so there is nothing to install from here.</string>
+    <string name="setting_update_download_failed">Download failed. Nothing was installed.</string>
+    <string name="setting_update_install">Download and install</string>
+    <string name="setting_update_needs_install_permission">Fire OS blocks apps from installing other apps until you allow it. Grant \"Install unknown apps\" for PhairPlay, then come straight back — the download is already saved and the install will carry on by itself.</string>
+    <string name="setting_update_needs_permission_short">Needs permission</string>
+    <string name="setting_update_downloading">Downloading…</string>
     <string name="setting_reset_defaults">Reset to defaults</string>
     <string name="setting_reset_confirm">This clears every setting and replays the first-run setup on the next launch.</string>
 
@@ -130,6 +190,12 @@
     <!-- ── Pairing PIN (access control) ─────────────────────────── -->
     <string name="pairing_pin_title">AirPlay pairing code</string>
     <string name="pairing_pin_hint">Enter this code on your device to connect</string>
+    <string name="pairing_pin_cancel_hint">Press Back to cancel</string>
+
+    <!-- On-screen controls shown over screen mirroring and AirPlay video -->
+    <string name="mirror_control_stop">Stop streaming</string>
+    <string name="mirror_control_pip">Picture-in-picture</string>
+    <string name="mirror_control_hint">Press Back to hide these controls</string>
 
     <!-- ── Error messages ──────────────────────────────────────── -->
     <string name="error_network_unavailable">No Wi-Fi connection. Please connect to Wi-Fi.</string>
@@ -168,13 +234,14 @@
     <string name="onboarding_next">Next</string>
     <string name="onboarding_done">Start using PhairPlay</string>
     <string name="onboarding_welcome_title">Welcome to PhairPlay</string>
-    <string name="onboarding_welcome_body">Turn this Fire TV into an AirPlay and DLNA receiver. Send audio, video and photos from an iPhone, iPad or Mac — no cables, no account.\n\nThis takes about a minute to set up.</string>
+    <string name="onboarding_welcome_body">Turn this TV into an AirPlay and DLNA receiver. Send audio, video and photos from an iPhone, iPad or Mac — no cables, no account.\n\nThis takes about a minute to set up.</string>
     <string name="onboarding_required_title">Required permissions</string>
     <string name="onboarding_required_body">PhairPlay needs these to receive streams at all.</string>
+    <string name="onboarding_required_none">Nothing to grant — this device gives PhairPlay everything it needs at install time.</string>
     <string name="onboarding_optional_title">Recommended</string>
     <string name="onboarding_optional_body">Optional, but PhairPlay works noticeably better with them.</string>
     <string name="onboarding_ready_title">You\'re set</string>
-    <string name="onboarding_ready_body">PhairPlay is advertising on your network. Open Control Centre on your iPhone, tap Screen Mirroring, and pick this TV.\n\nEverything here can be changed later in Settings.</string>
+    <string name="onboarding_ready_body">PhairPlay is advertising on your network. Open Control Centre on your iPhone, tap Screen Mirroring and pick this TV — or tap the AirPlay icon inside an app like YouTube to send a video at full quality instead of mirroring.\n\nWhile music is playing, play/pause and skip on the remote control the phone, and MENU moves the Now Playing card.\n\nAll of this can be changed later in Settings.</string>
     <string name="onboarding_perm_notifications">Notifications</string>
     <string name="onboarding_perm_notifications_why">Shows the persistent status while a stream is active. Android requires it for the background receiver.</string>
     <string name="onboarding_perm_location">Location</string>
@@ -184,11 +251,16 @@
     <string name="onboarding_grant">Grant</string>
     <string name="onboarding_granted">Granted</string>
     <string name="onboarding_open_settings">Open settings</string>
+    <string name="onboarding_overlay_adb_hint">Fire TV has no screen for this permission — Amazon does not ship one. Without it PhairPlay cannot open itself when a sender connects; you tap the notification instead. To grant it, run from a computer:  adb shell appops set com.phairplay.firetv SYSTEM_ALERT_WINDOW allow</string>
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>
     <string name="setting_remember_pin_subtitle">A sender that has entered the PIN once won\'t be asked again</string>
     <string name="setting_forget_pairings">Forget paired senders</string>
+    <string name="setting_input_apps">Home app shortcuts</string>
+    <string name="setting_input_apps_none">None</string>
+    <string name="setting_input_apps_slot">Shortcut %1$d</string>
+    <string name="setting_input_apps_clear">None (remove shortcut)</string>
     <string name="setting_forget_pairings_done">Paired senders forgotten — the PIN will be required again</string>
     <!-- Onboarding: recommended settings -->
     <string name="onboarding_prefs_title">Recommended settings</string>
@@ -210,4 +282,36 @@
     <string name="audio_from_sender">Audio from %1$s</string>
     <string name="onboarding_step">STEP %1$d OF %2$d</string>
     <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  Tail: http://%2$s:%4$s</string>
+
+    <!-- Permissions section -->
+    <string name="settings_section_permissions">Permissions</string>
+    <string name="setting_perm_on">Granted</string>
+    <string name="setting_perm_off">Not granted</string>
+    <string name="setting_perm_remote">Remote control outside PhairPlay</string>
+    <string name="setting_perm_remote_granted">Granted. The remote can navigate outside PhairPlay — but Fire TV blocks the normal way to move the selection, so expect it to be unresponsive or to skip around on the home screen and in apps like Netflix. Root is the only way to make this reliable everywhere.</string>
+    <string name="setting_remote">Remote control</string>
+    <string name="setting_remote_subtitle">Off by default. Works properly inside PhairPlay; unreliable elsewhere — see the permission notice below.</string>
+
+    <string name="setting_artwork_lookup">Find missing album art</string>
+    <string name="setting_artwork_lookup_subtitle">When a sender streams without cover art — most DLNA apps do — look one up by title using MusicBrainz and the Cover Art Archive. Track names are sent to those services while this is on.</string>
+    <string name="setting_backdrop">Backdrop</string>
+    <string name="setting_backdrop_subtitle">What fills the screen behind the Now Playing card.</string>
+    <string name="backdrop_dynamic">Dynamic</string>
+    <string name="backdrop_dynamic_detail">Album colours across the whole screen, moving with the beat.</string>
+    <string name="backdrop_projector">Projector</string>
+    <string name="backdrop_projector_detail">Three band orbs on true black, faded out on every side so a projected image has no visible edge.</string>
+    <string name="backdrop_black">Black</string>
+    <string name="backdrop_black_detail">Plain black. No colour and nothing moving.</string>
+    <string name="setting_stream_end">Exit when the stream ends</string>
+    <string name="setting_stream_end_subtitle">Leave for the Fire TV home screen as soon as the sender stops. Off keeps PhairPlay on screen, ready for the next stream.</string>
+    <string name="setting_perm_overlay">Show the remote\'s focus ring</string>
+    <string name="setting_perm_overlay_granted">Granted. The remote draws its own highlight in apps that will not move theirs — the Fire TV launcher among them.</string>
+    <string name="setting_perm_overlay_explanation">The Fire TV launcher refuses to move its highlight for the remote, so PhairPlay draws its own ring instead. Without this the remote still navigates and selects — you just cannot see where it is.</string>
+    <string name="setting_perm_sleep">Turn the display off</string>
+    <string name="setting_perm_sleep_granted">Granted. Turning PhairPlay off in the Home app blanks the display.\n\nNote: while this is on, PhairPlay cannot be uninstalled — Android blocks it for device admins. Revoke first if you want to remove the app.</string>
+    <string name="setting_perm_revoke">Revoke</string>
+    <string name="setting_perm_open_settings">Open Settings anyway</string>
+    <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nEven once granted, expect the remote to be unresponsive or to skip around on the Fire TV home screen and in apps like Netflix. Fire TV blocks the way apps normally move the selection, so PhairPlay has to fake it with a drawn highlight and synthetic swipes. Inside PhairPlay the remote works properly. A rooted Fire TV can inject real button presses and is the only way to get this working everywhere.</string>
+    <string name="setting_perm_sleep_explanation">Lets PhairPlay blank the display when you turn it off from the Home app. Nothing else uses this.</string>
+    <string name="setting_perm_no_screen">This Fire TV has no screen for that permission. Grant it from a computer instead:\n\n%1$s</string>
 </resources>

@@ -1,5 +1,6 @@
 package com.phairplay.settings
 
+import com.phairplay.DeviceFeatures
 import com.phairplay.media.VolumeControlMode
 
 /**
@@ -50,6 +51,15 @@ data class AppSettings(
      * When false: SSDP advertisement and HTTP server are stopped.
      */
     val dlnaEnabled: Boolean = true,
+
+    /**
+     * Whether the HomeKit accessory is advertised.
+     *
+     * Off by default: pairing publishes a long-lived accessory identity onto the network and adds
+     * PhairPlay to the user's Home, which is a bigger step than turning on a streaming receiver
+     * and should be a deliberate one.
+     */
+    val homeKitEnabled: Boolean = false,
 
     // ─── AirPlay specific ──────────────────────────────────────────────────
     /**
@@ -133,10 +143,61 @@ data class AppSettings(
     val audioDelayMs: Int = 0,
 
     /**
+     * AudioTrack hardware buffer, in milliseconds. Exposed because the right value is a property of
+     * the output, not of the app.
+     *
+     * This buffer only has to survive a scheduling hiccup between writes -- network jitter is the
+     * packet queue's job, and the two are charged against the SAME latency budget the sender asks
+     * for. So raising this does not add headroom for free: every millisecond here is a millisecond
+     * the queue does not get, and the total is audible delay either way.
+     *
+     * Low (40-60) suits HDMI out on a quiet network: least delay, but an underrun becomes a click.
+     * High (200+) rides out a busy Wi-Fi or a Bluetooth speaker at the cost of lip-sync. 100 is the
+     * default because it measured as the point where glitches stopped on HDMI.
+     */
+    val audioBufferMs: Int = DEFAULT_AUDIO_BUFFER_MS,
+
+    /**
      * Whether leaving the app during a video stream enters picture-in-picture instead of simply
      * backgrounding. Only affects mirroring — audio-only sessions have no video to shrink.
      */
     val pipEnabled: Boolean = true,
+
+    /**
+     * Whether the HomeKit / iPhone remote may drive the Fire TV at all.
+     *
+     * On by default. Turning it off stops PhairPlay acting on remote key presses entirely — the
+     * accessory stays paired and the power tile keeps working, but the D-pad does nothing. Worth
+     * having because on Fire OS the D-pad cannot reliably drive other apps, and a remote that
+     * half-works is worse than one that is honestly switched off.
+     */
+    /**
+     * OFF by default. The remote works properly inside PhairPlay, but outside it Fire TV refuses
+     * every accessibility focus action, so navigation is faked with a drawn cursor and synthetic
+     * swipes. That is unreliable enough on the launcher and in apps like Netflix that shipping it
+     * on by default makes the whole app look broken. Users who want it can turn it on and are told
+     * plainly what to expect.
+     */
+    val remoteEnabled: Boolean = false,
+
+    /**
+     * Edgeless "projector" look for the now-playing screen: true black instead of the lifted TV
+     * base, the beat visual pulled to the middle, and a vignette that dissolves it into black on
+     * every side. On a projector black is simply no light, so the picture appears to have no
+     * boundary at all. Off by default — on a normal TV it just looks dimmer.
+     */
+    val backdropTheme: BackdropTheme = BackdropTheme.DYNAMIC,
+    /**
+     * Look album art up online when the sender did not supply any (DLNA mostly).
+     *
+     * Off by default deliberately. It is the only feature that makes the receiver contact a third
+     * party, and sending the titles someone plays to an outside service is their decision, not a
+     * sensible default. Uses MusicBrainz + the Cover Art Archive — see CoverArtFinder for why those.
+     */
+    val artworkLookup: Boolean = false,
+
+    /** What to do when a stream ends. */
+    val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,
 
     /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
     val beatPulse: Int = 0,
@@ -171,6 +232,16 @@ data class AppSettings(
      * everyone. Turn it off to make PIN auth strict again.
      */
     val rememberPinPairing: Boolean = true,
+
+    /**
+     * Package names shown as extra HomeKit inputs, in slot order.
+     *
+     * HomeKit's TV accessory already renders an input list, and until now selecting anything in it
+     * just opened PhairPlay. Mapping a slot to an app turns that list into a launcher: pick
+     * "Netflix" in the Home app and the Fire TV switches to Netflix. A blank entry is an unused
+     * slot; [INPUT_APP_SLOTS] caps how many there are.
+     */
+    val inputApps: List<String> = emptyList(),
 ) {
 
     /** Advertised mirroring display size: 2560×1440 when [forceHighResolution], else 1920×1080. */
@@ -190,11 +261,33 @@ data class AppSettings(
      * If all three are disabled, the service has nothing to do.
      */
     val anyProtocolEnabled: Boolean
-        get() = airPlayEnabled || miracastEnabled || dlnaEnabled
+        get() = airPlayEnabled || (miracastEnabled && DeviceFeatures.MIRACAST_SUPPORTED) || dlnaEnabled
 
     companion object {
         /** The default settings instance used on first launch. */
         val DEFAULT = AppSettings()
+
+        /** Default AudioTrack buffer, in ms — see [audioBufferMs]. */
+        const val DEFAULT_AUDIO_BUFFER_MS = 100
+
+        /** The buffer sizes offered in Settings, in ms. */
+        val AUDIO_BUFFER_CHOICES = listOf(40, 60, 100, 150, 200, 300)
+
+        /** How many app shortcuts the HomeKit input list offers. */
+        const val INPUT_APP_SLOTS = 3
+
+        /**
+         * HomeKit input identifier for app slot [index].
+         *
+         * Starts above the built-in AirPlay (1) and DLNA (2) inputs so the numbering never collides.
+         */
+        fun inputAppIdentifier(index: Int): Int = FIRST_APP_INPUT_ID + index
+
+        /** Slot index for a HomeKit input identifier, or null if it is one of the built-ins. */
+        fun inputAppSlot(identifier: Int): Int? =
+            (identifier - FIRST_APP_INPUT_ID).takeIf { it in 0 until INPUT_APP_SLOTS }
+
+        private const val FIRST_APP_INPUT_ID = 3
 
         /** Maximum allowed length for the display name (mDNS limit). */
         const val DISPLAY_NAME_MAX_LENGTH = 63
@@ -223,5 +316,38 @@ enum class BackAction {
     companion object {
         fun fromName(name: String?): BackAction =
             entries.firstOrNull { it.name == name } ?: STOP_STREAM
+    }
+}
+
+/** What fills the screen behind the Now Playing card. */
+enum class BackdropTheme {
+    /** Album-coloured blobs across the whole screen, breathing with the beat. The TV default. */
+    DYNAMIC,
+
+    /** Three band orbs on true black, dissolved at every edge so a projected image has no border. */
+    PROJECTOR,
+
+    /** Plain black. No colour, no beat, nothing moving -- just the card. */
+    BLACK,
+    ;
+
+    companion object {
+        fun fromName(name: String?): BackdropTheme =
+            entries.firstOrNull { it.name == name } ?: DYNAMIC
+    }
+}
+
+/** What PhairPlay does when the sender stops streaming. */
+enum class StreamEndAction {
+    /** Stay on the waiting screen with the receiver running, ready for the next sender. */
+    STAY_IN_APP,
+
+    /** Leave immediately for the Fire TV home screen. The receiver keeps running in the service. */
+    EXIT_APP,
+    ;
+
+    companion object {
+        fun fromName(name: String?): StreamEndAction =
+            entries.firstOrNull { it.name == name } ?: STAY_IN_APP
     }
 }

@@ -46,6 +46,16 @@ object RtpInterleaved {
     /** RTP channel 0 = video RTP data. */
     private const val CHANNEL_VIDEO_RTP = 0
 
+    /**
+     * Channel 1 = video RTCP.
+     *
+     * Previously read off the wire and discarded. It carries the sender's own
+     * "RTP timestamp X == wall-clock T" statement, which is the correction term for A/V alignment
+     * -- so the mirroring audio delay was measurable but not correctable, because the correction was
+     * arriving on the channel the reader skipped.
+     */
+    private const val CHANNEL_VIDEO_RTCP = 1
+
     /** Fixed RTP header size (no CSRC, no extension). */
     private const val RTP_FIXED_HEADER_BYTES = 12
 
@@ -84,7 +94,14 @@ object RtpInterleaved {
     fun readLoop(
         inputStream: InputStream,
         onVideoNalUnit: (nalUnit: ByteArray, ptsUs: Long) -> Unit,
-        onStreamEnded: () -> Unit
+        onStreamEnded: () -> Unit,
+        /**
+         * Called for each RTCP Sender Report on channel 1.
+         *
+         * Defaulted so existing callers compile unchanged; a caller that ignores it is back to the
+         * old behaviour of discarding the reports, which is at least explicit now.
+         */
+        onSenderReport: (RtcpReport.SenderReport) -> Unit = {}
     ) {
         // FU-A (Fragmentation Unit A) reassembly state — local so concurrent streams
         // don't share state. Non-null means we are accumulating fragments for one NAL unit.
@@ -130,9 +147,11 @@ object RtpInterleaved {
                     bytesRead += n
                 }
 
-                // Only process video RTP frames (channel 0); ignore RTCP (channel 1)
-                if (channel == CHANNEL_VIDEO_RTP) {
-                    fuaAccumulator = processVideoRtpFrame(frameData, fuaAccumulator, onVideoNalUnit)
+                when (channel) {
+                    CHANNEL_VIDEO_RTP ->
+                        fuaAccumulator = processVideoRtpFrame(frameData, fuaAccumulator, onVideoNalUnit)
+                    CHANNEL_VIDEO_RTCP ->
+                        RtcpReport.parse(frameData, frameLength) { report -> onSenderReport(report) }
                 }
                 // Note: audio over interleaved TCP is rare in AirPlay; UDP is used instead.
             }

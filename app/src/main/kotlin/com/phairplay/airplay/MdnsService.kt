@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import com.phairplay.service.ProtocolState
+import com.phairplay.airplay.handshake.PairingKeys
 import com.phairplay.util.Logger
 import com.phairplay.util.NetworkUtils
 
@@ -169,10 +170,17 @@ class MdnsService(
             setAttribute("deviceid", NetworkUtils.getMacAddress())
             setAttribute("features", AIRPLAY_FEATURES)
             setAttribute("model", AIRPLAY_MODEL)
-            setAttribute("srcvers", AIRPLAY_SERVER_VERSION)
+            // The _airplay service claims the modern generation; _raop below stays old so iOS keeps
+            // granting DACP. See AirPlayVersion for why the two are allowed to disagree.
+            setAttribute("srcvers", AIRPLAY_MIRRORING_VERSION)
             setAttribute("vv", "2")                             // AirPlay protocol version 2
             setAttribute("pi", NetworkUtils.getPersistentUuid(context))
             setAttribute("flags", "0x4")                        // Screen-mirroring receiver
+            setAttribute("protovers", "1.1")
+            // The Ed25519 identity, hex-encoded — the same key GET /info returns.
+            // iOS and iPadOS use pk to decide a receiver supports pair-verify and only list the
+            // ones that advertise it, which is why the Mac could see PhairPlay and they could not.
+            setAttribute("pk", PairingKeys.get(context).edPublic.joinToString("") { "%02x".format(it) })
         }
 
         airPlayListener = createRegistrationListener(
@@ -213,7 +221,21 @@ class MdnsService(
 
             setAttribute("cn", "0,1,2,3")        // Cipher numbers (encryption types)
             setAttribute("da", "true")             // Digest authentication capable
-            setAttribute("et", "0,3,5")            // Encryption types supported
+            // Encryption types: 0 = none, 1 = RSA, 3 = FairPlay, 4/5 = FairPlay SAPv2.5.
+            //
+            // Encryption types: 0 none, 1 RSA, 3 FairPlay, 5 FairPlay SAPv2.5.
+            //
+            // Advertising only "0,1" was an attempt to steer macOS Music onto the RSA path, whose
+            // key handling is fully implemented here and needs no captured constants. It backfired.
+            // Music did not fall back to RSA -- it read the receiver as unusable and hung up right
+            // after OPTIONS, before ANNOUNCE, so audio went from "streams with a wrong key" to "no
+            // session at all". The device logs either side of that change show it plainly.
+            //
+            // So FairPlay is advertised again. The v2 mode problem below is real and unsolved, but
+            // a session that reaches RECORD is strictly better than one that never starts: it keeps
+            // metadata, transport control and the now-playing UI working, and it is the only state
+            // in which the remaining key bug can be observed at all.
+            setAttribute("et", "0,1,3,5")          // Encryption types supported
             setAttribute("md", "0,1,2")            // Metadata types supported
             setAttribute("sv", "false")            // Software volume control
             setAttribute("tp", "UDP")              // Transport for audio RTP
@@ -312,9 +334,13 @@ class MdnsService(
         private const val AIRPLAY_FEATURES = "0x5A7FFFF7,0x1E"
 
         /** Pretend to be an Apple TV so macOS uses the screen mirroring protocol. */
-        private const val AIRPLAY_MODEL = "AppleTV5,3"
+        private const val AIRPLAY_MODEL = "AppleTV6,2"
 
         /** AirPlay server version — matches a real Apple TV for maximum compatibility. */
-        private const val AIRPLAY_SERVER_VERSION = "220.68"
+        private const val AIRPLAY_SERVER_VERSION = com.phairplay.airplay.handshake.AirPlayVersion.ADVERTISED
+
+        /** Advertised on _airplay._tcp only — the service where feature generation is negotiated. */
+        private const val AIRPLAY_MIRRORING_VERSION =
+            com.phairplay.airplay.handshake.AirPlayVersion.ADVERTISED_AIRPLAY
     }
 }

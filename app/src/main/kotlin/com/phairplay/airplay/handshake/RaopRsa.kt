@@ -28,6 +28,9 @@ object RaopRsa {
     /** RSA-OAEP-SHA1 transformation; the default provider (Conscrypt on Android) implements it. */
     private const val TRANSFORM = "RSA/ECB/OAEPWithSHA-1AndMGF1Padding"
 
+    /** Canonical Apple-Challenge payload width: 16-byte challenge + 4-byte IP + 6-byte MAC, padded. */
+    private const val PAYLOAD_BYTES = 32
+
     private val privateKey: PrivateKey by lazy {
         val der = hexToBytes(PRIVATE_KEY_PKCS8_HEX)
         KeyFactory.getInstance("RSA").generatePrivate(PKCS8EncodedKeySpec(der))
@@ -47,6 +50,59 @@ object RaopRsa {
         Logger.w("rsaaeskey RSA decrypt failed: ${e.message}")
         null
     }
+
+    /**
+     * Signs an `Apple-Challenge` for the RTSP `Apple-Response` header.
+     *
+     * Legacy RAOP senders (TikTok's audio AirPlay among them) put a random challenge on OPTIONS and
+     * hang up when the reply carries no signature — which looked from the outside like the receiver
+     * crashing the moment you picked it. The signed blob is `challenge || receiver IP || receiver
+     * MAC`, zero-padded to 32 bytes, RSA-signed with PKCS#1 v1.5 *without* hashing — the sender
+     * verifies by raw-decrypting, so a normal SHA-based signature would not match.
+     */
+    fun signChallenge(challenge: ByteArray, ipAddress: ByteArray, macAddress: ByteArray): ByteArray? = try {
+        // Built by appending rather than into a fixed 32-byte array. The canonical payload is a
+        // 16-byte challenge + 4-byte IPv4 + 6-byte MAC = 26, zero-padded to 32 -- but the challenge
+        // length is the SENDER's choice, and an IPv6 local address is 16 bytes, either of which
+        // overruns a fixed buffer and throws. That threw inside the catch below and returned null,
+        // which the sender sees as an unanswered challenge and responds to by hanging up.
+        val body = challenge + ipAddress + macAddress
+        val payload = if (body.size >= PAYLOAD_BYTES) body else body.copyOf(PAYLOAD_BYTES)
+
+        // "NoPadding" would leave the sender's RSA-verify seeing raw bytes; PKCS1Padding is what the
+        // AirPort Express did and what every sender checks for.
+        rsaPrivateEncrypt(payload)
+    } catch (e: Exception) {
+        Logger.w("Apple-Challenge signing failed: ${e.message}")
+        null
+    }
+
+    /**
+     * RSA-PKCS#1 v1.5 encryption *with the private key* — OpenSSL's `RSA_private_encrypt`.
+     *
+     * This is a signing primitive wearing an encryption interface, and JCA providers disagree about
+     * whether to allow it. Conscrypt, the default on Android, rejects a private key in ENCRYPT_MODE
+     * on some releases with "Need RSA public key", so the JCA path can fail on-device while passing
+     * every unit test on a desktop JVM. BouncyCastle is already a dependency and does the raw
+     * operation without opinions, so it stands in when JCA refuses.
+     */
+    private fun rsaPrivateEncrypt(payload: ByteArray): ByteArray =
+        runCatching {
+            Cipher.getInstance("RSA/ECB/PKCS1Padding").apply {
+                init(Cipher.ENCRYPT_MODE, privateKey)
+            }.doFinal(payload)
+        }.getOrElse { jcaFailure ->
+            Logger.i("JCA refused private-key encryption (${jcaFailure.message}) — using BouncyCastle")
+            val crt = privateKey as RSAPrivateCrtKey
+            org.bouncycastle.crypto.encodings.PKCS1Encoding(
+                org.bouncycastle.crypto.engines.RSAEngine(),
+            ).apply {
+                init(
+                    true,
+                    org.bouncycastle.crypto.params.RSAKeyParameters(true, crt.modulus, crt.privateExponent),
+                )
+            }.processBlock(payload, 0, payload.size)
+        }
 
     /** The public half of the embedded key — used only by tests to round-trip the decrypt path. */
     internal fun publicKeyForTest(): PublicKey {

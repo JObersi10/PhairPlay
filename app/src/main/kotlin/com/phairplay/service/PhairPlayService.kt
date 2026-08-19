@@ -20,13 +20,16 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import androidx.core.app.NotificationCompat
+import com.phairplay.DeviceFeatures
 import com.phairplay.MainActivity
 import com.phairplay.R
 import android.view.Surface
 import com.phairplay.airplay.AirPlayReceiver
+import com.phairplay.airplay.DacpClient
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.media.DeviceVolumeController
+import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.SettingsRepository
@@ -39,6 +42,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -100,8 +104,77 @@ class PhairPlayService : Service() {
     private val _nowPlaying = MutableStateFlow<com.phairplay.airplay.NowPlayingInfo?>(null)
     val nowPlaying: StateFlow<com.phairplay.airplay.NowPlayingInfo?> = _nowPlaying.asStateFlow()
 
+    /**
+     * D-pad presses arriving from the HomeKit remote, as Android key codes.
+     *
+     * A SharedFlow rather than a StateFlow: these are events, and two presses of the same arrow
+     * must both arrive. A StateFlow would collapse the second into the first and the remote would
+     * feel like it were dropping every other press.
+     *
+     * `extraBufferCapacity` absorbs a burst of presses while the Activity is starting; without it
+     * `tryEmit` fails on a flow with no room and the press vanishes silently.
+     */
+    private val _remoteKeys = kotlinx.coroutines.flow.MutableSharedFlow<Int>(extraBufferCapacity = 16)
+    val remoteKeys = _remoteKeys.asSharedFlow()
+
+    /** Mirror of AppSettings.remoteEnabled, so the HAP thread need not touch DataStore. */
+    @Volatile private var remoteEnabled: Boolean = false
+
+    /** Mirror of AppSettings.artworkLookup, read from the DLNA artwork thread. */
+    @Volatile private var artworkLookup: Boolean = false
+
+    private fun emitRemoteKey(keyCode: Int) {
+        if (!remoteEnabled) {
+            Logger.i("Remote key $keyCode ignored — the remote is switched off in Settings")
+            return
+        }
+        // System-wide first. With the accessibility service enabled the remote drives whatever is
+        // actually on screen -- the launcher, Netflix, anything -- which is the point of having it.
+        // Crucially we must NOT bring PhairPlay forward in that case: yanking the app to the front
+        // on every arrow press would make the remote useless for controlling anything else.
+        // The local-adb route used to run first and has been removed entirely. Tested on hardware
+        // 2026-08-17: adbd ACCEPTS a connection from the device's own address and then never answers
+        // the handshake, while answering the identical packet from another host in milliseconds. Our
+        // probe read that silence as "waiting for CNXN, as expected", sent the banner, and blocked
+        // for READ_TIMEOUT_MS. A timeout is not RefusedByDaemon, so the permanent-refusal latch never
+        // set and every press paid it again. Because HAP invokes write handlers on the hap-conn
+        // thread and sends its 204 only after they return, that stalled the whole accessory: the
+        // Home app showed the TV as off and the iPhone remote became unusable. Dead route, high cost.
+
+        // Root where it exists. It runs the same `input keyevent` adb does, through the real
+        // input pipeline, so it works in apps that ignore accessibility focus -- which is most of the
+        // interesting ones. Unrooted devices (nearly all of them) skip straight past this.
+        if (com.phairplay.util.RootShell.sendKeyEvent(keyCode)) return
+
+        if (PhairPlayAccessibilityService.sendKey(keyCode)) return
+
+        // With the accessibility service enabled, a key we could not deliver means the CURRENT app
+        // had nowhere to send it -- not that the user wanted PhairPlay. Falling through used to drag
+        // the app to the front: the log shows OK on the Fire TV home screen landing on
+        // "ServiceController: start()" and PhairPlay taking over the screen. The remote exists to
+        // drive the television, so a press that lands nowhere lands nowhere.
+        if (PhairPlayAccessibilityService.isConnected) {
+            Logger.i("Remote key $keyCode not deliverable to the foreground app — ignoring")
+            return
+        }
+
+        // Without it, the honest scope is our own window, and the app has to be visible for a key
+        // aimed at it to mean anything.
+        bringAppToFront()
+        if (!_remoteKeys.tryEmit(keyCode)) {
+            Logger.w("Remote key $keyCode dropped — no collector and the buffer is full")
+        }
+    }
+
+    /** True when the remote can drive the whole device rather than just PhairPlay's own window. */
+    fun isSystemWideRemoteEnabled(): Boolean = PhairPlayAccessibilityService.isConnected
+
     private val _audioEnergy = MutableStateFlow(0f)
     val audioEnergy: StateFlow<Float> = _audioEnergy.asStateFlow()
+
+    /** Bass/mid/treble, 0..1. Drives one orb each in the projector backdrop. */
+    private val _audioBands = MutableStateFlow(floatArrayOf(0f, 0f, 0f))
+    val audioBands: StateFlow<FloatArray> = _audioBands.asStateFlow()
 
     // Non-null while a PIN should be shown on screen for SRP pair-setup (PIN access control).
     // Latest sender volume change, with what we managed to do about it — surfaced so the UI can
@@ -116,6 +189,12 @@ class PhairPlayService : Service() {
     val lastSender: StateFlow<LastSender?> = _lastSender.asStateFlow()
 
     private val deviceVolume by lazy { DeviceVolumeController(applicationContext) }
+
+    /** HomeKit accessory. Null unless the user enabled it — pairing joins their Home, so it is opt-in. */
+    private var homeKit: com.phairplay.homekit.HomeKitReceiver? = null
+
+    /** App shortcuts as of the last HomeKit start, in slot order. See [launchInputApp]. */
+    @Volatile private var homeKitInputApps: List<String> = emptyList()
     @Volatile private var senderVolumeMode: VolumeControlMode = VolumeControlMode.OFF
 
     private val _pairingPin = MutableStateFlow<String?>(null)
@@ -163,6 +242,11 @@ class PhairPlayService : Service() {
         settingsRepository = SettingsRepository(applicationContext)
         createNotificationChannel()
         registerNetworkWatcher()
+        registerDisplayWatcher()
+        // Keep HomeKit's input tile honest when the user opens an app themselves. Only our own
+        // launches used to report, so switching apps with the physical remote left the Home app
+        // showing whatever it last selected.
+        PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
         DiagnosticServer.start(serviceScope)
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
@@ -222,6 +306,35 @@ class PhairPlayService : Service() {
     }
 
     /**
+     * Asks the bound Activity to put its video Surface on screen before a session exists.
+     *
+     * A SurfaceView only has a Surface once it is visible, and the overlay is normally made visible
+     * in response to CONNECTED — by which point the sender has already sent the single IDR it will
+     * emit for the next several seconds. Missing that IDR is what left a cold first mirroring
+     * attempt black until the user disconnected and reconnected.
+     */
+    @Volatile private var onPrepareSurface: (() -> Unit)? = null
+
+    /**
+     * A sender opened the socket before the Activity had finished binding, so there was nobody to
+     * ask for a Surface. Remembered rather than dropped — see [setSurfacePreparer].
+     */
+    @Volatile private var surfacePrepareMissed = false
+
+    fun setSurfacePreparer(prepare: () -> Unit) {
+        onPrepareSurface = prepare
+        // Binding is asynchronous and a sender can beat it. On a fresh launch the user often opens
+        // the app and connects within a few seconds, and until now that meant onSenderApproaching
+        // fired against a null preparer and the pre-warm was silently lost: no visible SurfaceView,
+        // no Surface, and the opening IDR decoded off-screen. Replay the missed request instead.
+        if (surfacePrepareMissed) {
+            surfacePrepareMissed = false
+            Logger.i("Surface preparer registered after the sender arrived — preparing now")
+            android.os.Handler(android.os.Looper.getMainLooper()).post { runCatching { prepare() } }
+        }
+    }
+
+    /**
      * Sends a DACP transport command (TV remote → AirPlay sender), e.g. play/pause or skip what the
      * Mac/iPhone is streaming. Bound Activities call this from media-key events. No-op if no AirPlay
      * sender has advertised a DACP identity.
@@ -230,19 +343,108 @@ class PhairPlayService : Service() {
         airPlayReceiver?.sendRemoteCommand(command)
     }
 
+    /** Media-button owner, alive only while something is streaming. */
+    private var mediaButtons: MediaButtonSession? = null
+
+    private fun updateMediaButtons(streaming: Boolean) {
+        if (streaming) {
+            val s = mediaButtons ?: MediaButtonSession(applicationContext) { cmd ->
+                dispatchTransportCommand(cmd)
+            }.also { mediaButtons = it }
+            s.setPlaying(true)
+        } else {
+            mediaButtons?.release()
+            mediaButtons = null
+        }
+    }
+
+    /**
+     * Routes a transport command from the TV remote to whatever is actually playing.
+     *
+     * These are two completely different situations and sending both down the AirPlay path -- which
+     * is what this used to do -- meant the DLNA case silently did nothing as well:
+     *
+     *  - DLNA: WE are the player. ExoPlayer is in this process, so pause/play/stop are direct calls
+     *    and simply work.
+     *  - AirPlay: the SENDER is the player and we have to ask it. The only back-channel we have is
+     *    DACP, and AirPlay 2 senders do not offer one -- measured, see the DACP notes in CLAUDE.md.
+     *    So this reaches legacy RAOP senders that advertise a DACP identity and nothing else, which
+     *    is why the buttons appear dead against a modern iPhone. Fixing that means implementing
+     *    MediaRemote; the log line below is here so the distinction is visible in a capture rather
+     *    than being guessed at.
+     */
+    fun dispatchTransportCommand(command: String) {
+        val player = dlnaServer?.mediaPlayer
+        if (_dlnaState.value == ProtocolState.CONNECTED && player != null) {
+            when (command) {
+                DacpClient.CMD_PLAY_RESUME -> player.play()
+                DacpClient.CMD_PAUSE -> player.pause()
+                DacpClient.CMD_PLAY_PAUSE -> if (player.isPlaying) player.pause() else player.play()
+                else -> Logger.i("Transport '$command' has no DLNA equivalent — ignored")
+            }
+            return
+        }
+        if (_airPlayState.value == ProtocolState.CONNECTED) {
+            sendAirPlayRemoteCommand(command)
+            return
+        }
+        Logger.i("Transport '$command' dropped — nothing is streaming")
+    }
+
     /**
      * Ends the active AirPlay session (Back pressed while streaming) without stopping the service.
      * Restarting the receiver drops the RTSP connection, which tells the sender that mirroring
      * ended, then re-advertises so the device is immediately pickable again.
      */
+    /**
+     * Dismisses the AirPlay pairing code. Clears the flow even when no receiver is around to ask,
+     * so the overlay always goes away — a stuck PIN with no exit is worse than a stale SRP session.
+     */
+    fun cancelPinPairing() {
+        Logger.i("Cancelling PIN pairing on user request")
+        airPlayReceiver?.cancelPinPairing()
+        _pairingPin.value = null
+    }
+
+    /**
+     * Stops whichever protocol is streaming, other than [keep].
+     *
+     * AirPlay and DLNA render to the same audio output, so two live sessions play over each other.
+     * Nothing arbitrated between them: a DLNA cast during an AirPlay stream simply added itself,
+     * and Back then ended only one of the two.
+     */
+    private fun endOtherSession(keep: Protocol) {
+        if (keep != Protocol.DLNA && _dlnaState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending DLNA render — ${keep.name} is taking over")
+            runCatching { dlnaServer?.endSession() }
+        }
+        if (keep != Protocol.AIRPLAY && _airPlayState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending AirPlay session — ${keep.name} is taking over")
+            runCatching { airPlayReceiver?.endSession() }
+        }
+    }
+
     fun endCurrentSession() {
         Logger.i("Ending current session on user request")
         // Drop just this sender. Restarting every receiver took mDNS down and put it straight back,
         // which the sender treated as an invitation to reconnect — Back appeared to do nothing on
         // the phone. Fall back to a restart only if AirPlay isn't the thing that's streaming.
+        // Whatever is actually playing is what Back has to end. This asked the AirPlay receiver and
+        // nothing else — and the AirPlay receiver is non-null whenever AirPlay is merely *enabled*,
+        // so a DLNA render took the first branch, ended an AirPlay session that wasn't running, and
+        // left the music playing with the screen already gone.
+        var ended = false
+        if (dlnaServer != null && _dlnaState.value == ProtocolState.CONNECTED) {
+            Logger.i("Ending DLNA render")
+            dlnaServer?.endSession()
+            ended = true
+        }
         val receiver = airPlayReceiver
-        if (receiver != null) receiver.endSession()
-        else serviceScope.launch { restartReceivers() }
+        if (receiver != null && _airPlayState.value == ProtocolState.CONNECTED) {
+            receiver.endSession()
+            ended = true
+        }
+        if (!ended) serviceScope.launch { restartReceivers() }
     }
 
     /**
@@ -373,9 +575,91 @@ class PhairPlayService : Service() {
         networkCallback = null
     }
 
+    /**
+     * Mirrors the TV's real power state into HomeKit's Active characteristic.
+     *
+     * Active used to change only when something wrote it — the Home app's own button, or the start
+     * of a stream. So the tile said whatever it had last been told, and a TV that had since gone to
+     * sleep, or been woken with the physical remote, kept reporting the stale value. The Home app
+     * was not wrong; nothing had ever told it.
+     *
+     * ACTION_SCREEN_ON/OFF is the closest thing Fire OS gives a normal app to "is the TV in use".
+     * It tracks the display rather than the panel's backlight, which is the right notion here: a
+     * sleeping Fire TV stick reports screen-off even while the TV itself is on another input.
+     *
+     * These two broadcasts cannot be declared in the manifest — the system only delivers them to
+     * receivers registered at runtime — which is why this lives here rather than in the manifest
+     * alongside the boot receiver.
+     */
+    private fun registerDisplayWatcher() {
+        if (displayWatcher != null) return
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+                when (intent?.action) {
+                    android.content.Intent.ACTION_SCREEN_ON -> reportDisplayActive(true)
+                    android.content.Intent.ACTION_SCREEN_OFF -> reportDisplayActive(false)
+                }
+            }
+        }
+        val filter = android.content.IntentFilter().apply {
+            addAction(android.content.Intent.ACTION_SCREEN_ON)
+            addAction(android.content.Intent.ACTION_SCREEN_OFF)
+        }
+        runCatching { registerReceiver(receiver, filter) }
+            .onSuccess {
+                displayWatcher = receiver
+                // Seed from the current state: waiting for the first transition would leave the
+                // tile stale until the user happened to sleep or wake the device.
+                reportDisplayActive(isDisplayInteractive())
+                Logger.i("HomeKit: display watcher registered")
+            }
+            .onFailure { Logger.w("HomeKit: could not watch display state — ${it.message}") }
+    }
+
+    private fun unregisterDisplayWatcher() {
+        displayWatcher?.let { runCatching { unregisterReceiver(it) } }
+        displayWatcher = null
+    }
+
+    private fun isDisplayInteractive(): Boolean = runCatching {
+        (getSystemService(POWER_SERVICE) as android.os.PowerManager).isInteractive
+    }.getOrDefault(true)
+
+    /**
+     * Maps a foregrounded package onto its HomeKit input, if the user mapped one.
+     *
+     * Apps with no slot are ignored rather than guessed at: reporting an identifier HomeKit does not
+     * know about would leave the tile showing nothing at all, which is worse than showing the last
+     * real input.
+     */
+    private fun reportForegroundApp(pkg: String) {
+        val slot = homeKitInputApps.indexOfFirst { it == pkg }
+        if (slot < 0) return
+        val identifier = AppSettings.inputAppIdentifier(slot)
+        Logger.i("Foreground app $pkg → HomeKit input $identifier")
+        homeKit?.reportInput(identifier)
+    }
+
+    private fun reportDisplayActive(on: Boolean) {
+        if (lastReportedActive == on) return
+        // The accessory does not exist yet during onCreate, so the seeding call lands before there
+        // is anything to tell. Leaving lastReportedActive unset in that case means the next real
+        // transition still reports, instead of being suppressed as a duplicate of a value HomeKit
+        // was never given.
+        val receiver = homeKit ?: return
+        lastReportedActive = on
+        Logger.i("HomeKit: display ${if (on) "on" else "off"} — reporting Active=$on")
+        receiver.reportActive(on)
+    }
+
+    private var displayWatcher: android.content.BroadcastReceiver? = null
+    private var lastReportedActive: Boolean? = null
+
     override fun onDestroy() {
         Logger.i("PhairPlayService destroying")
         unregisterNetworkWatcher()
+        unregisterDisplayWatcher()
+        PhairPlayAccessibilityService.onForegroundApp = null
         stopAllReceiversInternal()
         DiagnosticServer.stop()
         serviceJob.cancel()
@@ -393,9 +677,20 @@ class PhairPlayService : Service() {
     private suspend fun startReceivers() = receiverLock.withLock {
         acquireWifiLock()
         val settings = settingsRepository.settingsFlow.first()
+        // onCreate and onStart both call ServiceController.start(), and both are meant to: binding
+        // alone never delivers onStartCommand, so dropping either one leaves the receiver tied to
+        // the Activity's lifetime. The duplicate reaching here is expected and the per-receiver
+        // "already running" guards handle it -- but logging it at info level three times a session
+        // made a normal path look like a fault, so the arrival is only worth a line when it
+        // actually changes something.
         Logger.i("Starting receivers: AirPlay=${settings.airPlayEnabled}, Miracast=${settings.miracastEnabled}, DLNA=${settings.dlnaEnabled}")
 
         senderVolumeMode = settings.senderVolumeMode
+        remoteEnabled = settings.remoteEnabled
+        artworkLookup = settings.artworkLookup
+        // Switching the remote off must also clear what it drew and remembered, not just stop new
+        // presses — otherwise a ring stays on screen over an app that never asked for one.
+        if (!remoteEnabled) PhairPlayAccessibilityService.resetRemoteState()
         if (settings.lastSenderName.isNotBlank()) {
             _lastSender.value = LastSender(settings.lastSenderName, settings.lastSenderAtMs)
         }
@@ -403,9 +698,135 @@ class PhairPlayService : Service() {
         updateNotification(isRunning = true)
 
         if (settings.airPlayEnabled)   startAirPlay(settings)
-        if (settings.miracastEnabled)  startMiracast()
+        // The stored preference can still be true from a Google TV install or an older build; the
+        // flavour constant is the authority on whether the hardware can finish a WFD session.
+        if (settings.miracastEnabled && DeviceFeatures.MIRACAST_SUPPORTED) startMiracast()
         if (settings.dlnaEnabled)      startDlna()
+        if (settings.homeKitEnabled)   startHomeKit(settings)
     }
+
+    /**
+     * Starts the HomeKit accessory.
+     *
+     * Separate from the streaming receivers on purpose: it advertises a different service, holds a
+     * persistent identity, and its failure must not take AirPlay down with it — a HomeKit problem
+     * should cost HomeKit, not the thing the user actually bought this for.
+     */
+    private fun startHomeKit(settings: com.phairplay.settings.AppSettings) {
+        if (homeKit != null) {
+            Logger.i("HomeKit already running — skipping duplicate start")
+            return
+        }
+        val bridge = HomeKitBridge(
+            context = applicationContext,
+            onEndSession = { endCurrentSession() },
+            onBringToFront = { bringAppToFront() },
+            onWakeDisplay = { wakeDisplay() },
+            onSendRemoteCommand = { cmd -> airPlayReceiver?.sendRemoteCommand(cmd) },
+            onNavKey = { keyCode -> emitRemoteKey(keyCode) },
+            onLaunchInputApp = { identifier -> launchInputApp(identifier) },
+        )
+        // Snapshot for launchInputApp, which runs later on a HAP connection thread and has no
+        // settings of its own. Kept in slot order so an identifier still maps to the right app.
+        homeKitInputApps = settings.inputApps
+        runCatching {
+            com.phairplay.homekit.HomeKitReceiver(
+                context = applicationContext,
+                actions = bridge,
+                // Same name AirPlay advertises, not Build.MODEL. These disagreed whenever the user
+                // left the display name blank: AirPlay fell back to the device's friendly name
+                // ("Living room Fire TV") while HomeKit fell back to the model code ("AFTKM"), so
+                // the Home app showed a different device from the AirPlay picker.
+                deviceName = {
+                    settings.effectiveDisplayName
+                        .ifBlank { com.phairplay.util.NetworkUtils.getDeviceName(this) }
+                },
+                extraInputs = inputAppEntries(settings),
+                remoteEnabled = settings.remoteEnabled,
+            ).also {
+                it.start()
+                homeKit = it
+                // Seed Active from the real display state now that there is an accessory to tell.
+                // The watcher registered in onCreate had nothing to report to at the time.
+                reportDisplayActive(isDisplayInteractive())
+            }
+        }.onFailure { Logger.e("HomeKit failed to start (streaming is unaffected)", it) }
+    }
+
+    /**
+     * The user's app shortcuts as HomeKit inputs, labelled with each app's real name.
+     *
+     * Apps that are no longer installed are dropped rather than shown as a dead entry — an input
+     * that cannot launch anything is worse than one that isn't offered.
+     */
+    private fun inputAppEntries(settings: AppSettings): List<Pair<Int, String>> {
+        val pm = packageManager
+        return settings.inputApps.mapIndexedNotNull { index, pkg ->
+            if (pkg.isBlank()) return@mapIndexedNotNull null
+            val label = runCatching {
+                pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+            }.getOrElse {
+                Logger.i("HomeKit input slot $index: $pkg is not installed — leaving it out")
+                return@mapIndexedNotNull null
+            }
+            AppSettings.inputAppIdentifier(index) to label
+        }
+    }
+
+    /**
+     * Launches the app mapped to a HomeKit input.
+     *
+     * @return true if something was launched, so the caller knows not to fall back to showing
+     *   PhairPlay — the point of the shortcut is to leave PhairPlay.
+     */
+    private fun launchInputApp(identifier: Int): Boolean {
+        val slot = AppSettings.inputAppSlot(identifier) ?: return false
+        val pkg = homeKitInputApps.getOrNull(slot)?.takeIf { it.isNotBlank() } ?: return false
+        // Prefer the TV launcher entry: on Fire TV an app's phone-style launcher activity is often
+        // absent or a stub, and getLaunchIntentForPackage picks that one.
+        val intent = packageManager.getLeanbackLaunchIntentForPackage(pkg)
+            ?: packageManager.getLaunchIntentForPackage(pkg)
+        if (intent == null) {
+            Logger.w("HomeKit input $identifier: $pkg has no launchable activity")
+            return false
+        }
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching {
+            wakeDisplay()
+            startActivity(intent)
+            Logger.i("HomeKit input $identifier → launched $pkg")
+            // Tell the Home app which input is live. Without this the tile kept showing whatever
+            // was last selected THERE, so launching an app from the Home app left the Home app
+            // itself out of date about what it had just done.
+            homeKit?.reportInput(identifier)
+            true
+        }.getOrElse {
+            Logger.w("HomeKit input $identifier: could not launch $pkg — ${it.message}")
+            false
+        }
+    }
+
+    private fun stopHomeKit() {
+        homeKit?.let { runCatching { it.stop() } }
+        homeKit = null
+    }
+
+    /** Clears HomeKit pairings so the accessory can be added to a different Home. */
+    fun resetHomeKitPairings() {
+        homeKit?.resetPairings()
+    }
+
+    /** The pairing code to show the user, or null when HomeKit is off. */
+    fun homeKitSetupCode(): String? = homeKit?.setupCode
+
+    /** True once a controller has completed pair-setup; the code is no longer useful then. */
+    fun isHomeKitPaired(): Boolean = homeKit?.isPaired == true
+
+    /** The `X-HM://` URI behind the setup QR code, or null while HomeKit is off. */
+    fun homeKitPairingUri(): String? = homeKit?.pairingUri
+
+    /** The name the Home app lists this accessory under, which is not the AirPlay display name. */
+    fun homeKitAccessoryName(): String? = homeKit?.accessoryName
 
     /**
      * Stops all active receivers and updates the service state to Stopped.
@@ -424,10 +845,19 @@ class PhairPlayService : Service() {
      * Used for applying settings changes or recovering from errors.
      */
     private suspend fun restartReceivers() {
-        Logger.i("Restarting all receivers")
+        // HomeKit SURVIVES a receiver restart.
+        //
+        // It did not, and that was doing real damage. Every restart tore down the HAP server and
+        // brought it back on a fresh port, killing every controller connection mid-flight. Worse,
+        // turning the TV off from the Home app routes through endCurrentSession, which falls back
+        // to a restart when no stream is running -- so the Home app's own command destroyed the
+        // server it had just sent that command to, and then had nothing left to receive the state
+        // change on. The tile sitting on a stale value and the iPad's remote picker being
+        // unreliable are both downstream of this.
+        Logger.i("Restarting streaming receivers (HomeKit stays up)")
         _serviceState.value = ServiceState.Restarting
         updateNotification(isRunning = false)
-        stopAllReceiversInternal()
+        stopAllReceiversInternal(includeHomeKit = false)
         kotlinx.coroutines.delay(500) // brief pause to ensure ports are released
         startReceivers()
     }
@@ -476,6 +906,27 @@ class PhairPlayService : Service() {
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
+            // Wake the screen and warm the Surface the moment a sender opens the socket, so it is
+            // already there when video arrives ~half a second later.
+            //
+            // This deliberately does NOT launch the Activity. "Safe to fire on a probe" was wrong:
+            // an iPhone opens this socket every time its AirPlay picker is shown, and each of those
+            // probes threw PhairPlay in front of whatever the user was watching. The session start
+            // (ProtocolState.CONNECTED, below) is the honest moment to take the screen, and it
+            // already does.
+            onSenderApproaching = {
+                wakeDisplay()
+                // Runs on an RTSP socket thread; view work has to hop to the main looper.
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    val prepare = onPrepareSurface
+                    if (prepare == null) {
+                        surfacePrepareMissed = true
+                        Logger.i("Sender arrived before the Activity bound — surface prep deferred")
+                    } else {
+                        runCatching { prepare() }
+                    }
+                }
+            },
             onPhotoReceived = { bytes, imageType ->
                 _photoFrame.value = PhotoFrame(
                     bytes = bytes.copyOf(),
@@ -486,9 +937,10 @@ class PhairPlayService : Service() {
             onPhotoCleared = {
                 _photoFrame.value = null
             },
+            // Authoritative, straight from the receiver — see the guesses removed below.
+            onVideoPlayingChanged = { playing -> _videoPlaying.value = playing },
             onNowPlayingChanged = { info ->
                 _nowPlaying.value = info
-                _videoPlaying.value = (info == null && _airPlayState.value == ProtocolState.CONNECTED)
                 if (info != null) {
                     val name = info.senderName.takeIf { it.isNotBlank() }
                     // The name known at CONNECTED time is the RTSP User-Agent fallback ("AirPlay").
@@ -499,6 +951,7 @@ class PhairPlayService : Service() {
                 }
             },
             onEnergyChanged = { e -> _audioEnergy.value = e },
+            onBandsChanged = { b -> _audioBands.value = b },
             onPinChanged = { pin ->
                 _pairingPin.value = pin
                 // The code is useless if nobody can see it. Pairing happens before CONNECTED, so
@@ -508,12 +961,19 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
+            audioBufferMs = settings.audioBufferMs,
             beatDelayMs = settings.beatDelayMs,
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state
+                // Own the transport keys while streaming, and only while streaming. Fire OS routes
+                // PLAY/PAUSE to the active MediaSession rather than to the focused Activity, which
+                // is why the Activity's key handler never saw one.
+                updateMediaButtons(state == ProtocolState.CONNECTED)
                 when (state) {
                     ProtocolState.CONNECTED   -> {
+                        // See endOtherSession: AirPlay and DLNA share one audio output.
+                        endOtherSession(Protocol.AIRPLAY)
                         _photoFrame.value = null
                         // A connected session with no now-playing metadata is a mirror/video
                         // stream. Setting this here (not only from onNowPlayingChanged) is what
@@ -523,11 +983,13 @@ class PhairPlayService : Service() {
                         acquireStreamLocks()
                         Logger.i("Volume capability: ${deviceVolume.describeCapability(senderVolumeMode)}")
                         rememberSender(pendingSenderName)
-                        _videoPlaying.value = (_nowPlaying.value == null)
                         _activeConnection.value =
                             ActiveConnection(pendingSenderName, Protocol.AIRPLAY)
                         updateNotification(isRunning = true, streamingSenderName = pendingSenderName)
                         bringAppToFront()
+                        // Keep the Home app tile honest: a session started from the phone should
+                        // show the TV as on, not leave HomeKit reporting whatever it last set.
+                        homeKit?.reportActive(true)
                     }
                     ProtocolState.ADVERTISING,
                     ProtocolState.DISABLED,
@@ -537,9 +999,25 @@ class PhairPlayService : Service() {
                         // showStreamingScreen() forever — a black SurfaceView with nothing decoding.
                         releaseStreamLocks()
                         _videoPlaying.value = false
-                        _nowPlaying.value = null
-                        _photoFrame.value = null
-                        _activeConnection.value = null
+                        // Deliberately NOT reportActive(false): ending a stream does not turn the
+                        // TV off, and saying so made the Home tile flip to "off" while the user was
+                        // sitting in front of a lit screen. Active follows the display now — see
+                        // registerDisplayWatcher.
+                        // ONLY clear the shared now-playing state if it is still AirPlay's.
+                        //
+                        // _nowPlaying and _activeConnection are shared by both protocols, and the
+                        // DLNA handover runs in exactly the wrong order to survive an unguarded
+                        // reset: the control point publishes its metadata, then reports CONNECTED,
+                        // which calls endOtherSession -> AirPlay endSession -> this branch, which
+                        // wiped the DLNA track that had just been set. The Activity keeps the last
+                        // non-null value it saw, so the card sat there still showing the AirPlay
+                        // sender for the whole DLNA render -- "the now playing screen doesn't
+                        // switch". Whoever owns the connection owns the right to clear it.
+                        if (_activeConnection.value?.protocol != Protocol.DLNA) {
+                            _nowPlaying.value = null
+                            _photoFrame.value = null
+                            _activeConnection.value = null
+                        }
                         updateNotification(isRunning = state != ProtocolState.DISABLED &&
                                                        state != ProtocolState.ERROR)
                     }
@@ -616,10 +1094,21 @@ class PhairPlayService : Service() {
             context = applicationContext,
             onStateChanged = { state ->
                 _dlnaState.value = state
-                if (state == ProtocolState.CONNECTED) bringAppToFront()
-                if (state != ProtocolState.CONNECTED) _nowPlaying.value = null
+                if (state == ProtocolState.CONNECTED) {
+                    // One sender at a time. Starting a DLNA render while AirPlay was streaming left
+                    // BOTH playing -- two audio sources mixed together, and neither stoppable from
+                    // the sender that was no longer on screen. The protocols share one output, so
+                    // taking over means taking over.
+                    endOtherSession(Protocol.DLNA)
+                    bringAppToFront()
+                    _activeConnection.value = ActiveConnection("DLNA", Protocol.DLNA)
+                } else {
+                    _nowPlaying.value = null
+                    _activeConnection.value = null
+                }
             },
-            onNowPlayingChanged = { info -> _nowPlaying.value = info }
+            onNowPlayingChanged = { info -> _nowPlaying.value = info },
+            artworkLookupEnabled = { artworkLookup },
         ).also {
             // Drop the reference on a failed bind so the guard above doesn't treat a dead server as
             // running, and a later restart gets a clean retry.
@@ -627,7 +1116,12 @@ class PhairPlayService : Service() {
         }
     }
 
-    private fun stopAllReceiversInternal() {
+    /**
+     * @param includeHomeKit false leaves the HomeKit accessory running across the teardown.
+     *   HomeKit shares nothing with the streaming receivers -- different port, different identity,
+     *   different lifetime -- so restarting AirPlay has never been a reason to drop it.
+     */
+    private fun stopAllReceiversInternal(includeHomeKit: Boolean = true) {
         releaseStreamLocks()
         releaseWifiLock()
         try { airPlayReceiver?.stop() } catch (e: Exception) { Logger.e("AirPlay stop error", e) }
@@ -636,6 +1130,7 @@ class PhairPlayService : Service() {
         airPlayReceiver = null
         miracastReceiver = null
         dlnaServer = null
+        if (includeHomeKit) stopHomeKit()
         _airPlayState.value = ProtocolState.DISABLED
         _miracastState.value = ProtocolState.DISABLED
         _dlnaState.value = ProtocolState.DISABLED

@@ -38,11 +38,16 @@ class MirrorStreamServer(
     private val width: Int = 1920,
     private val height: Int = 1080,
     /**
-     * Reports whether video has gone idle, i.e. no frames for [IDLE_TIMEOUT_MS] while the session is
-     * still connected — what happens when the phone's screen switches off. The session is
-     * deliberately kept alive (locking the phone must not end a mirror); the UI just blanks so the
-     * last frame isn't left frozen on the panel, and unblanks when frames resume.
+     * The sender closed the video data connection without an RTSP TEARDOWN.
+     *
+     * This is not a rare edge: it is what an app switching to its own fullscreen player does —
+     * TikTok, for one — and what a phone does when it stops mirroring abruptly. Nothing else tells
+     * us, so without this the receiver keeps believing video is live and leaves the UI parked on a
+     * Surface that will never receive another frame: a black screen that outlasts the stream.
+     *
+     * Not called for a deliberate [stop], which is the receiver's own doing and already handled.
      */
+    private val onConnectionEnded: () -> Unit = {},
 ) {
     private sealed class Item
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
@@ -53,9 +58,16 @@ class MirrorStreamServer(
     private val queue = ArrayBlockingQueue<Item>(QUEUE_CAPACITY)
 
     @Volatile private var running = false
+    /** Set by [stop] so the reader can tell our own shutdown from the sender hanging up. */
+    @Volatile private var stopping = false
+    /** Why the reader loop finished — the difference between a hand-off and a failure. */
+    @Volatile private var endReason = "unknown"
     @Volatile private var client: Socket? = null
     /** When a type-0 (video) payload last arrived — drives the stall watchdog. */
     @Volatile private var lastVideoMs = 0L
+
+    /** Last time ANY payload arrived — the sender-is-alive signal, distinct from video arriving. */
+    @Volatile private var lastDataMs = 0L
     private var configAtMs = 0L
     private var firstVideoAtMs = 0L
     @Volatile private var decoder: VideoDecoder? = null   // owned by the decoder thread
@@ -65,6 +77,7 @@ class MirrorStreamServer(
     // the app backgrounds and creates a NEW one on return, so we watch for the identity changing
     // and rebuild the decoder — otherwise video stays black after foregrounding.
     @Volatile private var configuredSurface: Surface? = null
+    @Volatile private var offscreenReader: android.media.ImageReader? = null
     private var framePtsUs = 0L
     private var framesIn = 0
     private var framesDropped = 0
@@ -86,6 +99,7 @@ class MirrorStreamServer(
     }
 
     fun stop() {
+        stopping = true
         running = false
         runCatching { client?.close() }
         runCatching { serverSocket.close() }
@@ -107,12 +121,17 @@ class MirrorStreamServer(
             val input = socket.getInputStream()
             val header = ByteArray(128)
             lastVideoMs = System.currentTimeMillis()
+            lastDataMs = lastVideoMs
             while (running && !socket.isClosed) {
                 // A sender that wedges mid-mirror (iPad glitch) keeps the socket open but sends
                 // nothing, leaving the app on a frozen frame with no way to end it from the remote.
+                // Liveness is "sent us anything", not "sent us video". A phone parked on a static
+                // screen keeps the connection healthy with type-5 payloads while producing no new
+                // frames at all, so keying this on video alone would end a live session after 30s
+                // of someone reading their search results.
                 if (firstVideoAtMs != 0L &&
-                    System.currentTimeMillis() - lastVideoMs > DEAD_SENDER_MS) {
-                    Logger.w("Mirror: no video for ${DEAD_SENDER_MS}ms — sender is gone, ending")
+                    System.currentTimeMillis() - lastDataMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: nothing from the sender for ${DEAD_SENDER_MS}ms — ending")
                     break
                 }
                 if (!readFully(input, header, 128)) break
@@ -124,6 +143,7 @@ class MirrorStreamServer(
                 }
                 val payload = ByteArray(payloadSize)
                 if (!readFully(input, payload, payloadSize)) break
+                lastDataMs = System.currentTimeMillis()
                 when (payloadType) {
                     0 -> {
                         // ALWAYS advance the AES-CTR keystream, in order, for every video payload —
@@ -161,20 +181,32 @@ class MirrorStreamServer(
                     }
                 }
             }
+            endReason = "sender closed the stream (EOF)"
         } catch (e: java.net.SocketTimeoutException) {
             // A quiet sender is not a disconnect — a phone sitting on a static screen sends nothing
             // for long stretches. Keep waiting; the session ends when the socket actually closes.
+            endReason = "read timed out"
         } catch (e: Exception) {
+            endReason = "${e.javaClass.simpleName}: ${e.message}"
             if (running) Logger.e("Mirror reader error", e)
         } finally {
             running = false
-            Logger.i("Mirror data connection ended")
+            Logger.i("Mirror data connection ended — $endReason")
+            if (!stopping) {
+                Logger.i("Sender dropped the video connection without a TEARDOWN — ending video")
+                runCatching { onConnectionEnded() }
+            }
         }
     }
 
     /** Bounded enqueue — if the decoder is behind, drop the oldest item to keep latency bounded. */
     private fun enqueue(item: Item) {
         framesIn++
+        // Start the clock on the first frame, not on the first *report*. Leaving it unset meant the
+        // opening window had no elapsed time to divide by, so it printed 0fps regardless of what
+        // the decoder was doing — and "in=300 dropped=0 0fps" reads exactly like a stall. It cost a
+        // wrong diagnosis of the cold-start bug: the surface was live and frames were rendering.
+        if (framesIn == 1) lastStatMs = System.currentTimeMillis()
         if (!queue.offer(item)) {
             queue.poll()
             queue.offer(item)
@@ -184,11 +216,12 @@ class MirrorStreamServer(
         StreamStats.videoQueue = queue.size
         if (framesIn % 300 == 0) {
             val now = System.currentTimeMillis()
-            if (lastStatMs != 0L) StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
+            StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
             lastStatMs = now
             StreamStats.videoDropPct = framesDropped * 100 / framesIn
             Logger.i("Video stats: in=$framesIn dropped=$framesDropped " +
-                "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps")
+                "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps " +
+                "→ ${surfaceLabel(configuredSurface)}")
         }
     }
 
@@ -218,13 +251,22 @@ class MirrorStreamServer(
         } finally {
             decoder?.release()
             decoder = null
+            offscreenReader?.close()
+            offscreenReader = null
         }
     }
 
     private fun configureDecoder(sps: ByteArray, pps: ByteArray) {
         // New SPS/PPS (or first config) — cache it and (re)build against the current surface.
         val d = decoder
-        val surface = awaitSurface()
+        // Fall back to an off-screen surface rather than waiting. The sender leads with the only
+        // IDR it will send for the next several seconds, and a cold Activity start (worse still
+        // after the task was swiped away) takes longer than that to produce a real Surface. Waiting
+        // means missing the IDR, which is what made every first mirroring attempt black until the
+        // user disconnected and reconnected. Decoding off-screen instead keeps the reference frames
+        // warm, and decodeFrame retargets the running codec the moment the real Surface appears —
+        // setOutputSurface, so no keyframe wait at the swap.
+        val surface = awaitSurface() ?: offscreenSurface()
         if (d != null && d.isHealthy && sps.contentEquals(lastSps) && pps.contentEquals(lastPps) &&
             surface === configuredSurface) return
         lastSps = sps
@@ -249,14 +291,31 @@ class MirrorStreamServer(
         decoder = VideoDecoder(surface).also { it.initialize(sc + sps, sc + pps, width, height) }
         awaitingKeyframe = true                                // a fresh decoder must start at an IDR
         StreamStats.videoRes = "${width}x${height}"
-        Logger.i("Mirror decoder (re)built for surface (sps=${sps.size}B pps=${pps.size}B)")
+        Logger.i("Mirror decoder (re)built for ${surfaceLabel(surface)} surface (sps=${sps.size}B pps=${pps.size}B)")
+    }
+
+    /**
+     * Names a surface for the log: which one the decoder is actually drawing into is the single
+     * fact that separates "mirroring works" from "mirroring is decoding perfectly into a buffer
+     * nobody can see", and until now nothing recorded it.
+     */
+    private fun surfaceLabel(s: Surface?): String = when {
+        s == null -> "none"
+        s === offscreenReader?.surface -> "OFF-SCREEN (not visible)"
+        else -> "live"
     }
 
     private fun decodeFrame(annexB: ByteArray) {
         // Re-attach to the live Surface if it changed (the app was backgrounded and returned, so the
         // SurfaceView made a new Surface). Without this, video stays black after foregrounding.
         val liveSurface = surfaceProvider()
-        if (liveSurface !== configuredSurface) {
+        // While decoding off-screen there is deliberately no display surface, and configuredSurface
+        // is the ImageReader's. Without this guard that mismatch would rebuild the decoder against
+        // null on every single frame.
+        val offscreen = offscreenReader?.surface
+        if (liveSurface == null && configuredSurface === offscreen && offscreen != null) {
+            // keep decoding off-screen
+        } else if (liveSurface !== configuredSurface) {
             // Prefer retargeting the existing codec: a rebuild resets reference state and stalls on
             // awaitingKeyframe until the sender's next IDR, which is the black-screen-for-seconds
             // effect after coming back from Home. Only rebuild if the swap isn't possible.
@@ -264,6 +323,9 @@ class MirrorStreamServer(
             if (swapped) {
                 configuredSurface = liveSurface
                 Logger.i("Mirror: surface changed — retargeted decoder in place (no keyframe wait)")
+                // The off-screen buffers are dead weight once the picture has somewhere real to go.
+                offscreenReader?.close()
+                offscreenReader = null
             } else {
                 Logger.i("Mirror: surface ${if (liveSurface == null) "lost" else "changed"} — rebuilding decoder")
                 rebuildDecoder(liveSurface)
@@ -301,6 +363,24 @@ class MirrorStreamServer(
         return false
     }
 
+    /**
+     * A throwaway Surface backed by an [android.media.ImageReader], used only to keep the decoder
+     * running while there is nowhere to show the picture. Images must be drained or the codec stalls
+     * once the reader's buffers are all held, so every frame is acquired and immediately closed.
+     */
+    private fun offscreenSurface(): Surface {
+        offscreenReader?.let { return it.surface }
+        val reader = android.media.ImageReader.newInstance(
+            width, height, android.graphics.ImageFormat.PRIVATE, OFFSCREEN_BUFFERS
+        )
+        reader.setOnImageAvailableListener({ r ->
+            runCatching { r.acquireLatestImage()?.close() }
+        }, android.os.Handler(android.os.Looper.getMainLooper()))
+        offscreenReader = reader
+        Logger.i("Mirror: no display surface yet — decoding off-screen until one appears")
+        return reader.surface
+    }
+
     /** The streaming Surface appears shortly after CONNECTED is emitted; poll briefly. */
     private fun awaitSurface(): Surface? {
         repeat(SURFACE_WAIT_TRIES) {
@@ -320,10 +400,30 @@ class MirrorStreamServer(
 
     private fun readFully(input: InputStream, buf: ByteArray, len: Int): Boolean {
         var read = 0
+        var quietSinceMs = System.currentTimeMillis()
         while (read < len) {
-            val n = input.read(buf, read, len - read)
+            val n = try {
+                input.read(buf, read, len - read)
+            } catch (e: java.net.SocketTimeoutException) {
+                // soTimeout fires whenever the sender is merely quiet, and a phone parked on a
+                // static screen is quiet for a long time — mirroring TikTok and opening search
+                // produced no frames for over 3s, so the reader bailed, the session was declared
+                // dropped, and the TV fell back to the audio card with no route back to video
+                // even though the phone was still mirroring the whole time.
+                //
+                // Keep waiting instead. Retrying is safe mid-frame: `read` holds our place in the
+                // buffer, so the stream stays aligned. DEAD_SENDER_MS is the only thing that gives
+                // up, which is what it was there for.
+                if (!running) return false
+                if (System.currentTimeMillis() - quietSinceMs > DEAD_SENDER_MS) {
+                    Logger.w("Mirror: no data for ${DEAD_SENDER_MS}ms — sender is gone")
+                    return false
+                }
+                continue
+            }
             if (n == -1) return false
             read += n
+            quietSinceMs = System.currentTimeMillis()
         }
         return true
     }
@@ -347,7 +447,10 @@ class MirrorStreamServer(
         private const val DEAD_SENDER_MS = 30_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
-        private const val SURFACE_WAIT_TRIES = 50
+        private const val SURFACE_WAIT_TRIES = 3      // ~300ms, then decode off-screen instead
         private const val SURFACE_WAIT_MS = 100L
+
+        /** Enough for the codec to have somewhere to write while we wait for the real Surface. */
+        private const val OFFSCREEN_BUFFERS = 4
     }
 }
