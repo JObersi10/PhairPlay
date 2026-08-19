@@ -292,8 +292,14 @@
 
     <string name="setting_artwork_lookup">Find missing album art</string>
     <string name="setting_artwork_lookup_subtitle">When a sender streams without cover art — most DLNA apps do — look one up by title using MusicBrainz and the Cover Art Archive. Track names are sent to those services while this is on.</string>
-    <string name="setting_projector">Projector mode</string>
-    <string name="setting_projector_subtitle">Pure black background with the beat visual centred and faded out on every side, so a projected image has no visible edge.</string>
+    <string name="setting_backdrop">Backdrop</string>
+    <string name="setting_backdrop_subtitle">What fills the screen behind the Now Playing card.</string>
+    <string name="backdrop_dynamic">Dynamic</string>
+    <string name="backdrop_dynamic_detail">Album colours across the whole screen, moving with the beat.</string>
+    <string name="backdrop_projector">Projector</string>
+    <string name="backdrop_projector_detail">Three band orbs on true black, faded out on every side so a projected image has no visible edge.</string>
+    <string name="backdrop_black">Black</string>
+    <string name="backdrop_black_detail">Plain black. No colour and nothing moving.</string>
     <string name="setting_stream_end">Exit when the stream ends</string>
     <string name="setting_stream_end_subtitle">Leave for the Fire TV home screen as soon as the sender stops. Off keeps PhairPlay on screen, ready for the next stream.</string>
     <string name="setting_perm_overlay">Show the remote\'s focus ring</string>

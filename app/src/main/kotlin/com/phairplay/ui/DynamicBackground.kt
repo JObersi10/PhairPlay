@@ -16,6 +16,7 @@ import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
 import androidx.palette.graphics.Palette
+import com.phairplay.settings.BackdropTheme
 import com.phairplay.util.Logger
 
 class DynamicBackground @JvmOverloads constructor(
@@ -77,7 +78,11 @@ class DynamicBackground @JvmOverloads constructor(
         }
     }
 
-    override fun onAttachedToWindow() { super.onAttachedToWindow(); t1.start(); t2.start(); t3.start(); handler.post(tick) }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        t1.start(); t2.start(); t3.start()
+        if (backdropTheme != BackdropTheme.BLACK) handler.post(tick)
+    }
     override fun onDetachedFromWindow() { super.onDetachedFromWindow(); t1.cancel(); t2.cancel(); t3.cancel(); handler.removeCallbacks(tick) }
 
     fun setEnergy(e: Float) {
@@ -218,6 +223,11 @@ class DynamicBackground @JvmOverloads constructor(
     }
 
     override fun onDraw(canvas: Canvas) {
+        // Nothing to compose: no palette, no beat, no edge treatment. Just the card on black.
+        if (backdropTheme == BackdropTheme.BLACK) {
+            canvas.drawColor(Color.BLACK)
+            return
+        }
         val f = colorFade
         if (f >= 1f) for (i in 0 until PALETTE_SIZE) colors[i] = targets[i]
 
@@ -352,15 +362,20 @@ class DynamicBackground @JvmOverloads constructor(
      * Cheap enough to call whenever the setting changes: it only flips a flag and drops the cached
      * gradient, and the next frame rebuilds whatever it needs.
      */
-    fun setProjectorMode(on: Boolean) {
-        if (projectorMode == on) return
-        projectorMode = on
-        centreBias = if (on) PROJECTOR_CENTRE_BIAS else 1f
+    fun setTheme(theme: BackdropTheme) {
+        if (backdropTheme == theme) return
+        backdropTheme = theme
+        centreBias = if (theme == BackdropTheme.PROJECTOR) PROJECTOR_CENTRE_BIAS else 1f
         vignette = null
+        // BLACK stops the redraw loop rather than merely drawing nothing. A 60fps invalidate that
+        // paints one rectangle is still 60 frames a second of compositing on a device that has
+        // little to spare, for a picture that cannot change. The loop restarts on the way out.
+        if (theme == BackdropTheme.BLACK) handler.removeCallbacks(tick) else handler.post(tick)
         invalidate()
     }
 
-    private var projectorMode = false
+    private var backdropTheme = BackdropTheme.DYNAMIC
+    private val projectorMode get() = backdropTheme == BackdropTheme.PROJECTOR
 
     /** 1f leaves blob centres where they are; below 1f compresses them toward the middle. */
     private var centreBias = 1f
@@ -830,7 +845,12 @@ class DynamicBackground @JvmOverloads constructor(
          * the small quick one -- giving all three the same size is most of why a trio of orbs reads
          * as one thing blinking rather than as three instruments.
          */
-        private val ORB_BASE_RADIUS = floatArrayOf(0.26f, 0.21f, 0.16f)
+        // SIZED SO THE EDGE CLAMP NEVER BITES. At 0.26/0.21/0.16 the fully-swollen bass orb
+        // reached 0.42 of the short side against ~0.41 of room, so it hit the geometric clamp on
+        // every peak and simply stopped growing -- a big orb that never changed size, which is
+        // exactly the "bass and vocals are maxed, only treble moves" report. The clamp is a safety
+        // net for odd window shapes; when it is doing the work on a 16:9 TV, the radii are wrong.
+        private val ORB_BASE_RADIUS = floatArrayOf(0.20f, 0.165f, 0.13f)
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -905,7 +925,7 @@ class DynamicBackground @JvmOverloads constructor(
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
         // halo covers most of the frame, so the orbs were the brightest thing in a dark room.
-        private const val ORB_BASE_ALPHA = 0.66f
+        private const val ORB_BASE_ALPHA = 0.52f
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
@@ -913,10 +933,10 @@ class DynamicBackground @JvmOverloads constructor(
         private const val ORB_BEAT_ALPHA = 0.14f
 
         /** Ceiling on halo alpha, so a high intensity setting cannot wash the frame out. */
-        private const val ORB_ALPHA_CAP = 224
+        private const val ORB_ALPHA_CAP = 196
 
-        private const val ORB_CORE_ALPHA = 0.16f
-        private const val ORB_CORE_BEAT_ALPHA = 0.74f
+        private const val ORB_CORE_ALPHA = 0.12f
+        private const val ORB_CORE_BEAT_ALPHA = 0.62f
         private const val CORE_WHITEN = 0.34f
         private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
 

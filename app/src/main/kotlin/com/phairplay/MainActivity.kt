@@ -991,7 +991,7 @@ class MainActivity : AppCompatActivity() {
                 pipEnabled = settings.pipEnabled
                 refreshPipParams()
                 nowPlayingScreen.setBeatPulse(settings.beatPulse)
-                nowPlayingScreen.setProjectorMode(settings.projectorMode)
+                nowPlayingScreen.setBackdropTheme(settings.backdropTheme)
                 // Cached for the same reason as backAction: the session-end path is synchronous.
                 streamEndAction = settings.streamEndAction
                 // Sender-requested latency (250ms) plus the user's A/V trim, so the elapsed time

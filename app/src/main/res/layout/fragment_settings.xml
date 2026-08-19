@@ -555,12 +555,46 @@
             android:layout_width="match_parent"
             android:layout_height="72dp" />
 
-        <!-- Projector mode: black background with the beat visual dissolved into it on all
-             sides, so a projected image has no visible edge. -->
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_projector_mode"
+        <!-- Backdrop: Dynamic (album-coloured field), Projector (orbs on true black, edgeless so
+             a projected image has no border) or Black (nothing at all behind the card). -->
+        <LinearLayout
+            android:id="@+id/row_backdrop_theme"
             android:layout_width="match_parent"
-            android:layout_height="72dp" />
+            android:layout_height="72dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="16dp"
+            android:background="@drawable/focus_ring_selector"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_backdrop"
+                    android:textColor="@color/text_primary"
+                    android:textSize="18sp" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_backdrop_subtitle"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/text_backdrop_theme_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_secondary"
+                android:textSize="16sp" />
+        </LinearLayout>
 
         <!-- Look a missing album cover up online. Off by default: it is the only setting that makes
              the receiver talk to a third party. -->

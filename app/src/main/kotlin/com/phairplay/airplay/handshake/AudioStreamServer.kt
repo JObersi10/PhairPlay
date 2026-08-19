@@ -630,7 +630,6 @@ class AudioStreamServer(
         val now = System.currentTimeMillis()
         val isOnset = n >= 8 && level > mean + ONSET_SIGMA * stddev && now - lastOnsetMs > REFRACTORY_MS
         if (isOnset) {
-            if (lastOnsetMs > 0L) noteOnsetInterval(now - lastOnsetMs)
             lastOnsetMs = now
             envelope = 1f
         } else {
@@ -647,146 +646,6 @@ class AudioStreamServer(
         emitDelayed(envelope)
     }
 
-    /**
-     * Tempo estimate from the spacing of bass onsets.
-     *
-     * The onset detector above already fires on the beat, so tempo is the interval between firings —
-     * no second analysis pass and no autocorrelation needed.
-     *
-     * Two things make a naive version useless. Onsets are missed and doubled, so a MEAN interval is
-     * dragged badly by a single outlier; the median is not. And a detector cannot tell a beat from
-     * its half or double, so raw intervals scatter across octaves — folding each into one octave
-     * before comparing is what collapses 60/120/240 onto the same answer.
-     *
-     * Reported with a confidence, because an estimate is worthless without one: on speech, ambient
-     * music or applause the intervals genuinely have no mode, and saying "94 BPM" about them would be
-     * a fabrication dressed as a measurement.
-     */
-    private fun noteOnsetInterval(intervalMs: Long) {
-        if (intervalMs < MIN_ONSET_INTERVAL_MS || intervalMs > MAX_ONSET_INTERVAL_MS) return
-        onsetIntervals[onsetIdx % onsetIntervals.size] = intervalMs
-        onsetIdx++
-        val n = minOf(onsetIdx, onsetIntervals.size)
-        if (n < MIN_INTERVALS_FOR_BPM) return
-
-        // HARMONIC SCORING, not a median of folded intervals.
-        //
-        // The median version scored 25-41% confidence on Drake's "Hotline Bling" -- a track with an
-        // unmistakable beat -- and never cleared its own threshold. The reason is that folding each
-        // interval into one octave only rescues a CLEAN double or half. Real onset detection misses
-        // beats, so intervals arrive at 2x, 3x, sometimes 1.5x the true period; folding maps those
-        // onto unrelated tempos, which then drag the median and disagree with it. The log's spread
-        // of 106, 110, 115, 116 across consecutive estimates is that scatter, not tempo drift.
-        //
-        // Scoring candidates directly inverts the problem. For each candidate period, an interval
-        // counts as agreeing if it lands near ANY small integer multiple of it -- which is exactly
-        // what a missed beat produces. A track's true tempo is then the candidate almost every
-        // interval agrees with, and the harmonics that used to be noise become evidence for it.
-        var bestBpm = 0.0
-        var bestScore = 0
-        var candidate = BPM_MIN
-        while (candidate <= BPM_MAX) {
-            val period = 60_000.0 / candidate
-            var score = 0
-            for (i in 0 until n) {
-                val ratio = onsetIntervals[i] / period
-                val nearest = Math.round(ratio).toInt()
-                if (nearest in 1..MAX_BEAT_MULTIPLE &&
-                    Math.abs(ratio - nearest) / nearest <= BPM_TOLERANCE
-                ) score++
-            }
-            // Strictly greater, so the LOWEST tempo wins a tie. Every candidate's double scores at
-            // least as well as the candidate itself (twice the period still divides the intervals),
-            // so ties broken the other way would report 240 BPM for a 120 BPM track every time.
-            if (score > bestScore) { bestScore = score; bestBpm = candidate }
-            candidate += BPM_STEP
-        }
-        val median = bestBpm
-        val confidence = bestScore.toFloat() / n
-
-        // HYSTERESIS. Acquiring a tempo is held to a high bar; KEEPING one is not.
-        //
-        // A single threshold made the meter unusable on real music: confidence sits either side of
-        // 0.5 from window to window, so the readout flicked between a number and blank several
-        // times a minute even though the track's tempo obviously never changed. Nothing was wrong
-        // with the estimate — the display was just being asked a yes/no question every few seconds
-        // about something that is true for the length of a song.
-        //
-        // So: cross BPM_MIN_CONFIDENCE to acquire, but only fall below BPM_HOLD_CONFIDENCE for
-        // BPM_MISSES_TO_DROP consecutive windows to lose it. A genuine tempo change (or the next
-        // track) still drops the lock within a few seconds; a momentarily ambiguous bar does not.
-        val locked = currentBpm > 0f
-        when {
-            confidence >= BPM_MIN_CONFIDENCE -> {
-                val adopt = if (locked) foldToLock(median, currentBpm.toDouble()) else median
-                // MOVING A LOCK COSTS MORE THAN KEEPING ONE.
-                //
-                // BPM_MIN_CONFIDENCE was the bar for both acquiring a tempo and replacing one, and
-                // at 0.5 that is a coin flip. Real logs walked 129 -> 146 -> 152 -> 157 on a track
-                // whose tempo never changed, every step taken at exactly 50%: each window nudged
-                // the lock a little, and the next window scored its neighbourhood rather than the
-                // true tempo, so it ratcheted. Anything that folds onto the current lock (the same
-                // tempo, or an octave of it) still counts at the normal bar; a genuinely DIFFERENT
-                // number has to clear a much higher one, or it is just noise and the lock holds.
-                // Eased while locked, so a half-time bar nudges the readout instead of snapping it.
-                val wouldMoveLock = locked && adopt != currentBpm.toDouble()
-                if (!wouldMoveLock || confidence >= BPM_RELOCK_CONFIDENCE) {
-                    currentBpm =
-                        if (locked) (currentBpm * (1f - BPM_ADOPT) + adopt.toFloat() * BPM_ADOPT)
-                        else adopt.toFloat()
-                }
-                bpmMisses = 0
-            }
-            // Weak but still locked: hold the number and say nothing.
-            locked && confidence >= BPM_HOLD_CONFIDENCE -> bpmMisses = 0
-            locked -> {
-                bpmMisses++
-                if (bpmMisses >= BPM_MISSES_TO_DROP) { currentBpm = 0f; bpmMisses = 0 }
-            }
-            else -> currentBpm = 0f
-        }
-        val now = System.currentTimeMillis()
-        if (now - lastBpmLogMs > BPM_LOG_INTERVAL_MS) {
-            lastBpmLogMs = now
-            if (currentBpm > 0f) {
-                Logger.i("Tempo %.0f BPM (confidence %.0f%%, %d onsets)".format(currentBpm, confidence * 100f, n))
-            } else {
-                Logger.i("Tempo: no stable beat (best %.0f BPM at %.0f%% — below threshold)".format(median, confidence * 100f))
-            }
-        }
-    }
-
-    /**
-     * Pulls an octave error back onto the tempo we already have.
-     *
-     * The scorer treats an interval as a hit when it lands near ANY integer multiple of the
-     * candidate period, which is what lets it survive missed beats — but it also means 85 and 170
-     * both explain the same track well, and which of them wins can change from window to window on
-     * nothing more than where the bar happened to be cut. Reported raw, the meter reads 170, then
-     * 85, then 170 on a track whose tempo is completely steady.
-     *
-     * So when a fresh estimate is within tolerance of double or half the current lock, it is the
-     * same tempo counted differently, and the lock wins. A genuinely different tempo is not near
-     * either multiple and passes through untouched.
-     */
-    private fun foldToLock(candidate: Double, lock: Double): Double {
-        if (lock <= 0.0) return candidate
-        for (m in intArrayOf(1, 2, 4)) {
-            if (Math.abs(candidate / m - lock) / lock <= BPM_OCTAVE_TOLERANCE) return lock
-            if (Math.abs(candidate * m - lock) / lock <= BPM_OCTAVE_TOLERANCE) return lock
-        }
-        return candidate
-    }
-
-    private val onsetIntervals = LongArray(24)
-    private var onsetIdx = 0
-    private var lastBpmLogMs = 0L
-    /** Consecutive sub-[BPM_HOLD_CONFIDENCE] windows while locked. */
-    private var bpmMisses = 0
-
-    /** Latest tempo estimate, or 0 when no stable beat was found. */
-    @Volatile var currentBpm: Float = 0f
-        private set
 
     /**
      * One-pole coefficient for a cutoff of [hz] at the current sample rate.
@@ -848,8 +707,17 @@ class AudioStreamServer(
             // what it is for. The vocal band therefore also takes an ABSOLUTE presence term, so it
             // is lit whenever centre-panned voice is there at all, with swell still adding on top.
             // Bass and treble stay pure-swell or they become a constant glow and stop pulsing.
+            //
+            // The presence term needs its OWN floor, or it becomes a permanent glow. At 0.9 of a
+            // raw peak ratio the vocal orb sat between 0.3 and 0.9 continuously on the device --
+            // never dark, never really moving, the middle orb "always big". Centre-panned energy
+            // is present in almost every mix at some level; what should light the orb is that
+            // energy being HIGH for this track, so the ratio is gated well above zero first and
+            // then re-expanded, and it contributes rather less than the swell it competes with.
+            val gated = ((presence - BAND_PRESENCE_GATE) / (1.0 - BAND_PRESENCE_GATE))
+                .coerceIn(0.0, 1.0)
             val combined =
-                if (b == BAND_VOCAL) Math.max(swell, presence * BAND_PRESENCE_WEIGHT) else swell
+                if (b == BAND_VOCAL) Math.max(swell, gated * BAND_PRESENCE_WEIGHT) else swell
             // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
             // costs no headroom at the top.
             val norm = ((combined - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
@@ -1338,7 +1206,10 @@ class AudioStreamServer(
         private const val BAND_EXCESS_MAX = 1.1
 
         /** How much of the vocal band's absolute presence counts, before swell is added on top. */
-        private const val BAND_PRESENCE_WEIGHT = 0.9
+        private const val BAND_PRESENCE_WEIGHT = 0.55
+
+        /** How loud centre content has to be, against the band's own peak, before it counts at all. */
+        private const val BAND_PRESENCE_GATE = 0.45
         private const val BAND_LOG_INTERVAL_MS = 2000L
         private const val BAND_EMIT_INTERVAL_MS = 33L
 
@@ -1346,37 +1217,13 @@ class AudioStreamServer(
         private const val BAND_ATTACK = 0.42f
         private const val BAND_RELEASE = 0.11f
 
-        // ── Tempo estimation ────────────────────────────────────────────────────────────────────
-        /** 180 BPM and 60 BPM as intervals — anything outside is a missed or doubled onset. */
-        private const val MIN_ONSET_INTERVAL_MS = 200L
-        private const val MAX_ONSET_INTERVAL_MS = 2000L
-        private const val MIN_INTERVALS_FOR_BPM = 8
-        private const val BPM_MIN = 60.0
-        private const val BPM_MAX = 180.0
-        /** How close an interval must be to the median to count as agreeing with it. */
-        private const val BPM_TOLERANCE = 0.08
-        private const val BPM_MIN_CONFIDENCE = 0.5f
-
-        /** What a candidate must score to REPLACE an existing lock with a different number. */
-        private const val BPM_RELOCK_CONFIDENCE = 0.72f
-
-        /** Confidence needed to KEEP a lock, well under what it takes to acquire one. */
-        private const val BPM_HOLD_CONFIDENCE = 0.28f
-
-        /** Consecutive windows under the hold bar before the lock is released. */
-        private const val BPM_MISSES_TO_DROP = 6
-
-        /** How far a re-estimate moves an existing lock, per adoption. */
-        private const val BPM_ADOPT = 0.12f
-
-        /** Proximity to a 2x/4x multiple that counts as the same tempo counted differently. */
-        private const val BPM_OCTAVE_TOLERANCE = 0.12
-        /** Candidate resolution. 0.5 BPM is finer than anyone can hear a visual lag against. */
-        private const val BPM_STEP = 0.5
-        /** How many beats a single missed-onset gap may span and still count as evidence. */
-        private const val MAX_BEAT_MULTIPLE = 4
-        private const val BPM_LOG_INTERVAL_MS = 5000L
-
+        // ── Onset detection ─────────────────────────────────────────────────────────────────────
+        //
+        // A tempo ESTIMATOR used to live here as well -- harmonic interval scoring, confidence
+        // hysteresis, octave folding, the lot -- and nothing ever read its answer. It logged a BPM
+        // figure and that was all it did, so every wrong number it produced was a bug report about
+        // a feature that did not exist. The onset detector below stays because the beat envelope
+        // is driven from it; the tempo it implied is gone.
         private const val ONSET_SIGMA = 1.5
         private const val REFRACTORY_MS = 120L
         private const val DECAY_MS = 250f

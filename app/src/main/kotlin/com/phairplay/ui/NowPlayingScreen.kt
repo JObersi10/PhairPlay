@@ -32,6 +32,7 @@ import androidx.appcompat.content.res.AppCompatResources
 import com.phairplay.R
 import com.phairplay.util.Logger
 import com.phairplay.airplay.NowPlayingInfo
+import com.phairplay.settings.BackdropTheme
 import com.phairplay.airplay.SenderDeviceType
 import timber.log.Timber
 
@@ -1069,17 +1070,18 @@ class NowPlayingScreen @JvmOverloads constructor(
         dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
     }
 
-    /** Edgeless projector look — see [DynamicBackground.setProjectorMode]. */
-    fun setProjectorMode(on: Boolean) {
-        if (projectorMode == on) return
-        projectorMode = on
-        dynamicBg.setProjectorMode(on)
+    /** What fills the screen behind the card — see [DynamicBackground.setTheme]. */
+    fun setBackdropTheme(theme: BackdropTheme) {
+        if (backdropTheme == theme) return
+        backdropTheme = theme
+        dynamicBg.setTheme(theme)
         // Re-apply so the album-art backdrop is dropped (or restored) straight away rather than at
         // the next compact transition, which might be minutes later or never.
         applyCompactState()
     }
 
-    private var projectorMode = false
+    private var backdropTheme = BackdropTheme.DYNAMIC
+    private val projectorMode get() = backdropTheme == BackdropTheme.PROJECTOR
 
     fun setScreensaverConfig(enabled: Boolean, timeoutMinutes: Int) {
         screensaverEnabled = enabled

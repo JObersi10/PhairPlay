@@ -186,7 +186,7 @@ data class AppSettings(
      * every side. On a projector black is simply no light, so the picture appears to have no
      * boundary at all. Off by default — on a normal TV it just looks dimmer.
      */
-    val projectorMode: Boolean = false,
+    val backdropTheme: BackdropTheme = BackdropTheme.DYNAMIC,
     /**
      * Look album art up online when the sender did not supply any (DLNA mostly).
      *
@@ -316,6 +316,24 @@ enum class BackAction {
     companion object {
         fun fromName(name: String?): BackAction =
             entries.firstOrNull { it.name == name } ?: STOP_STREAM
+    }
+}
+
+/** What fills the screen behind the Now Playing card. */
+enum class BackdropTheme {
+    /** Album-coloured blobs across the whole screen, breathing with the beat. The TV default. */
+    DYNAMIC,
+
+    /** Three band orbs on true black, dissolved at every edge so a projected image has no border. */
+    PROJECTOR,
+
+    /** Plain black. No colour, no beat, nothing moving -- just the card. */
+    BLACK,
+    ;
+
+    companion object {
+        fun fromName(name: String?): BackdropTheme =
+            entries.firstOrNull { it.name == name } ?: DYNAMIC
     }
 }
 

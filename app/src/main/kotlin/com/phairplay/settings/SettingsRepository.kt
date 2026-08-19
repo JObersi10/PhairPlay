@@ -144,7 +144,11 @@ class SettingsRepository(private val context: Context) {
         // fromAppSettings, so the Settings toggle wrote a value that was thrown away and the
         // field always read its default. Persisted now.
         remoteEnabled      = this[Keys.REMOTE_ENABLED]          ?: false,
-        projectorMode      = this[Keys.PROJECTOR_MODE]          ?: false,
+        // Migration: BACKDROP_THEME replaced the projectorMode boolean, which could only say
+        // "orbs on black" or "not that" and had no way to express "nothing at all".
+        backdropTheme      = this[Keys.BACKDROP_THEME]?.let { BackdropTheme.fromName(it) }
+            ?: if (this[Keys.PROJECTOR_MODE] == true) BackdropTheme.PROJECTOR
+               else BackdropTheme.DYNAMIC,
         artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
         streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
@@ -179,7 +183,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.LAST_SENDER_AT]       = settings.lastSenderAtMs
         this[Keys.REMEMBER_PIN_PAIRING] = settings.rememberPinPairing
         this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
-        this[Keys.PROJECTOR_MODE]       = settings.projectorMode
+        this[Keys.BACKDROP_THEME]       = settings.backdropTheme.name
         this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
         this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
@@ -202,7 +206,9 @@ class SettingsRepository(private val context: Context) {
         // Legacy, read-only: superseded by BACK_ACTION but still consulted when migrating.
         val BACK_QUITS_APP      = booleanPreferencesKey("back_quits_app")
         val REMOTE_ENABLED      = booleanPreferencesKey("remote_enabled")
+        /** Legacy, read-only: superseded by BACKDROP_THEME but still consulted when migrating. */
         val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
+        val BACKDROP_THEME      = stringPreferencesKey("backdrop_theme")
         val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
         val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")

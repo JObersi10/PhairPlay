@@ -21,6 +21,7 @@ import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.BackAction
+import com.phairplay.settings.BackdropTheme
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.settings.StreamEndAction
 import com.phairplay.util.Logger
@@ -66,7 +67,8 @@ class SettingsFragment : Fragment() {
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
-    private lateinit var rowProjectorMode: View
+    private lateinit var rowBackdropTheme: View
+    private lateinit var textBackdropThemeValue: TextView
     private lateinit var rowArtworkLookup: View
     private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
@@ -141,7 +143,8 @@ class SettingsFragment : Fragment() {
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
-        rowProjectorMode    = view.findViewById(R.id.row_projector_mode)
+        rowBackdropTheme    = view.findViewById(R.id.row_backdrop_theme)
+        textBackdropThemeValue = view.findViewById(R.id.text_backdrop_theme_value)
         rowArtworkLookup    = view.findViewById(R.id.row_artwork_lookup)
         rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
@@ -214,7 +217,6 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowScreensaver,  R.string.setting_screensaver,        R.string.setting_screensaver_subtitle)
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
-        configureToggleRow(rowProjectorMode, R.string.setting_projector,        R.string.setting_projector_subtitle)
         configureToggleRow(rowArtworkLookup, R.string.setting_artwork_lookup,    R.string.setting_artwork_lookup_subtitle)
         configureToggleRow(rowStreamEndAction, R.string.setting_stream_end,     R.string.setting_stream_end_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
@@ -288,7 +290,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
-        setToggle(rowProjectorMode, settings.projectorMode)
+        showBackdropTheme(settings.backdropTheme)
         setToggle(rowArtworkLookup, settings.artworkLookup)
         setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
@@ -375,7 +377,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
-        setToggleListener(rowProjectorMode) { enabled -> save { it.copy(projectorMode = enabled) } }
+        rowBackdropTheme.setOnClickListener { pickBackdropTheme() }
         setToggleListener(rowArtworkLookup) { enabled -> save { it.copy(artworkLookup = enabled) } }
         setToggleListener(rowStreamEndAction) { enabled ->
             save { it.copy(streamEndAction = if (enabled) StreamEndAction.EXIT_APP else StreamEndAction.STAY_IN_APP) }
@@ -588,6 +590,37 @@ class SettingsFragment : Fragment() {
      * Each option spells out its consequence, because the distinction that matters — whether the
      * receiver keeps advertising after you leave — is invisible from the screen you land on.
      */
+    private fun backdropLabel(theme: BackdropTheme): String = getString(when (theme) {
+        BackdropTheme.DYNAMIC   -> R.string.backdrop_dynamic
+        BackdropTheme.PROJECTOR -> R.string.backdrop_projector
+        BackdropTheme.BLACK     -> R.string.backdrop_black
+    })
+
+    private fun backdropDetail(theme: BackdropTheme): String = getString(when (theme) {
+        BackdropTheme.DYNAMIC   -> R.string.backdrop_dynamic_detail
+        BackdropTheme.PROJECTOR -> R.string.backdrop_projector_detail
+        BackdropTheme.BLACK     -> R.string.backdrop_black_detail
+    })
+
+    private fun showBackdropTheme(theme: BackdropTheme) {
+        textBackdropThemeValue.text = backdropLabel(theme)
+    }
+
+    private fun pickBackdropTheme() {
+        val options = BackdropTheme.entries
+        val labels = options.map { "${backdropLabel(it)}\n${backdropDetail(it)}" }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_backdrop)
+            .setItems(labels) { _, which ->
+                val theme = options[which]
+                save { it.copy(backdropTheme = theme) }
+                showBackdropTheme(theme)
+                Logger.i("Backdrop set to $theme")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun pickBackAction() {
         val options = BackAction.entries
         val labels = options.map { "${backActionLabel(it)}\n${backActionDetail(it)}" }.toTypedArray()
