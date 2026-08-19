@@ -226,7 +226,11 @@ class DynamicBackground @JvmOverloads constructor(
         val a2 = t2.animatedValue as Float
         val a3 = t3.animatedValue as Float
 
-        val e = punch(energy)
+        // Levels stay 0..1; the intensity setting is applied to the RENDER below, never to the
+        // level itself. See the note in drawOrb -- a pre-clip multiply pins the top of the range
+        // flat and makes the highest settings indistinguishable from one another.
+        val amp = beatMultiplier
+        val e = energy.coerceIn(0f, 1f)
         // BAND ENVELOPES ONLY -- `energy` is deliberately not mixed in here any more.
         //
         // It carries the same beat, but through a SECOND smoothing stage (0.22/frame in tick, on top
@@ -235,15 +239,16 @@ class DynamicBackground @JvmOverloads constructor(
         // two behind the orbs -- the two modes were drawing the same music at different times.
         // bandBass already falls back to `energy` for sources that report loudness but no spectrum,
         // so nothing is lost by dropping it. `e` stays for the fallback path below.
-        val bass = punch(bandBass)
-        val treble = punch(bandTreble)
-        val beatScale = 1f + bass * FIELD_BEAT_SCALE
+        val bass = bandBass.coerceIn(0f, 1f)
+        val treble = bandTreble.coerceIn(0f, 1f)
+        val beatScale = 1f + bass * FIELD_BEAT_SCALE * amp
         // ALPHA IS ALL BUT CONSTANT, for the same reason the projector halo's is: these blobs cover
         // the whole screen, so any alpha that rides the beat pumps the entire picture's brightness
         // on every kick. That is what read as "too sensitive" -- the response was not too large in
         // magnitude, it was applied to the one property that affects every pixel at once. The beat
         // now shows as size, which is local and reads correctly from across a room.
-        val beatAlpha = FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA
+        val beatAlpha =
+            (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA * amp).coerceAtMost(FIELD_ALPHA_CAP)
         val r = maxOf(w, h) * 0.62f * beatScale
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
@@ -340,25 +345,6 @@ class DynamicBackground @JvmOverloads constructor(
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
     fun setBeatMultiplier(m: Float) { beatMultiplier = m }
 
-    /**
-     * Applies the intensity setting as a CURVE rather than as a gain.
-     *
-     * It used to be `level * multiplier`, clamped to 1. Band levels already reach 0.9+ on any
-     * track with a kick in it, so at anything above 1.0 the multiply pinned the top of the range
-     * flat: every hit above about 1/multiplier rendered identically, which is turning the
-     * intensity up and getting *less* movement, not more. A soft knee has the same effect where
-     * the signal is quiet -- steeper response, more visible detail -- and simply approaches full
-     * scale at the top instead of colliding with it, so a loud passage still has somewhere to go.
-     * Normalised so that 1 still maps to 1, and short-circuited at multiplier 1 so the default
-     * setting is exactly the raw level.
-     */
-    private fun punch(level: Float): Float {
-        val v = level.coerceIn(0f, 1f)
-        val m = beatMultiplier
-        if (m <= 1.001f) return v
-        val k = m.toDouble()
-        return ((1.0 - Math.exp(-k * v)) / (1.0 - Math.exp(-k))).toFloat().coerceIn(0f, 1f)
-    }
 
     /**
      * Turns the edgeless projector look on or off.
@@ -415,16 +401,44 @@ class DynamicBackground @JvmOverloads constructor(
         // keeps the artwork's character while guaranteeing the trio reads as three lights.
         val distinct = picked.toList()
         if (distinct.isEmpty()) return DEFAULTS.map { Color.parseColor(it) }
-        val synth = FloatArray(3)
-        var rotation = 1
+        //
+        // ROTATING HUE IS THE LESSER EVIL, NOT A GOOD ONE, and it was the previous behaviour here.
+        // It buys separation by painting a colour the artwork does not contain: on an all-orange
+        // cover, even steps around the wheel produce blue and green orbs, which is confidently
+        // wrong rather than merely dull. Stepping VALUE and SATURATION instead keeps the hue the
+        // art actually has, so an orange album gives orange shades. The trio still reads as three
+        // lights -- brightness separates them as well as hue does at orb scale -- and nothing on
+        // screen is a colour the cover lacks. Monochrome art reaches the same conclusion from the
+        // other direction in [spreadByValue].
+        var step = 1
         while (picked.size < PALETTE_SIZE) {
-            val base = distinct[picked.size % distinct.size]
-            Color.colorToHSV(base, synth)
-            synth[0] = (synth[0] + HUE_SYNTH_STEP * rotation) % 360f
-            picked += Color.HSVToColor(synth)
-            rotation++
+            val base = distinct[(picked.size - distinct.size).coerceAtLeast(0) % distinct.size]
+            picked += varyShade(base, step)
+            step++
         }
         return picked
+    }
+
+    /**
+     * A lighter or darker relative of [base] on the SAME hue.
+     *
+     * Alternates brighter/darker as [step] climbs so successive fills separate from each other as
+     * well as from the original, and drops saturation a little on the way up because a real light
+     * source desaturates as it gets hotter.
+     */
+    private fun varyShade(base: Int, step: Int): Int {
+        val hsv = FloatArray(3)
+        Color.colorToHSV(base, hsv)
+        val up = step % 2 == 1
+        val magnitude = SHADE_STEP * ((step + 1) / 2)
+        if (up) {
+            hsv[2] = (hsv[2] + magnitude).coerceAtMost(SHADE_VALUE_CEILING)
+            hsv[1] = (hsv[1] - magnitude * 0.5f).coerceAtLeast(SHADE_SAT_FLOOR)
+        } else {
+            hsv[2] = (hsv[2] - magnitude).coerceAtLeast(SHADE_VALUE_FLOOR)
+            hsv[1] = (hsv[1] + magnitude * 0.3f).coerceAtMost(1f)
+        }
+        return Color.HSVToColor(hsv)
     }
 
     /**
@@ -507,8 +521,17 @@ class DynamicBackground @JvmOverloads constructor(
                 Math.sin(((py * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_Y * h
 
             // Each orb rides its own smoothed energy, so they swell out of step with one another.
-            val oe = punch(orbEnergy[k])
-            var radius = short * ORB_BASE_RADIUS * (1f + oe * ORB_BEAT_SWELL)
+            //
+            // INTENSITY IS APPLIED HERE, TO THE RENDER, and never to the level. Multiplying the
+            // 0..1 level and re-clamping pins everything at the top: band levels already reach 0.9+
+            // on anything with a kick, so above 1.0 every loud hit draws identically and turning
+            // the setting up produces LESS visible movement, not more.
+            val amp = beatMultiplier
+            val oe = orbEnergy[k].coerceIn(0f, 1f)
+            // PER-BAND CHARACTER. One radius and one response for all three makes the trio read as
+            // a single thing blinking in triplicate. Bass is the big slow one; treble is small and
+            // punches hardest relative to its own size, which is what a hat sounds like.
+            var radius = short * ORB_BASE_RADIUS[k] * (1f + oe * ORB_BEAT_SWELL[k] * amp)
 
             // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
             // own centre to the nearest side, less a margin. This is a hard geometric bound rather
@@ -552,16 +575,17 @@ class DynamicBackground @JvmOverloads constructor(
             }
             val grad = orbGrads[k] ?: continue
 
-            // The halo alpha is CONSTANT. It used to rise with the beat, and because a halo covers
-            // most of the frame that lifted the whole picture a shade on every kick -- read on a
-            // projector as "the black gets lighter and darker with the beat", which is the one thing
-            // this mode must never do. The beat now shows as size here and as brightness in the
-            // core pass below, both of which are local to the orb.
             blobMatrix.setScale(radius, radius)
             blobMatrix.postTranslate(cx, cy)
             grad.setLocalMatrix(blobMatrix)
             orbPaint.shader = grad
-            orbPaint.alpha = (ORB_BASE_ALPHA * 255).toInt().coerceIn(0, 255)
+            // A SMALL beat ride, and small is the operative word. A halo covers most of the frame,
+            // so a generous one lifts the whole picture a shade on every kick -- on a projector
+            // that reads as the black itself pulsing, which is the one thing this mode must never
+            // do. Enough to make the orb feel alive at rest, with the real flare kept in the core
+            // pass below, where the area is small enough to punch without lifting anything.
+            orbPaint.alpha =
+                ((ORB_BASE_ALPHA + oe * ORB_BEAT_ALPHA * amp) * 255).toInt().coerceIn(0, ORB_ALPHA_CAP)
             canvas.drawCircle(cx, cy, radius, orbPaint)
 
             // A second, much smaller pass gives the orb a bright heart instead of a flat disc of
@@ -576,7 +600,8 @@ class DynamicBackground @JvmOverloads constructor(
                 core.setLocalMatrix(blobMatrix)
                 orbPaint.shader = core
                 orbPaint.alpha =
-                    ((ORB_CORE_ALPHA + oe * ORB_CORE_BEAT_ALPHA) * 255).toInt().coerceIn(0, 255)
+                    ((ORB_CORE_ALPHA + oe * ORB_CORE_BEAT_ALPHA * amp) * 255).toInt()
+                        .coerceIn(0, 255)
                 canvas.drawCircle(cx, cy, cr, orbPaint)
             }
             orbPaint.shader = null
@@ -727,8 +752,15 @@ class DynamicBackground @JvmOverloads constructor(
          */
         private const val FIELD_BASE_ALPHA = 0.70f
         private const val FIELD_BEAT_ALPHA = 0.05f
+
+        /** Ceiling on the field's alpha, so a high intensity setting cannot wash the screen out. */
+        private const val FIELD_ALPHA_CAP = 0.86f
         /** Hue step used to invent the colours a one-tone cover cannot supply. */
-        private const val HUE_SYNTH_STEP = 47f
+        /** Value/saturation step between synthesised shades of an accent the artwork really has. */
+        private const val SHADE_STEP = 0.22f
+        private const val SHADE_VALUE_CEILING = 0.95f
+        private const val SHADE_VALUE_FLOOR = 0.30f
+        private const val SHADE_SAT_FLOOR = 0.30f
 
         /** Minimum hue separation between chosen palette colours, in degrees. */
         private const val HUE_MIN_ANGLE = 40f
@@ -793,7 +825,12 @@ class DynamicBackground @JvmOverloads constructor(
          * inside ~110px, which on a 1920-wide panel read as three faint smudges rather than as glows
          * (visible in the 1080p capture). The edge budget below is what caps this, not taste.
          */
-        private const val ORB_BASE_RADIUS = 0.24f
+        /**
+         * Base radius per band, as a fraction of the short side. Bass is the big slow one, treble
+         * the small quick one -- giving all three the same size is most of why a trio of orbs reads
+         * as one thing blinking rather than as three instruments.
+         */
+        private val ORB_BASE_RADIUS = floatArrayOf(0.26f, 0.21f, 0.16f)
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -857,7 +894,13 @@ class DynamicBackground @JvmOverloads constructor(
          * readable on screen. At 0.60 the same beat is a ~40% change, and the base radius comes down
          * to keep the fully-swollen orb inside the edge budget.
          */
-        private const val ORB_BEAT_SWELL = 0.70f
+        /**
+         * How far each orb swells at full level, relative to ITS OWN size. Treble punches hardest
+         * in proportional terms and is small enough that it still cannot reach the frame edge;
+         * bass is already large, so the same figure there would collide with the edge clamp and
+         * flatten the very peak it was meant to add.
+         */
+        private val ORB_BEAT_SWELL = floatArrayOf(0.62f, 0.80f, 1.05f)
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
@@ -866,6 +909,12 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
+        /** How much the halo brightens at full level. Deliberately small -- see the note in drawOrb. */
+        private const val ORB_BEAT_ALPHA = 0.14f
+
+        /** Ceiling on halo alpha, so a high intensity setting cannot wash the frame out. */
+        private const val ORB_ALPHA_CAP = 224
+
         private const val ORB_CORE_ALPHA = 0.16f
         private const val ORB_CORE_BEAT_ALPHA = 0.74f
         private const val CORE_WHITEN = 0.34f

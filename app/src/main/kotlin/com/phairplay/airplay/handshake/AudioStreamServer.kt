@@ -206,6 +206,9 @@ class AudioStreamServer(
      * re-adapts when the material changes.
      */
     private val bandPeak = DoubleArray(3) { BAND_PEAK_FLOOR }
+
+    /** Slow per-band average the swell is measured against. Zero until the first window seeds it. */
+    private val bandBase = DoubleArray(3)
     private val bandLevel = FloatArray(3)
     private val history = DoubleArray(100)
     private var historyIdx = 0
@@ -797,11 +800,33 @@ class AudioStreamServer(
         return 1.0 - Math.exp(-2.0 * Math.PI * hz / sr)
     }
 
-    /** Normalises the three raw band RMS figures against their own decaying peaks. */
+    /**
+     * Turns the three raw band RMS figures into 0..1 levels.
+     *
+     * Measured as a RISE ABOVE THE BAND'S OWN RECENT AVERAGE, not as a fraction of its peak.
+     *
+     * Level-against-peak is the obvious construction and it has a ceiling problem that only shows
+     * up on real music: a band that is *steadily* loud -- bass on anything four-on-the-floor --
+     * sits at its own decaying peak, so the ratio is ~1 continuously and the orb is pinned bright
+     * and motionless. It is lit, it is arithmetically correct, and it shows the viewer nothing.
+     * That is the "maxing out too fast" report, and no amount of decay tuning fixes it: the
+     * quantity being measured is wrong.
+     *
+     * Against a slow baseline, "at its own average" means ZERO. It takes a genuine kick to light
+     * up and the orb settles between hits, which is the thing that reads as being on the beat.
+     */
     private fun updateBands(bass: Double, mid: Double, treble: Double) {
         val raw = RAW_BANDS
         raw[0] = bass; raw[1] = mid; raw[2] = treble
         for (b in 0 until 3) {
+            // ~1.5s follow. Seeded on the first window rather than from zero: starting at zero
+            // makes the first second of every track one enormous false swell.
+            if (bandBase[b] <= 0.0) bandBase[b] = raw[b].coerceAtLeast(BAND_BASE_FLOOR)
+            else bandBase[b] += BAND_BASE_FOLLOW * (raw[b] - bandBase[b])
+            val base = bandBase[b].coerceAtLeast(BAND_BASE_FLOOR)
+            // Headroom matters. Divide by a tight ceiling and ordinary hits clip flat at 1 again,
+            // which is the very thing the baseline was introduced to stop.
+            val swell = ((raw[b] / base) - 1.0).coerceIn(0.0, BAND_EXCESS_MAX) / BAND_EXCESS_MAX
             // ASYMMETRIC reference peak: jump straight to a new loudest, fall away very slowly.
             //
             // A symmetric decay makes the AGC fight itself. A transient sets a high reference, the
@@ -814,10 +839,20 @@ class AudioStreamServer(
             bandPeak[b] = if (raw[b] > peak) raw[b] else {
                 (peak * BAND_PEAK_DECAY).coerceAtLeast(BAND_PEAK_FLOOR)
             }
-            val ratio = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            val presence = (raw[b] / bandPeak[b]).coerceIn(0.0, 1.0)
+            // VOCALS ARE THE EXCEPTION, and they have to be.
+            //
+            // Swell is right for bass and treble because those read as hits. A held vocal note is
+            // not a hit: it is one sustained tone, so its swell is ~0 for the whole of the phrase
+            // and the middle orb went dark exactly while someone was singing -- the opposite of
+            // what it is for. The vocal band therefore also takes an ABSOLUTE presence term, so it
+            // is lit whenever centre-panned voice is there at all, with swell still adding on top.
+            // Bass and treble stay pure-swell or they become a constant glow and stop pulsing.
+            val combined =
+                if (b == BAND_VOCAL) Math.max(swell, presence * BAND_PRESENCE_WEIGHT) else swell
             // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
             // costs no headroom at the top.
-            val norm = ((ratio - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
+            val norm = ((combined - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
             val shaped = Math.pow(norm, BAND_CURVE).toFloat()
             // Envelope follower, fast up and slow down -- how a VU meter behaves, and how a glow
             // should. A raw per-block figure is far too twitchy to drive anything visual: it is
@@ -1283,12 +1318,33 @@ class AudioStreamServer(
          * visible glow on a track that has stopped.
          */
         private const val BAND_NOISE_FLOOR = 0.06
+
+        /** Index of the vocal band -- the one that also gets an absolute presence term. */
+        private const val BAND_VOCAL = 1
+
+        /** Baseline EMA coefficient, ~1.5s at the ~30/sec emission rate. */
+        private const val BAND_BASE_FOLLOW = 0.02
+
+        /** Keeps the baseline off zero so silence cannot divide its way to a full-scale swell. */
+        private const val BAND_BASE_FLOOR = 1.0e-4
+
+        /**
+         * How far above its own average a band has to rise to read as full scale.
+         *
+         * Generous on purpose. At ~0.65 every ordinary hit reaches the top and clips flat, which
+         * is the pinned look this whole scheme exists to avoid; a bit over 1.0 puts normal hits in
+         * the middle of the range and leaves the top for the genuinely big ones.
+         */
+        private const val BAND_EXCESS_MAX = 1.1
+
+        /** How much of the vocal band's absolute presence counts, before swell is added on top. */
+        private const val BAND_PRESENCE_WEIGHT = 0.9
         private const val BAND_LOG_INTERVAL_MS = 2000L
         private const val BAND_EMIT_INTERVAL_MS = 33L
 
         /** Envelope follower, per call at ~100 calls/sec. Fast attack, slow release. */
-        private const val BAND_ATTACK = 0.30f
-        private const val BAND_RELEASE = 0.045f
+        private const val BAND_ATTACK = 0.42f
+        private const val BAND_RELEASE = 0.11f
 
         // ── Tempo estimation ────────────────────────────────────────────────────────────────────
         /** 180 BPM and 60 BPM as intervals — anything outside is a missed or doubled onset. */
