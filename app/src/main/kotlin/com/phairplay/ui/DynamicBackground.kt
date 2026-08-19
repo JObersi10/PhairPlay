@@ -69,6 +69,7 @@ class DynamicBackground @JvmOverloads constructor(
                 orbEnergy[i] += d * rate
             }
             bandBass = orbEnergy[0]
+            bandVocal = orbEnergy[1]
             bandTreble = orbEnergy[2]
             invalidate()
             // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
@@ -123,6 +124,7 @@ class DynamicBackground @JvmOverloads constructor(
 
     private var haveBands = false
     private var bandBass = 0f
+    private var bandVocal = 0f
     private var bandTreble = 0f
 
     private val orbEnergy = FloatArray(3)
@@ -250,8 +252,8 @@ class DynamicBackground @JvmOverloads constructor(
         // bandBass already falls back to `energy` for sources that report loudness but no spectrum,
         // so nothing is lost by dropping it. `e` stays for the fallback path below.
         val bass = bandBass.coerceIn(0f, 1f)
+        val vocal = bandVocal.coerceIn(0f, 1f)
         val treble = bandTreble.coerceIn(0f, 1f)
-        val beatScale = 1f + bass * FIELD_BEAT_SCALE * amp
         // ALPHA IS ALL BUT CONSTANT, for the same reason the projector halo's is: these blobs cover
         // the whole screen, so any alpha that rides the beat pumps the entire picture's brightness
         // on every kick. That is what read as "too sensitive" -- the response was not too large in
@@ -259,7 +261,6 @@ class DynamicBackground @JvmOverloads constructor(
         // now shows as size, which is local and reads correctly from across a room.
         val beatAlpha =
             (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA * amp).coerceAtMost(FIELD_ALPHA_CAP)
-        val r = maxOf(w, h) * 0.62f * beatScale
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
         // near-black used on a TV: #050505 is a deliberate lift that stops OLED/LCD panels crushing
@@ -319,10 +320,21 @@ class DynamicBackground @JvmOverloads constructor(
             // the field is scaled back down before it is stacked.
             cs[i] = darken(blend(c1, c2, blobMix[i]), BLOB_VALUE_SCALE)
         }
-        blob(canvas, 0, cx0, cy0, r, cs[0], beatAlpha)
-        blob(canvas, 1, cx1, cy1, r, cs[1], beatAlpha)
-        blob(canvas, 2, cx2, cy2, r, cs[2], beatAlpha)
-        blob(canvas, 3, cx3, cy3, r, cs[3], beatAlpha)
+        // ONE RADIUS PER BLOB, EACH ON ITS OWN BAND -- the same idea the orbs are built on.
+        //
+        // All four used to share a single radius driven by bass alone, so the entire field grew and
+        // shrank as one object: a 20% swell on a shape that already covers the screen is nearly
+        // invisible, which is why Dynamic looked static until the intensity was pushed to Strong.
+        // Giving each blob its own band means the field CHANGES SHAPE with the music -- the corner
+        // on the vocal swells while the one on the kick recedes -- and shape reads from across a
+        // room in a way that overall size never did. The fourth takes the average, so the
+        // composition still has one member that moves with everything.
+        val mean = (bass + vocal + treble) / 3f
+        val base = maxOf(w, h) * FIELD_BASE_RADIUS
+        blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp), cs[0], beatAlpha)
+        blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp), cs[1], beatAlpha)
+        blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp), cs[2], beatAlpha)
+        blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp), cs[3], beatAlpha)
 
         canvas.restoreToCount(sc)
 
@@ -712,6 +724,9 @@ class DynamicBackground @JvmOverloads constructor(
     private val blobGradKeys = IntArray(4) { -1 }
     private val blobMatrix = android.graphics.Matrix()
 
+    /** A blob's radius factor for its band level, with the intensity setting on the render. */
+    private fun blobScale(level: Float, amp: Float) = 1f + level * FIELD_BEAT_SCALE * amp
+
     private fun blend(c1: Int, c2: Int, f: Float): Int {
         val i = 1f - f
         return Color.rgb(
@@ -753,10 +768,16 @@ class DynamicBackground @JvmOverloads constructor(
         // 0.92, and the ask was for PROJECTOR mode to be dimmer -- so 0.34 made the one mode that
         // was fine too dark while leaving the orbs untouched. The orb alphas below carry that
         // change now, and this sits at the value that killed the wash without draining the colour.
-        private const val BLOB_VALUE_SCALE = 0.50f
+        private const val BLOB_VALUE_SCALE = 0.66f
 
         /** Beat -> blob size. The only place the full-screen field expresses the beat. */
-        private const val FIELD_BEAT_SCALE = 0.20f
+        /** Blob radius as a fraction of the long side, before its band swells it. */
+        private const val FIELD_BASE_RADIUS = 0.52f
+
+        // Was 0.20, applied to one shared radius. A fifth is nothing on a shape that already fills
+        // the screen; per-blob it changes the composition rather than merely inflating it, so it
+        // can be much larger without the whole picture pumping.
+        private const val FIELD_BEAT_SCALE = 0.42f
 
         /**
          * Field brightness. Near-constant on purpose -- see the note at the call site.
@@ -766,7 +787,7 @@ class DynamicBackground @JvmOverloads constructor(
          * the failure mode, and it is worse mid-crossfade than at rest.
          */
         private const val FIELD_BASE_ALPHA = 0.70f
-        private const val FIELD_BEAT_ALPHA = 0.05f
+        private const val FIELD_BEAT_ALPHA = 0.10f
 
         /** Ceiling on the field's alpha, so a high intensity setting cannot wash the screen out. */
         private const val FIELD_ALPHA_CAP = 0.86f

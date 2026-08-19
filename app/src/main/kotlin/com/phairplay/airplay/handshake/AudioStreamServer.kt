@@ -186,7 +186,7 @@ class AudioStreamServer(
     // on the same thread that feeds AudioTrack -- the thread whose stalls are audible.
     //
     //   bass   = lp160                                  (kick, bassline)
-    //   vocal  = band(300-3400) of mid, minus that of side (centre-panned voice)
+    //   vocal  = band(500-3400) of mid, minus that of side (centre-panned voice)
     //   treble = mid - lp4000                            (cymbals, sibilance, air)
     private var lp160 = 0.0
     private var lp4000 = 0.0
@@ -209,6 +209,12 @@ class AudioStreamServer(
 
     /** Slow per-band average the swell is measured against. Zero until the first window seeds it. */
     private val bandBase = DoubleArray(3)
+
+    /** Long-run average of each band's OUTPUT, used to even the three up against one another. */
+    private val bandAvg = FloatArray(3) { BAND_AVG_TARGET }
+
+    /** What the orbs actually see: [bandLevel] after the cross-band evening-up. */
+    private val bandOut = FloatArray(3)
     private val bandLevel = FloatArray(3)
     private val history = DoubleArray(100)
     private var historyIdx = 0
@@ -550,8 +556,8 @@ class AudioStreamServer(
         // Window energy, mono, low-passed to ~130Hz with a one-pole filter. The same pass also runs
         // the three-band bank below, so the PCM is walked once rather than four times.
         val a160 = alphaFor(160.0)
-        val a300 = alphaFor(300.0)
-        val a3400 = alphaFor(3400.0)
+        val a300 = alphaFor(VOCAL_LOW_HZ)
+        val a3400 = alphaFor(VOCAL_HIGH_HZ)
         val a4000 = alphaFor(4000.0)
         var sum = 0.0
         var sumBass = 0.0
@@ -588,7 +594,16 @@ class AudioStreamServer(
             sumBass += lp160 * lp160
             sumTreble += (mid - lp4000) * (mid - lp4000)
 
-            // The same 300-3400Hz band taken from mid and from side. Comparing their ENERGIES below
+            // THE LOW CORNER USED TO BE 300Hz, AND THAT IS WHY THE VOCAL ORB ANSWERED THE DROP.
+            //
+            // A bass drop is centre-panned by construction, so almost none of it appears in side.
+            // Mid-minus-side therefore hands the whole of it to the vocal band, and at 300Hz the
+            // band-pass was still wide open to the kick's harmonics. On the device the vocal orb
+            // lit on every drop, which is the one thing it is not supposed to track. Starting at
+            // 500Hz costs nothing a voice needs -- the fundamental of a low male voice is around
+            // 85Hz but its formants, the part that makes it audible in a mix, sit far above this.
+            //
+            // The same band taken from mid and from side. Comparing their ENERGIES below
             // is what isolates the voice, and doing it on the band rather than per-sample keeps the
             // maths linear -- subtracting sample by sample would clip the waveform and invent
             // harmonics that the filters would then dutifully report.
@@ -728,6 +743,26 @@ class AudioStreamServer(
             // quickly keeps the hit on the beat; falling slowly is what makes the decay look smooth.
             val follow = if (shaped > bandLevel[b]) BAND_ATTACK else BAND_RELEASE
             bandLevel[b] += (shaped - bandLevel[b]) * follow
+
+            // AND FINALLY, MAKE THE THREE COMPARABLE TO EACH OTHER.
+            //
+            // Everything above normalises each band against ITSELF, which makes each one honest in
+            // isolation and says nothing about how they compare. On the device that came out as
+            // vocals averaging 0.39 against bass 0.24 and treble 0.18 -- so the middle orb simply
+            // glowed harder than its neighbours all the time, whatever the music was doing. Three
+            // orbs that are individually correct and visibly mismatched is worse than three that
+            // are approximate and even, because the eye reads the brightest one as the important
+            // one and it is the same one every time.
+            //
+            // A slow gain per band pulls each one's long-run average toward a common target. The
+            // averaging window is tens of seconds, far longer than any beat, so this cannot flatten
+            // a hit or chase the music; it only corrects the standing offset between the three.
+            // Clamped hard, because a band that is genuinely silent for a while must not have its
+            // noise floor amplified into a glow while it waits.
+            bandAvg[b] += BAND_AVG_FOLLOW * (bandLevel[b] - bandAvg[b])
+            val gain = (BAND_AVG_TARGET / Math.max(bandAvg[b], BAND_AVG_FLOOR))
+                .coerceIn(BAND_GAIN_MIN, BAND_GAIN_MAX)
+            bandOut[b] = (bandLevel[b] * gain).coerceIn(0f, 1f)
         }
         // Periodic proof that the bank is alive and separating. "Are the orbs actually reacting?" is
         // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
@@ -737,7 +772,7 @@ class AudioStreamServer(
         if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
             lastBandLogMs = now
             Logger.i(
-                "Bands bass=%.2f vocal=%.2f treble=%.2f".format(bandLevel[0], bandLevel[1], bandLevel[2])
+                "Bands bass=%.2f vocal=%.2f treble=%.2f".format(bandOut[0], bandOut[1], bandOut[2])
             )
         }
         // Rate-limited. This fired once per PCM BLOCK -- around 100 times a second -- so it was
@@ -746,7 +781,7 @@ class AudioStreamServer(
         // is more than the display can show.
         if (now - lastBandEmitMs < BAND_EMIT_INTERVAL_MS) return
         lastBandEmitMs = now
-        val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
+        val snapshot = floatArrayOf(bandOut[0], bandOut[1], bandOut[2])
         val delay = beatEmitDelayMs()
         if (delay <= 0L) energyHandler.post { onBands(snapshot) }
         else energyHandler.postDelayed({ onBands(snapshot) }, delay)
@@ -1206,16 +1241,40 @@ class AudioStreamServer(
         private const val BAND_EXCESS_MAX = 1.1
 
         /** How much of the vocal band's absolute presence counts, before swell is added on top. */
-        private const val BAND_PRESENCE_WEIGHT = 0.55
+        private const val BAND_PRESENCE_WEIGHT = 0.40
 
         /** How loud centre content has to be, against the band's own peak, before it counts at all. */
-        private const val BAND_PRESENCE_GATE = 0.45
+        private const val BAND_PRESENCE_GATE = 0.55
+
+        /**
+         * Vocal band-pass corners.
+         *
+         * The low corner is the important one, and it is set by what must be EXCLUDED rather than
+         * by what a voice contains: see the note in the filter loop about bass drops arriving
+         * centre-panned and therefore landing entirely in mid-minus-side.
+         */
+        private const val VOCAL_LOW_HZ = 500.0
+        private const val VOCAL_HIGH_HZ = 3400.0
         private const val BAND_LOG_INTERVAL_MS = 2000L
         private const val BAND_EMIT_INTERVAL_MS = 33L
 
         /** Envelope follower, per call at ~100 calls/sec. Fast attack, slow release. */
         private const val BAND_ATTACK = 0.42f
         private const val BAND_RELEASE = 0.11f
+
+        // ── Cross-band levelling ────────────────────────────────────────────────────────────────
+        /** Averaging speed, ~30/sec. Deliberately tens of seconds: it must not track the music. */
+        private const val BAND_AVG_FOLLOW = 0.0015f
+
+        /** The long-run level every band is nudged toward. */
+        private const val BAND_AVG_TARGET = 0.28f
+
+        /** Stops a silent band dividing its way to a huge gain. */
+        private const val BAND_AVG_FLOOR = 0.05f
+
+        /** Correction limits. Wide enough to close a 2x mismatch, tight enough to keep silence dark. */
+        private const val BAND_GAIN_MIN = 0.6f
+        private const val BAND_GAIN_MAX = 1.8f
 
         // ── Onset detection ─────────────────────────────────────────────────────────────────────
         //
