@@ -892,7 +892,23 @@ class SettingsFragment : Fragment() {
         // has to be re-read here — reading it once at bind shows a stale value at the exact moment
         // the user comes back to check whether it worked.
         renderPermissionStatus()
+        // Pick the install back up. The user left for the unknown-sources screen mid-update, and
+        // making them run the whole check-and-download again after granting it is the kind of
+        // small indignity that makes a feature feel broken. The APK is still in the cache dir.
+        val resume = pendingUpdateIntent
+        if (resume != null &&
+            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+            requireContext().packageManager.canRequestPackageInstalls()
+        ) {
+            pendingUpdateIntent = null
+            Logger.i("Update: unknown-sources granted — resuming the install")
+            runCatching { startActivity(resume) }
+                .onFailure { Logger.w("No installer on this device — ${it.message}") }
+        }
     }
+
+    /** Install intent parked while the user grants unknown-sources. Cleared once it is launched. */
+    private var pendingUpdateIntent: android.content.Intent? = null
 
     /**
      * Shows whether each privileged capability is currently granted.
@@ -1057,8 +1073,16 @@ class SettingsFragment : Fragment() {
                     readTimeout = UPDATE_TIMEOUT_MS
                 }.inputStream.use { input -> target.outputStream().use { input.copyTo(it) } }
 
+                // THE AUTHORITY IS INTERPOLATED, and it was not.
+                //
+                // This read "${'$'}{context.packageName}.updates" -- the Kotlin idiom for a LITERAL
+                // dollar sign -- so the authority handed to FileProvider was the source text
+                // itself rather than "com.phairplay.firetv.updates". getUriForFile then threw
+                // "couldn't find meta-data for provider with authority ...", the download was
+                // reported as failed, and the log line below carried the same escape, so it
+                // printed the template instead of the exception and said nothing at all.
                 val uri = androidx.core.content.FileProvider.getUriForFile(
-                    context, "${'$'}{context.packageName}.updates", target)
+                    context, "${context.packageName}.updates", target)
                 android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
                     setDataAndType(uri, "application/vnd.android.package-archive")
                     addFlags(
@@ -1067,7 +1091,7 @@ class SettingsFragment : Fragment() {
                     )
                 }
             }.getOrElse {
-                Logger.w("Update download failed — ${'$'}{it.message}")
+                Logger.w("Update download failed — ${it.javaClass.simpleName}: ${it.message}")
                 null
             }
         }
@@ -1085,8 +1109,43 @@ class SettingsFragment : Fragment() {
                 )
                 return@launch
             }
-            // The system installer takes it from here, including asking the user to allow installs
-            // from this app the first time.
+            // ASK FOR THE UNKNOWN-SOURCES GRANT OURSELVES.
+            //
+            // The assumption here was that the system installer would prompt for it on the way
+            // past. Since Android 8 it does not: the grant is per-app, and an app that does not
+            // hold it gets its install intent dropped with no dialog and nothing in the log --
+            // which reads exactly like the update silently doing nothing. Declaring
+            // REQUEST_INSTALL_PACKAGES in the manifest, which we do, only makes the grant
+            // *available* to ask for; it does not ask.
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
+                !ctx.packageManager.canRequestPackageInstalls()
+            ) {
+                Logger.i("Update: unknown-sources not granted — sending the user to grant it")
+                AlertDialog.Builder(ctx)
+                    .setTitle(R.string.setting_update)
+                    .setMessage(R.string.setting_update_needs_install_permission)
+                    .setPositiveButton(R.string.onboarding_grant) { _, _ ->
+                        // Carries our package, so the settings screen lands on PhairPlay's own
+                        // toggle rather than the full list of installed apps.
+                        val grant = android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                            android.net.Uri.parse("package:${ctx.packageName}"),
+                        )
+                        // Fire OS does not always carry the per-app screen. Fall back to the
+                        // global one rather than throwing ActivityNotFoundException at the user.
+                        runCatching { startActivity(grant) }.onFailure {
+                            runCatching {
+                                startActivity(android.content.Intent(
+                                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES))
+                            }.onFailure { e -> Logger.w("No unknown-sources screen — ${e.message}") }
+                        }
+                        pendingUpdateIntent = intent
+                    }
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show()
+                textUpdateValue.setText(R.string.setting_update_needs_permission_short)
+                return@launch
+            }
             runCatching { startActivity(intent) }
                 .onFailure { Logger.w("No installer on this device — ${it.message}") }
         }

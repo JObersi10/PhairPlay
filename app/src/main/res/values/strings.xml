@@ -171,6 +171,8 @@
     <string name="setting_update_no_asset">Release %1$s has no APK attached, so there is nothing to install from here.</string>
     <string name="setting_update_download_failed">Download failed. Nothing was installed.</string>
     <string name="setting_update_install">Download and install</string>
+    <string name="setting_update_needs_install_permission">Fire OS blocks apps from installing other apps until you allow it. Grant \"Install unknown apps\" for PhairPlay, then come straight back — the download is already saved and the install will carry on by itself.</string>
+    <string name="setting_update_needs_permission_short">Needs permission</string>
     <string name="setting_update_downloading">Downloading…</string>
     <string name="setting_reset_defaults">Reset to defaults</string>
     <string name="setting_reset_confirm">This clears every setting and replays the first-run setup on the next launch.</string>
