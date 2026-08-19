@@ -291,7 +291,14 @@ class AudioStreamServer(
                     if (!audioIdle) { audioIdle = true; onAudioIdle(true) }
                     continue
                 }
-                if (audioIdle) { audioIdle = false; onAudioIdle(false) }
+                // NO RESUME HERE. This used to clear audioIdle on any datagram at all, and a
+                // paused sender's keepalives ARE datagrams -- ~128 of them a second. So pause was
+                // set by handleRtpPacket after its 12-packet run and cleared again by the very next
+                // keepalive arriving on this line, over and over, for as long as the track sat
+                // paused. Downstream that flapping unfroze the position clock for a tick at a time,
+                // which is the progress bar still twitching after the clock itself was fixed.
+                // Only a packet with actual audio in it means playback resumed, and
+                // handleRtpPacket is the only place that can tell.
                 recv++
                 if (rtpCount < 6) {
                     Logger.d("Audio RTP[$rtpCount] ${packet.length}B hdr: ${hex(packet.data, minOf(20, packet.length))}")
