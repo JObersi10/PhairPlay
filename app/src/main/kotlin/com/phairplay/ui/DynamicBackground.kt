@@ -59,7 +59,10 @@ class DynamicBackground @JvmOverloads constructor(
     private val handler = Handler(Looper.getMainLooper())
     private val tick = object : Runnable {
         override fun run() {
-            energy += (energyTarget - energy) * 0.22f
+            // These rates are PER FRAME, so halving the frame rate doubles every time constant.
+            // Scaled up to keep the same response in milliseconds as at 60fps -- without this the
+            // orbs get visibly mushier the moment the redraw slows down.
+            energy += (energyTarget - energy) * 0.36f
             // Per-orb easing toward the latest band level. Asymmetric on purpose: a glow should
             // arrive with the hit and fade out afterwards, so rising is quick and falling is slow.
             // Symmetric easing looked like the orbs were breathing on a timer rather than reacting.
@@ -75,7 +78,10 @@ class DynamicBackground @JvmOverloads constructor(
             // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
             // is studying it, but the full-rate redraw competes for CPU with the video decoder and
             // the audio writer -- which is exactly when the hiccups were reported.
-            handler.postDelayed(this, if (lowPower) 33L else 16L)
+            // 30fps, NOT 60. The band levels this is drawn from are emitted every 33ms, so half of
+            // a 60fps redraw was recomposing four screen-sized gradients to show data that had not
+            // changed. Nothing on screen moves faster than its source.
+            handler.postDelayed(this, if (lowPower) 50L else 33L)
         }
     }
 
@@ -281,8 +287,15 @@ class DynamicBackground @JvmOverloads constructor(
             return
         }
 
-        // Save layer for SCREEN blending
-        val sc = canvas.saveLayer(0f, 0f, w, h, null)
+        // NO saveLayer. SCREEN ONTO THE OPAQUE BASE INSTEAD.
+        //
+        // The layer was here so overlapping sources would screen against each other rather than
+        // occlude, and they still do -- but screen(black, src) IS src, so compositing against the
+        // opaque base already on the canvas gives pixel-identical output. What the layer added was
+        // a full-screen offscreen buffer allocated, drawn into and blitted back EVERY FRAME: on the
+        // Fire TV's GPU, dumpsys gfxinfo reported a 12 MB scratch RenderTarget, 907 frames of "slow
+        // issue draw commands" and 98% of frames janky at a 61ms median. That is the lag, and it
+        // was buying nothing.
 
         // 4 blob centers — lerp-based, biased to edges.
         //
@@ -335,8 +348,6 @@ class DynamicBackground @JvmOverloads constructor(
         blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp), cs[1], beatAlpha)
         blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp), cs[2], beatAlpha)
         blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp), cs[3], beatAlpha)
-
-        canvas.restoreToCount(sc)
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -523,8 +534,8 @@ class DynamicBackground @JvmOverloads constructor(
 
         // Three orbs, each carrying its own palette colour, orbiting slowly and breathing on the
         // beat. SCREEN blending means where two overlap the light ADDS, the way two real glows
-        // would, instead of one occluding the other.
-        val sc = canvas.saveLayer(0f, 0f, w, h, null)
+        // would, instead of one occluding the other -- and against the true black already filling
+        // the canvas that needs no offscreen layer, for the reason documented in the field branch.
         val short = minOf(w, h)
         val a1 = t1.animatedValue as Float
         val a2 = t2.animatedValue as Float
@@ -633,7 +644,6 @@ class DynamicBackground @JvmOverloads constructor(
             }
             orbPaint.shader = null
         }
-        canvas.restoreToCount(sc)
     }
 
     /** SCREEN so overlapping orbs add their light rather than hiding one another. */
@@ -914,11 +924,11 @@ class DynamicBackground @JvmOverloads constructor(
          * Release is always slower than attack so the glow trails the hit instead of flickering off
          * with it. At 60fps a rate of 0.10 closes ~86% of a gap in a quarter second.
          */
-        private val ORB_ATTACK = floatArrayOf(0.22f, 0.30f, 0.42f)
-        private val ORB_RELEASE = floatArrayOf(0.030f, 0.045f, 0.075f)
+        private val ORB_ATTACK = floatArrayOf(0.37f, 0.49f, 0.66f)
+        private val ORB_RELEASE = floatArrayOf(0.052f, 0.077f, 0.127f)
 
         /** Fallback smoothing for sources that report loudness but no bands. */
-        private val ORB_FOLLOW = floatArrayOf(0.06f, 0.16f, 0.38f)
+        private val ORB_FOLLOW = floatArrayOf(0.10f, 0.27f, 0.60f)
 
         /**
          * Clearance kept between any orb and the nearest screen edge, as a fraction of the short
