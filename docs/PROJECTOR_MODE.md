@@ -241,7 +241,13 @@ slider is for.
 
 ---
 
-## 4. Tempo (BPM)
+## 4. Tempo (BPM) — and why PhairPlay no longer has it
+
+> **PhairPlay removed this entirely.** Everything below works, and none of it was ever read: the
+> estimate was logged and nothing consumed it, so every wrong number it produced was a bug report
+> about a feature that did not exist. Keep it only if something in your UI genuinely displays or
+> syncs to a tempo. The onset detector it is built on is separate and stays — the beat envelope
+> comes from that.
 
 Detect onsets on the bass envelope (a rise crossing a threshold), keep the last N
 inter-onset intervals in the 200-2000 ms range, and score candidate tempos by
@@ -400,7 +406,27 @@ Two fixes, either is fine:
 
 ---
 
-## 5b. Memory, on a device that has none
+## 5a-bis. Two things measured on hardware, after the fact
+
+**Never normalise bands only against themselves.** Every stage above makes a band honest in
+isolation and says nothing about how it compares to its neighbours. On a real device that came out
+as vocals averaging 0.39 against bass 0.24 and treble 0.18 — three orbs individually correct and
+visibly mismatched, which is worse than three that are approximate and even, because the eye reads
+the brightest as the important one and it is the same one every time. A slow gain per band, pulling
+each long-run average toward a common target over tens of seconds, fixes it without touching a beat.
+
+**Watch the low corner of the vocal band-pass.** A bass drop is centre-panned by construction, so
+almost none of it appears in `side` — mid-minus-side therefore hands the whole drop to the vocal
+band. At a 300 Hz corner the band was still open to the kick's harmonics and the vocal orb lit on
+every drop. 500 Hz costs a voice nothing that makes it audible in a mix.
+
+**And size the orbs so the edge clamp never engages.** The clamp is a safety net for odd window
+shapes. When it is doing the work on a normal 16:9 screen, an orb stops growing at its peak and
+reads as permanently maxed — which looks exactly like a broken level and is not one.
+
+---
+
+## 5b. Memory and frame cost, on a device that has none
 
 A Fire TV runs its low-memory killer hot, and the visuals are not what costs you.
 
@@ -417,6 +443,16 @@ A Fire TV runs its low-memory killer hot, and the visuals are not what costs you
 - **Cache gradients by key, not by frame.** A `RadialGradient` per blob per frame is four
   native allocations 60 times a second for objects whose parameters changed on none of
   them. Rebuild only when the colour or geometry actually changes.
+- **A full-screen `saveLayer` is the single most expensive thing here.** Both backdrops wrapped
+  their drawing in one so the sources would SCREEN against each other. That is an offscreen buffer
+  allocated, drawn into and blitted back *every frame* — on a Fire TV it produced 98 % janky frames,
+  a 61 ms median and a 12 MB scratch RenderTarget. It also bought nothing: `screen(black, src)` is
+  `src`, so compositing straight onto the opaque base already on the canvas is pixel-identical.
+  Removing it took slow-draw-commands from 907 to 0.
+- **Draw at the rate of your source, not the display's.** Band levels arrive every 33 ms, so a
+  60 fps redraw recomposed four screen-sized gradients half the time to show data that had not
+  changed. If you halve the redraw, remember the smoothing constants are *per frame* — rescale them
+  or every envelope silently doubles its time constant.
 - **Check what the platform is holding before optimising your own code.** A debug install
   runs `status=run-from-apk` — no AOT compilation, so ART keeps the entire dex in *private
   dirty* memory. On this app that is 37 MB, larger than the Java heap, native heap and

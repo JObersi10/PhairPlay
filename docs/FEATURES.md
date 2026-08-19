@@ -48,19 +48,31 @@ Three signals extracted from the decoded PCM before it reaches the speakers:
 | Bass | One-pole low-pass at 160 Hz |
 | Vocals | Mid/side — band-passed `(L+R)/2` minus band-passed `(L−R)/2`, isolating centre-panned content |
 | Treble | Above 4 kHz |
-| Tempo | Onset intervals scored by harmonic agreement, with acquire/hold hysteresis |
 
-Two looks, selectable in Settings:
+Each band is measured as a **rise above its own recent average**, not as a fraction of its peak —
+a steadily-loud band sits at its own peak permanently, which pins the visual bright and motionless.
+Vocals additionally carry an absolute presence term, because a held note has no rise and the orb
+would otherwise go dark exactly while someone is singing. A slow cross-band gain then evens the
+three up against one another, so no band is systematically brighter than its neighbours.
 
-- **Dynamic** — four drifting, album-coloured blobs, each bounded to its own quadrant
+Three backdrops, selectable in Settings:
+
+- **Dynamic** — four drifting, album-coloured blobs, each bounded to its own quadrant and each
+  riding its own band, so the field changes shape rather than merely growing and shrinking
 - **Projector** — three orbs on true black, one per band (left bass, middle vocals, right treble),
   orbiting on slow ellipses and fusing where they overlap. Built so nothing ever meets a frame edge.
+- **Black** — nothing at all behind the card. The redraw loop stops entirely rather than painting
+  a black rectangle sixty times a second.
 
 Visuals are delayed by the measured output latency so they land with the sound, not ahead of it.
-Beat Pulse strength (Normal / Strong / Insane) and a manual beat delay are in Settings.
+Beat Pulse strength (Calm / Normal / Strong / Insane) and a manual beat delay are in Settings, and
+apply to both Dynamic and Projector. Intensity is applied to the drawing rather than to the level,
+so turning it up keeps adding movement instead of flattening everything against the top of the range.
 
 Palette comes from the artwork, with greyscale covers detected and kept grey rather than having a
-hue invented for them.
+hue invented for them. When a cover does not contain three separable colours, the shortfall is
+filled with lighter and darker shades of the accents it *does* have — never with a rotated hue,
+which is how an all-orange sleeve used to end up with blue and green orbs.
 
 ## Cover art
 
@@ -75,7 +87,7 @@ No API key required.
 ## Settings
 
 PIN pairing (off / remember senders / every time) · which receivers run · device name ·
-screensaver timeout · backdrop style · Beat Pulse · beat delay · volume mode ·
+screensaver timeout · backdrop (Dynamic / Projector / Black) · Beat Pulse · beat delay · volume mode ·
 Back behaviour (stop stream / go home / exit) · stream-end behaviour · start on boot ·
 Picture-in-picture · online cover art · playback quality
 
