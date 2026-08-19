@@ -97,7 +97,9 @@ the event never happened, not that the server is broken.
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
-`docs/FEATURES.md` is the current feature list. Projector mode, the band/tempo
+`docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app
+GitHub-Releases updater — read it before touching that code, and before publishing a release:
+three of its four bugs were silent, and one printed a log line that lied. Projector mode, the band/tempo
 analysis and the Now Playing card are written up for
 reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
 constants that only look arbitrary until you have shipped the wrong one.
