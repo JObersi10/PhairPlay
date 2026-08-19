@@ -133,12 +133,21 @@ project's history is debug-signed.
 
 ---
 
-## Known rough edge
+## Focus, on a device with no touchscreen
 
-Returning from the unknown-sources screen puts the settings list back at the top, so the user has
-to navigate all the way down to the row again. Reported from the sofa, and fair. The fix is to
-remember the focused row before leaving and restore focus in `onResume` — the same place the
-install already resumes from. Not yet done.
+Sending the user to a system screen and back rebuilds the settings list at the top, and **Check for
+updates is the last row on the page** — so the reward for granting the permission was scrolling the
+whole way down again to press the same button. On a remote that is a dozen D-pad presses.
+
+`restoreUpdateFocus` is set when we leave, and `onResume` puts focus back. Two details matter:
+
+- **Post it.** On return from another activity `onResume` runs before layout, and focus cannot land
+  on a row the list has not measured yet.
+- **`requestRectangleOnScreen`, not just `requestFocus`.** Focus alone can leave the row focused
+  while still off-screen, which is worse than not restoring it — the highlight is somewhere the user
+  cannot see and the D-pad appears to have stopped working.
+
+Anything else that leaves for a system screen from a row far down the page wants the same treatment.
 
 ---
 

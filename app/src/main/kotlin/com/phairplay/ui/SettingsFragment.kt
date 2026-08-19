@@ -895,6 +895,18 @@ class SettingsFragment : Fragment() {
         // Pick the install back up. The user left for the unknown-sources screen mid-update, and
         // making them run the whole check-and-download again after granting it is the kind of
         // small indignity that makes a feature feel broken. The APK is still in the cache dir.
+        if (restoreUpdateFocus) {
+            restoreUpdateFocus = false
+            // Posted, not immediate: focus cannot land on a row the list has not measured yet, and
+            // on return from another activity this runs before layout. requestRectangleOnScreen
+            // does the scrolling -- requestFocus alone leaves the row focused off-screen when the
+            // container has not settled.
+            rowUpdate.post {
+                rowUpdate.requestFocus()
+                rowUpdate.requestRectangleOnScreen(
+                    android.graphics.Rect(0, 0, rowUpdate.width, rowUpdate.height), true)
+            }
+        }
         val resume = pendingUpdateIntent
         if (resume != null &&
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O &&
@@ -909,6 +921,9 @@ class SettingsFragment : Fragment() {
 
     /** Install intent parked while the user grants unknown-sources. Cleared once it is launched. */
     private var pendingUpdateIntent: android.content.Intent? = null
+
+    /** Set when we send the user to a system screen from the update row, so focus can come back. */
+    private var restoreUpdateFocus = false
 
     /**
      * Shows whether each privileged capability is currently granted.
@@ -1140,6 +1155,11 @@ class SettingsFragment : Fragment() {
                             }.onFailure { e -> Logger.w("No unknown-sources screen — ${e.message}") }
                         }
                         pendingUpdateIntent = intent
+                        // Remember where the user was. Coming back from a system screen rebuilds
+                        // the list at the top, and Check for updates is the LAST row on the page --
+                        // so without this the reward for granting the permission is scrolling the
+                        // whole way down again to press the same button.
+                        restoreUpdateFocus = true
                     }
                     .setNegativeButton(android.R.string.cancel, null)
                     .show()
