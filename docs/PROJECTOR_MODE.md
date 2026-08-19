@@ -164,6 +164,26 @@ shaped  = norm ^ 0.9
 level  += (shaped - level) * (shaped > level ? 0.30 : 0.045)   // attack / release
 ```
 
+> **Level-against-peak has a ceiling problem, and you will hit it.** A band that is
+> *steadily* loud — bass on anything four-on-the-floor — sits at its own decaying peak, so
+> `ratio ≈ 1` continuously and the orb is pinned bright and motionless. It is lit, it is
+> "correct", and it shows you nothing. A port that fixed this normalises against a slow
+> per-band **baseline** (~1.5 s EMA) and renders the *rise above* it instead:
+>
+> ```
+> base   += 0.02 * (raw - base)                       // ~1.5s follow, seeded on first window
+> excess  = clamp(raw/base - 1, 0, EXCESS_MAX) / EXCESS_MAX
+> ```
+>
+> "At its own average" now means **0**, not 1, so it takes a genuine kick to light up and
+> the orb settles between hits. Keep `EXCESS_MAX` generous (~1.1): set it tight and normal
+> hits clip flat at 1 and you are back where you started.
+>
+> **One exception, and it is not optional: vocals.** A sustained note has no swell, so a
+> pure swell measure goes dark exactly while someone is singing. The vocal band alone also
+> needs an absolute `presence = raw / decayingPeak`, taking `max(swell, presence·0.9)`.
+> Bass and treble stay pure-swell or they become a constant glow.
+
 > **The decay constant is the thing that will bite you.** It is applied per emission, so
 > its per-second effect is `decay^rate`. At `0.985` and ~100 calls/sec the peak collapses
 > to 0.22 of itself every second, chases the signal, and **every band pins at 1.00**. At
@@ -190,14 +210,25 @@ correct; the visuals are simply early. It reads as "the orbs aren't on the beat.
 So hold each measurement by the true latency before displaying it:
 
 ```
-delay = ourQueuedFrames/sampleRate + outputLatency() + userTrim
+delay = (framesStillAheadOfThisPCM)/sampleRate + userTrim
 ```
+
+**Which frames are "still ahead" depends entirely on where you take the measurement**, and
+getting that wrong is worth hundreds of milliseconds:
+
+- Measuring where packets **arrive** (before your jitter/reorder queue): your queue depth
+  *is* ahead of them, so include it, plus the output latency below.
+- Measuring where PCM is **written to the output** (after the queue, which is the natural
+  place — you already have the decoded samples in hand): that PCM has left the queue. The
+  queue depth belongs to packets you have not measured yet. Include it and you add the
+  whole queue as pure lag — 14–40 packets at 352 frames each is 110–320 ms, and it drifts
+  as the queue breathes, so the error is not even constant.
 
 where `outputLatency()` is **measured, not assumed** — on Android,
 `AudioTrack.getTimestamp()` gives the frame the hardware is playing, so
 `framesWritten - ts.framePosition` is what is genuinely pending.
 
-> **Do not also add the output buffer's capacity.** We did, on top of the measured
+> **Do not add the output buffer's capacity either.** We did, on top of the measured
 > latency, and it double-counted: capacity is not fill, and whatever is really in there is
 > exactly what `getTimestamp()` already reports. Same symptom as no delay at all, opposite
 > sign.
@@ -252,8 +283,16 @@ window was cut. When a fresh estimate lands within ~12% of half, double or quadr
 current lock, it is the same tempo counted differently -- keep the lock. Anything genuinely
 different is near neither multiple and passes through.
 
-Ease adopted values (~25% per update) rather than snapping, so a half-time bar nudges the
+Ease adopted values (~12% per update) rather than snapping, so a half-time bar nudges the
 readout instead of jerking it.
+
+> **And charge more for moving a lock than for keeping one.** Using the same 0.50 bar to
+> *acquire* a tempo and to *replace* one lets the readout ratchet: a device log walked
+> 129 → 146 → 152 → 157 on a track whose tempo never changed, every step taken at exactly
+> 50 %. Each window nudged the lock a little, and the next window then scored the
+> neighbourhood of the nudged value rather than the true tempo. A candidate that folds onto
+> the current lock still costs the normal bar; a genuinely different number needs ~0.72, or
+> the lock holds.
 
 ---
 
@@ -312,6 +351,14 @@ rotating hue (47° steps) or stepping value down — do **not** cycle the picks 
 have. Cycling is what produced logs reading `51°, 353°, 51°` (orbs 0 and 2 identical) and
 `0°, 0°, 0°` (three identical orbs) — indistinguishable from the bug it was meant to fix.
 
+> **Rotating hue is the lesser evil, not a good one.** It buys separation by painting a
+> colour the artwork does not contain: on an all-orange cover, 47° steps produce blue and
+> green orbs, which is confidently wrong rather than merely dull. A port that hit this
+> fills the shortfall with lighter and darker **shades of the accents the art does have**
+> (same hue, stepped value/saturation) and reserves hue rotation for nothing at all. An
+> orange album gives orange shades. Monochrome art already takes the value path above,
+> which is the same idea arrived at from the other direction.
+
 Finally, **reject near-black palettes** (`brightest v < 0.35`) and keep the previous one.
 Between-track placeholders and partially-decoded images arrive as valid bitmaps, and
 letting them through makes the backdrop lurch to black and back on every track change.
@@ -327,6 +374,54 @@ whole fade and then snap.
 Log the three final hues on every palette change. When three orbs come out the same
 colour, that one line tells you whether extraction failed or drawing did — and that is
 the difference between an hour of debugging and a minute.
+
+---
+
+## 5a. The intensity control is a render amplitude, never a pre-clip multiplier
+
+Whatever you call the user-facing sensitivity setting, the obvious implementation is
+`level = clamp(level * amp, 0, 1)` and it is wrong in a way that is invisible in code and
+obvious on screen.
+
+Band levels already reach 0.9+ on anything with a kick in it. Multiply by anything above 1
+and the top of the range flattens against the clamp: every hit above roughly `1/amp`
+renders identically. Turning the intensity **up** produces **less** visible movement, and
+the highest two settings become indistinguishable from each other.
+
+Two fixes, either is fine:
+
+- **Apply the amplitude to the render, not the level.** Keep levels 0..1 and use them as
+  `radius = base * (1 + level*ride*amp)`, `alpha = rest + level*range*amp`, with generous
+  caps. The level stays honest and only the drawing gets louder.
+- **Make the curve steeper instead of the gain higher.** A soft knee —
+  `(1 - e^(-k·x)) / (1 - e^(-k))` — gives the same extra response on quiet detail but
+  approaches full scale instead of colliding with it, so a loud passage still has
+  somewhere to go. Short-circuit it at `k = 1` so the default setting is the raw level.
+
+---
+
+## 5b. Memory, on a device that has none
+
+A Fire TV runs its low-memory killer hot, and the visuals are not what costs you.
+
+- **Decode cover art at the size you draw it.** Senders push whatever resolution they
+  like — 600² is common, Apple goes to 1400². A 1400² ARGB_8888 bitmap is 7.8 MB held for
+  a whole track to fill a 340 dp tile. Decode with `inSampleSize` against a target near the
+  tile size. `Palette` downsamples internally anyway, so this costs nothing in colour
+  quality.
+- **Let the cross-fade go when it is finished.** A `TransitionDrawable` holds *both*
+  covers for as long as it is the view's drawable. Set it and never replace it and every
+  previous cover stays reachable for the whole of the next track — two full-size bitmaps
+  live at all times instead of one, permanently. Hand the view the new drawable on its own
+  once the fade has played.
+- **Cache gradients by key, not by frame.** A `RadialGradient` per blob per frame is four
+  native allocations 60 times a second for objects whose parameters changed on none of
+  them. Rebuild only when the colour or geometry actually changes.
+- **Check what the platform is holding before optimising your own code.** A debug install
+  runs `status=run-from-apk` — no AOT compilation, so ART keeps the entire dex in *private
+  dirty* memory. On this app that is 37 MB, larger than the Java heap, native heap and
+  graphics memory combined. `dumpsys meminfo <pkg>` shows it as `.dex mmap` private dirty,
+  and no amount of bitmap tuning touches it; a release build does.
 
 ---
 

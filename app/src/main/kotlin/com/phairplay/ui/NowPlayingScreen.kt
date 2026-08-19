@@ -936,14 +936,48 @@ class NowPlayingScreen @JvmOverloads constructor(
     /** Last logged sender identity, so the line above fires on change rather than on every render. */
     private var lastSenderKey: String? = null
 
+    /**
+     * Releases the cross-fade once it has played, so the outgoing cover can be collected.
+     * Re-reads [currentArtDrawable] rather than capturing it, so a track change during the fade
+     * lands on the newest art instead of resurrecting the one it interrupted.
+     */
+    private val dropFadeRunnable = Runnable {
+        val current = currentArtDrawable
+        if (current != null && artworkView.drawable is TransitionDrawable) {
+            artworkView.setImageDrawable(current)
+        }
+    }
+
+    /**
+     * Decodes cover art at roughly the size it will be shown at, not at whatever the sender sent.
+     *
+     * Senders push covers at their own resolution -- 600x600 is common and Apple goes to 1400 --
+     * and the tile is 340dp. A 1400x1400 ARGB_8888 bitmap is 7.8 MB held for the length of a
+     * track to fill about a third of that in pixels. inSampleSize only halves, so this lands
+     * within a factor of two of the target and never below it: sharp at the size it is drawn,
+     * without the memory of an image nothing can display.
+     */
+    private fun decodeArtwork(payload: ByteArray): Bitmap? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeByteArray(payload, 0, payload.size, bounds) }
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        val opts = BitmapFactory.Options()
+        if (longest > 0) {
+            var sample = 1
+            while (longest / (sample * 2) >= ARTWORK_TARGET_PX) sample *= 2
+            opts.inSampleSize = sample
+        }
+        return runCatching {
+            BitmapFactory.decodeByteArray(payload, 0, payload.size, opts)
+        }.getOrNull()
+    }
+
     private fun applyArtworkNow(bytes: ByteArray?) {
         // Senders push a 0-byte "image/none" placeholder between tracks (visible in the RTSP log as
         // `artwork (0B, image/none)`). Treat it as "no art yet" rather than decoding it, so it can't
         // clear real cover art that is about to arrive a few milliseconds later.
         val payload = bytes?.takeIf { it.isNotEmpty() }
-        val bitmap = payload?.let {
-            runCatching { BitmapFactory.decodeByteArray(it, 0, it.size) }.getOrNull()
-        }
+        val bitmap = payload?.let { decodeArtwork(it) }
         Timber.d("applyArtwork bytes=${bytes?.size ?: -1} decoded=${bitmap != null} " +
                  "size=${bitmap?.width}x${bitmap?.height}")
         if (payload != null && bitmap == null) {
@@ -980,6 +1014,13 @@ class NowPlayingScreen @JvmOverloads constructor(
             fade.isCrossFadeEnabled = true
             artworkView.setImageDrawable(fade)
             fade.startTransition(ARTWORK_FADE_MS)
+            // AND TAKE IT BACK OFF AGAIN once the fade is over. A TransitionDrawable holds both
+            // layers for as long as it is the ImageView's drawable, and nothing ever replaced it --
+            // so every previous cover stayed reachable for the whole of the next track, and the app
+            // sat on two full-size bitmaps instead of one, forever. Handing the view the new
+            // drawable on its own is what lets the old one go.
+            handler.removeCallbacks(dropFadeRunnable)
+            handler.postDelayed(dropFadeRunnable, ARTWORK_FADE_MS.toLong() + 200L)
             // A crossfade alone reads as a slideshow. Letting the tile settle in from slightly
             // under-size gives the new cover a moment of physicality, and it is the same gesture
             // the text does beside it, so the two land as one event rather than two.
@@ -1173,6 +1214,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         compactProgress.visibility = View.GONE
         handler.removeCallbacks(compactTick)
         handler.removeCallbacks(restartScrollsRunnable)
+        handler.removeCallbacks(dropFadeRunnable)
         textColumn.animate().cancel()
         textColumn.alpha = 1f
         textColumn.translationY = 0f
@@ -1222,6 +1264,9 @@ class NowPlayingScreen @JvmOverloads constructor(
 
         /** How far under-size a new cover starts before settling. Subtle by design. */
         private const val ART_SWAP_SCALE = 0.94f
+
+        /** Longest edge we keep cover art at. The tile is 340dp; this is comfortably above it. */
+        private const val ARTWORK_TARGET_PX = 640
 
         /** Artwork tile: full-screen, and the deliberately smaller one the mini presets use. */
         private const val FULL_ART_DP = 340
