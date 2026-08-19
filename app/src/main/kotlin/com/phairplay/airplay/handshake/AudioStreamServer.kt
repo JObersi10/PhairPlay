@@ -716,10 +716,22 @@ class AudioStreamServer(
         when {
             confidence >= BPM_MIN_CONFIDENCE -> {
                 val adopt = if (locked) foldToLock(median, currentBpm.toDouble()) else median
+                // MOVING A LOCK COSTS MORE THAN KEEPING ONE.
+                //
+                // BPM_MIN_CONFIDENCE was the bar for both acquiring a tempo and replacing one, and
+                // at 0.5 that is a coin flip. Real logs walked 129 -> 146 -> 152 -> 157 on a track
+                // whose tempo never changed, every step taken at exactly 50%: each window nudged
+                // the lock a little, and the next window scored its neighbourhood rather than the
+                // true tempo, so it ratcheted. Anything that folds onto the current lock (the same
+                // tempo, or an octave of it) still counts at the normal bar; a genuinely DIFFERENT
+                // number has to clear a much higher one, or it is just noise and the lock holds.
                 // Eased while locked, so a half-time bar nudges the readout instead of snapping it.
-                currentBpm =
-                    if (locked) (currentBpm * (1f - BPM_ADOPT) + adopt.toFloat() * BPM_ADOPT)
-                    else adopt.toFloat()
+                val wouldMoveLock = locked && adopt != currentBpm.toDouble()
+                if (!wouldMoveLock || confidence >= BPM_RELOCK_CONFIDENCE) {
+                    currentBpm =
+                        if (locked) (currentBpm * (1f - BPM_ADOPT) + adopt.toFloat() * BPM_ADOPT)
+                        else adopt.toFloat()
+                }
                 bpmMisses = 0
             }
             // Weak but still locked: hold the number and say nothing.
@@ -1042,10 +1054,14 @@ class AudioStreamServer(
         // held back by roughly a full AudioTrack buffer beyond the true latency — a fixed couple of
         // hundred milliseconds, which is about half a beat at 160 BPM and reads exactly like "the
         // orbs are not on the beat" while every band level is perfectly correct.
-        val queuedMs = if (audioTrack != null) {
-            (frameQueue.size.toLong() * framesPerPacket * 1000L / sampleRate.coerceAtLeast(1))
-        } else 0L
-        return queuedMs + extraDelayMs + beatDelayMs + outputLatencyMs()
+        // AND NOT OUR QUEUE EITHER. The measurement is taken in emitEnergy(), which runs *after*
+        // the frame has been polled off frameQueue, decoded, and written to AudioTrack -- so the
+        // queue depth is the delay on packets that have not been measured yet, not on this one.
+        // Adding it held every visual back by the queue's whole depth, which the logs show sitting
+        // at 14-40 packets: at 352 frames each that is 110-320ms of pure, self-inflicted lag, and
+        // it drifts with the queue. What is genuinely still ahead of this PCM is what AudioTrack
+        // has not played yet, and nothing else.
+        return extraDelayMs + beatDelayMs + outputLatencyMs()
     }
 
     /**
@@ -1285,6 +1301,9 @@ class AudioStreamServer(
         private const val BPM_TOLERANCE = 0.08
         private const val BPM_MIN_CONFIDENCE = 0.5f
 
+        /** What a candidate must score to REPLACE an existing lock with a different number. */
+        private const val BPM_RELOCK_CONFIDENCE = 0.72f
+
         /** Confidence needed to KEEP a lock, well under what it takes to acquire one. */
         private const val BPM_HOLD_CONFIDENCE = 0.28f
 
@@ -1292,7 +1311,7 @@ class AudioStreamServer(
         private const val BPM_MISSES_TO_DROP = 6
 
         /** How far a re-estimate moves an existing lock, per adoption. */
-        private const val BPM_ADOPT = 0.25f
+        private const val BPM_ADOPT = 0.12f
 
         /** Proximity to a 2x/4x multiple that counts as the same tempo counted differently. */
         private const val BPM_OCTAVE_TOLERANCE = 0.12

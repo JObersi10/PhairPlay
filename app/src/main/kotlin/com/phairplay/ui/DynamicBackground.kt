@@ -226,7 +226,7 @@ class DynamicBackground @JvmOverloads constructor(
         val a2 = t2.animatedValue as Float
         val a3 = t3.animatedValue as Float
 
-        val e = (energy * beatMultiplier).coerceIn(0f, 1f)
+        val e = punch(energy)
         // BAND ENVELOPES ONLY -- `energy` is deliberately not mixed in here any more.
         //
         // It carries the same beat, but through a SECOND smoothing stage (0.22/frame in tick, on top
@@ -235,8 +235,8 @@ class DynamicBackground @JvmOverloads constructor(
         // two behind the orbs -- the two modes were drawing the same music at different times.
         // bandBass already falls back to `energy` for sources that report loudness but no spectrum,
         // so nothing is lost by dropping it. `e` stays for the fallback path below.
-        val bass = (bandBass * beatMultiplier).coerceIn(0f, 1f)
-        val treble = (bandTreble * beatMultiplier).coerceIn(0f, 1f)
+        val bass = punch(bandBass)
+        val treble = punch(bandTreble)
         val beatScale = 1f + bass * FIELD_BEAT_SCALE
         // ALPHA IS ALL BUT CONSTANT, for the same reason the projector halo's is: these blobs cover
         // the whole screen, so any alpha that rides the beat pumps the entire picture's brightness
@@ -339,6 +339,26 @@ class DynamicBackground @JvmOverloads constructor(
 
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
     fun setBeatMultiplier(m: Float) { beatMultiplier = m }
+
+    /**
+     * Applies the intensity setting as a CURVE rather than as a gain.
+     *
+     * It used to be `level * multiplier`, clamped to 1. Band levels already reach 0.9+ on any
+     * track with a kick in it, so at anything above 1.0 the multiply pinned the top of the range
+     * flat: every hit above about 1/multiplier rendered identically, which is turning the
+     * intensity up and getting *less* movement, not more. A soft knee has the same effect where
+     * the signal is quiet -- steeper response, more visible detail -- and simply approaches full
+     * scale at the top instead of colliding with it, so a loud passage still has somewhere to go.
+     * Normalised so that 1 still maps to 1, and short-circuited at multiplier 1 so the default
+     * setting is exactly the raw level.
+     */
+    private fun punch(level: Float): Float {
+        val v = level.coerceIn(0f, 1f)
+        val m = beatMultiplier
+        if (m <= 1.001f) return v
+        val k = m.toDouble()
+        return ((1.0 - Math.exp(-k * v)) / (1.0 - Math.exp(-k))).toFloat().coerceIn(0f, 1f)
+    }
 
     /**
      * Turns the edgeless projector look on or off.
@@ -487,7 +507,7 @@ class DynamicBackground @JvmOverloads constructor(
                 Math.sin(((py * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_Y * h
 
             // Each orb rides its own smoothed energy, so they swell out of step with one another.
-            val oe = (orbEnergy[k] * beatMultiplier).coerceIn(0f, 1f)
+            val oe = punch(orbEnergy[k])
             var radius = short * ORB_BASE_RADIUS * (1f + oe * ORB_BEAT_SWELL)
 
             // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
