@@ -34,17 +34,38 @@ object UpdateChecker {
         data class Failed(val reason: String) : Result
     }
 
-    suspend fun check(currentVersion: String): Result = withContext(Dispatchers.IO) {
+    /**
+     * [flavor] is the build variant this APK was produced from — `firetv` or `googletv`.
+     *
+     * It is not optional. The two flavours are SEPARATE APPLICATION IDS
+     * (`com.phairplay.firetv` / `com.phairplay.googletv`), so downloading the wrong one does not
+     * fail loudly: Android sees a different package and installs it ALONGSIDE the running app
+     * rather than updating it, leaving two PhairPlays on the device — or, on a Fire TV handed the
+     * googletv build, refuses with INSTALL_FAILED_OLDER_SDK because that flavour is minSdk 29.
+     * Picking "the first asset ending in .apk" made which of those happened depend on the order
+     * assets were attached to the release.
+     */
+    suspend fun check(currentVersion: String, flavor: String): Result = withContext(Dispatchers.IO) {
         runCatching {
             val body = fetch(RELEASES_URL)
             val json = JSONObject(body)
             val tag = json.optString("tag_name").ifEmpty { return@runCatching Result.Failed("No tag on the latest release") }
             val notes = json.optString("body").take(NOTES_LIMIT)
-            val asset = json.optJSONArray("assets")?.let { assets ->
+            val apks = json.optJSONArray("assets")?.let { assets ->
                 (0 until assets.length())
                     .map { assets.getJSONObject(it) }
-                    .firstOrNull { it.optString("name").endsWith(".apk") }
-                    ?.optString("browser_download_url")
+                    .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
+            }.orEmpty()
+            val match = apks.firstOrNull { it.optString("name").contains(flavor, ignoreCase = true) }
+            // A single unnamed APK is taken as "this release only ships one build" and used. More
+            // than one, none of them naming our flavour, is ambiguous -- and guessing here installs
+            // a second copy of the app under the other package name, so say so instead.
+            val asset = when {
+                match != null -> match.optString("browser_download_url")
+                apks.size == 1 -> apks[0].optString("browser_download_url")
+                apks.isEmpty() -> null
+                else -> return@runCatching Result.Failed(
+                    "Release $tag has no $flavor build attached (found ${apks.size} other APKs)")
             }
             if (isNewer(tag, currentVersion)) Result.Available(tag, notes, asset) else Result.UpToDate(tag)
         }.getOrElse { Result.Failed(it.message ?: it.javaClass.simpleName) }

@@ -998,7 +998,7 @@ class SettingsFragment : Fragment() {
         textUpdateValue.setText(R.string.setting_update_checking)
         rowUpdate.isEnabled = false
         viewLifecycleOwner.lifecycleScope.launch {
-            val result = com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME)
+            val result = com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
             rowUpdate.isEnabled = true
             when (result) {
                 is com.phairplay.util.UpdateChecker.Result.UpToDate ->
