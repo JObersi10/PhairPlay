@@ -14,6 +14,16 @@ plugins {
 fun String.escapedForBuildConfig(): String =
     replace("\\", "\\\\").replace("\"", "\\\"")
 
+// Short commit the APK was built from, so a build in the wild maps back to an exact commit.
+//
+// providers.exec keeps this configuration-cache safe -- reading git output with a plain
+// ByteArrayOutputStream at configure time is exactly the kind of thing that invalidates the cache
+// on every build. runCatching covers the source-tarball case: no .git, no git binary, still builds.
+val gitSha: String = runCatching {
+    providers.exec { commandLine("git", "rev-parse", "--short", "HEAD") }
+        .standardOutput.asText.get().trim()
+}.getOrNull()?.takeIf { it.isNotEmpty() } ?: "unknown"
+
 android {
     namespace = "com.phairplay"
     compileSdk = 35
@@ -25,6 +35,8 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
+
+        buildConfigField("String", "GIT_SHA", "\"${gitSha.escapedForBuildConfig()}\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
