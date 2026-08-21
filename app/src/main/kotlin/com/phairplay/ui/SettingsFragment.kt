@@ -222,7 +222,8 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
 
-        textVersionValue.text = BuildConfig.VERSION_NAME
+        textVersionValue.text =
+            getString(R.string.setting_version_value, BuildConfig.VERSION_NAME, BuildConfig.GIT_SHA)
         showNetworkInfo()
     }
 

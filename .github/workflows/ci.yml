@@ -103,14 +103,20 @@ jobs:
           path: ${{ matrix.apk_path }}
           retention-days: 7
 
-  release-apks:
-    name: Publish raw debug APKs
-    needs: android-build
+  dev-release:
+    name: Rolling dev prerelease
+    needs: [ jvm-tests, android-build ]
+    # Pushes to main only. A PR build must never move the tag people are installing from.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the changelog needs history, and the default shallow clone has none
+
       - name: Download APK artifacts
         uses: actions/download-artifact@v4
         with:
@@ -118,10 +124,53 @@ jobs:
           merge-multiple: true
           path: apks
 
-      - name: Publish rolling debug release
+      - name: Name the APKs by flavour
+        # The in-app updater picks its asset by matching BuildConfig.FLAVOR against the asset name
+        # (docs/UPDATE_CHECKER.md). Both files arrive here as app-<flavor>-debug.apk, which already
+        # contains the flavour, but the released names should read like the tagged releases do.
+        run: |
+          mv apks/app-firetv-debug.apk    apks/PhairPlay-dev-firetv.apk
+          mv apks/app-googletv-debug.apk  apks/PhairPlay-dev-googletv.apk
+          ls -l apks
+
+      - name: Build the changelog for this push
+        id: notes
+        run: |
+          BEFORE="${{ github.event.before }}"
+          # A new branch, or a force push, reports an all-zero "before" that git cannot resolve.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            RANGE="-5"
+          else
+            RANGE="$BEFORE..${{ github.sha }}"
+          fi
+          {
+            echo "body<<PHAIRPLAY_EOF"
+            echo "Automatic build of \`main\` — **not** a release. Cut \`vX.Y.Z\` by hand for those."
+            echo
+            echo "Commit \`${{ github.sha }}\`"
+            echo
+            echo "### Changes in this build"
+            git log --no-merges --pretty='- %s (%h)' $RANGE
+            echo "PHAIRPLAY_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Clear the previous dev prerelease
+        # softprops updates a release in place, but GitHub ignores target_commitish on an existing
+        # published release, so the `dev` tag would stay pinned to whatever commit first created it
+        # while the assets moved on underneath it. Deleting the tag as well is what actually makes
+        # the release roll. Assets go with it, so nothing stale can survive either.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete dev --cleanup-tag --yes || true
+
+      - name: Publish the rolling dev prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest-debug
-          name: Latest debug APKs
+          tag_name: dev
+          target_commitish: ${{ github.sha }}
+          name: Latest build
+          body: ${{ steps.notes.outputs.body }}
           prerelease: true
+          make_latest: 'false'   # the updater reads /releases/latest; a prerelease must not claim it
           files: apks/*.apk

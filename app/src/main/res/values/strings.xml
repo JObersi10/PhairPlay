@@ -163,6 +163,9 @@
     <string name="setting_audio_buffer_subtitle">Lower = less delay, higher = fewer glitches</string>
     <string name="setting_audio_buffer_default">%1$d ms (default)</string>
     <string name="setting_version">Version</string>
+    <!-- Version name already carries the flavour suffix ("1.0.0-firetv"), so only the commit is
+         appended here. Without it there is no way to tell which build a device is actually on. -->
+    <string name="setting_version_value">%1$s \u00b7 %2$s</string>
     <string name="setting_update">Check for updates</string>
     <string name="setting_update_checking">Checking…</string>
     <string name="setting_update_uptodate">Up to date (%1$s)</string>
