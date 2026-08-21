@@ -95,9 +95,10 @@ the event never happened, not that the server is broken.
 - `NowPlayingScreen` — audio card: artwork crossfade, marquee text, MENU info
   panel, idle screensaver, debug HUD. Also used by DLNA playback
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
-- `AudioRouteMonitor` — which output is playing (HDMI / speakers / a named Bluetooth sink); the
-  service swaps the remembered A/V trim to match. Bluetooth link latency is **not** measurable —
-  `getTimestamp()` stops at the HAL — so a first-seen BT speaker is seeded at 350ms of visual delay
+- `AudioRouteMonitor` — which output is playing (HDMI / speakers / a named Bluetooth sink). A
+  Bluetooth route silently adds 350ms of **visual** delay (`AudioRoute.BLUETOOTH_COMPENSATION_MS`),
+  derived from the route rather than stored, and invisible in Settings — the user's Audio delay is a
+  separate dial that still reads 0. Link latency is not measurable: `getTimestamp()` stops at the HAL
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
 `docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app

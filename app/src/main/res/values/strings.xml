@@ -145,11 +145,10 @@
     <string name="setting_audio_delay">Audio delay</string>
     <string name="setting_audio_delay_none">None</string>
     <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>
-    <string name="setting_beat_delay">Beat delay</string>
-    <string name="setting_beat_delay_subtitle">Shift the beat animation later to match a Bluetooth speaker</string>
-    <!-- Both delay rows name the output they are saved against, so it is obvious the value follows
-         the speaker rather than the app. %1$s is the subtitle above, %2$s the output name. -->
-    <string name="setting_delay_for_output">%1$s \u2022 saved for %2$s</string>
+    <!-- Shown under Audio delay while a Bluetooth speaker is connected. It states a compensation
+         the app is already applying; it is not something the user sets. %1$s is the speaker name,
+         %2$d the milliseconds. -->
+    <string name="setting_audio_delay_bluetooth">%1$s detected \u2022 already compensating %2$d ms automatically</string>
     <string name="setting_pip">Picture-in-picture</string>
     <string name="setting_pip_subtitle">Shrink mirrored video into a corner when you leave the app</string>
     <string name="setting_back_action">Back button</string>

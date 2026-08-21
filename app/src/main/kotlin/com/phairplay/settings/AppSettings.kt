@@ -203,37 +203,21 @@ data class AppSettings(
     val beatPulse: Int = 0,
 
     /**
-     * Extra delay applied to the beat animation only, on top of [audioDelayMs], in milliseconds.
-     *
-     * A Bluetooth speaker adds its own output latency that the AudioTrack timestamp cannot see, so
-     * the sound the user hears lags the sound we measured. Trimming [audioDelayMs] to compensate
-     * would desync the audio itself; this shifts the visuals alone.
-     */
-    val beatDelayMs: Int = 0,
-
-    /**
-     * Remembered A/V trims, keyed by [AudioRoute.key], so a speaker keeps its own sync.
-     *
-     * [audioDelayMs] and [beatDelayMs] above stay the live values — everything that consumes a trim
-     * reads those and needs no idea that routes exist. This map is the memory behind them: when the
-     * output changes, the entry for the new route is written into those two fields, and when the
-     * user tunes them the new numbers are written back here against whatever is playing at the time.
-     *
-     * A route with no entry has never been tuned. Bluetooth is seeded on first sight; see
-     * [AvTrim.BLUETOOTH_SEED_BEAT_MS] for why that seed is not zero.
-     */
-    val avTrimProfiles: Map<String, AvTrim> = emptyMap(),
-
-    /**
-     * Human-readable name of the output the live trim currently belongs to, or blank before the
-     * first detection.
+     * Name of the output currently playing, or blank before the first detection.
      *
      * Runtime state in a persisted store, which is a fair objection — but Settings has to be able to
-     * say *which speaker* the delay it is showing belongs to, and routing it through the settings
-     * flow means the rows update themselves when a speaker connects with the screen already open.
-     * A second AudioRouteMonitor inside the fragment would answer the same question twice.
+     * say that a Bluetooth speaker is being compensated for, and routing it through the settings
+     * flow means the row updates itself when a speaker connects with the screen already open.
      */
     val currentAudioRoute: String = "",
+
+    /**
+     * Milliseconds of visual delay the app is applying automatically for the current output.
+     *
+     * Reported so Settings can say so; not settable, and not what the user's Audio delay dial holds.
+     * Zero on every route except Bluetooth.
+     */
+    val currentRouteCompensationMs: Int = 0,
 
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */

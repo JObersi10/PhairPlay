@@ -9,7 +9,6 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.phairplay.util.Logger
 import kotlinx.coroutines.flow.Flow
@@ -128,12 +127,8 @@ class SettingsRepository(private val context: Context) {
         audioBufferMs      = this[Keys.AUDIO_BUFFER_MS]          ?: AppSettings.DEFAULT_AUDIO_BUFFER_MS,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
-        beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
-        // A malformed entry is dropped rather than failing the whole read: one bad row must not
-        // cost the user every other speaker's trim.
-        avTrimProfiles     = this[Keys.AV_TRIM_PROFILES]
-            ?.mapNotNull { AvTrim.parse(it) }?.toMap().orEmpty(),
         currentAudioRoute  = this[Keys.CURRENT_AUDIO_ROUTE]      ?: "",
+        currentRouteCompensationMs = this[Keys.CURRENT_ROUTE_COMPENSATION] ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         // Stored as one delimited string rather than a DataStore string set, because slot ORDER is
         // the identity here — slot 2 is a different HomeKit input from slot 1 — and a set has none.
@@ -177,10 +172,8 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AUDIO_BUFFER_MS]      = settings.audioBufferMs
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
-        this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
-        this[Keys.AV_TRIM_PROFILES]     =
-            settings.avTrimProfiles.map { (key, trim) -> trim.serialize(key) }.toSet()
         this[Keys.CURRENT_AUDIO_ROUTE]  = settings.currentAudioRoute
+        this[Keys.CURRENT_ROUTE_COMPENSATION] = settings.currentRouteCompensationMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.INPUT_APPS] = settings.inputApps.joinToString("\u0000")
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
@@ -226,9 +219,12 @@ class SettingsRepository(private val context: Context) {
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
-        val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
-        val AV_TRIM_PROFILES    = stringSetPreferencesKey("av_trim_profiles")
+        // beat_delay_ms and av_trim_profiles were briefly settings and are now neither read nor
+        // written: the Bluetooth compensation is a property of the transport, not a preference, so
+        // it is derived from the route every time rather than stored. Any leftover values sit
+        // harmlessly in the store.
         val CURRENT_AUDIO_ROUTE = stringPreferencesKey("current_audio_route")
+        val CURRENT_ROUTE_COMPENSATION = intPreferencesKey("current_route_compensation_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val INPUT_APPS = stringPreferencesKey("input_apps")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")

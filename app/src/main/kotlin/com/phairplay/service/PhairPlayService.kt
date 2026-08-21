@@ -34,7 +34,6 @@ import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
 import com.phairplay.settings.AudioRoute
-import com.phairplay.settings.AvTrim
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.diagnostic.DiagnosticServer
 import com.phairplay.diagnostic.LogBuffer
@@ -677,110 +676,58 @@ class PhairPlayService : Service() {
     // ─── Audio route ─────────────────────────────────────────────────────────
 
     /**
-     * Keeps the A/V-sync trim attached to the speaker rather than to the app.
+     * Compensates for a Bluetooth speaker automatically, without making it the user's problem.
      *
-     * The problem this solves: a Bluetooth speaker is genuinely late. The encoder, the radio link
-     * and the speaker's own jitter buffer add somewhere around 150-250ms that Android reports
-     * nowhere -- `AudioTrack.getTimestamp()`, which `AudioStreamServer.outputLatencyMs()` already
-     * consults, stops at the HAL -- so the beat pulse and the lyric timeline land early against
-     * what the room actually hears. There is no measurement to be had here. What there is, is a
-     * value the user can dial in by ear once; and the thing worth automating is not the number but
-     * *remembering* it. Switch to the TV's own speakers and the offset should vanish, switch back
-     * and it should return, without anyone opening Settings.
+     * A Bluetooth speaker is late by roughly [AudioRoute.BLUETOOTH_COMPENSATION_MS], and Android
+     * reports none of it — `AudioTrack.getTimestamp()`, which `AudioStreamServer.outputLatencyMs()`
+     * already consults, stops at the HAL, which is the moment audio leaves the box and well before
+     * the encoder, the radio link and the speaker's own jitter buffer. So it cannot be measured, and
+     * it does not need to be asked about either: it is a property of the transport, present whenever
+     * the transport is and gone the moment it isn't.
      *
-     * [AppSettings.audioDelayMs] and [AppSettings.beatDelayMs] remain the live values every consumer
-     * reads. This only swaps what is in them when the output changes.
+     * It is therefore held entirely outside [AppSettings]. The user's Audio delay setting reads 0
+     * with a Bluetooth speaker connected, because 0 extra is what they have actually chosen; the 350
+     * underneath it is ours. Connect a speaker and the visuals slide back; disconnect and they
+     * snap forward, with nothing to tune and nothing to undo.
+     *
+     * The visuals move rather than the audio, because the audio is the side that is already late.
      */
     private fun startAudioRouteWatcher() {
         val monitor = AudioRouteMonitor(applicationContext).also { audioRouteMonitor = it }
         monitor.start()
         serviceScope.launch {
-            // Both directions, from one collector. A route change pushes the saved trim into the
-            // live settings; a settings change with the route unchanged is the user tuning by ear,
-            // and gets written back to whatever is playing. Watching only the first direction looks
-            // right until you switch speakers and come back, and find the dial you just turned has
-            // been overwritten by the value it had before you touched it.
-            combine(monitor.route, settingsRepository.settingsFlow) { r, s -> r to s }
-                .collect { (route, settings) ->
-                    if (route.key == AudioRoute.UNKNOWN.key) return@collect
-                    runCatching {
-                        if (trimRoute?.key != route.key) {
-                            trimRoute = route
-                            applyTrimFor(route, settings)
-                        } else {
-                            rememberTrimFor(route, settings)
-                        }
-                    }.onFailure { Logger.w("Audio route: could not apply trim - ${it.message}") }
+            monitor.route.collect { route ->
+                if (route.key == AudioRoute.UNKNOWN.key) return@collect
+                routeCompensationMs = route.compensationMs
+                // Live: the compensation has to follow a speaker that connects mid-track, not wait
+                // for the next session. Safe because it moves the beat callback only -- the audio
+                // trim is pre-buffered as silence at stream start and cannot move without a gap.
+                airPlayReceiver?.setBeatDelayMs(routeCompensationMs)
+                Logger.i(
+                    "Audio route: ${route.label} — compensating ${routeCompensationMs}ms " +
+                        "(user audio delay is separate and unchanged)"
+                )
+                runCatching {
+                    settingsRepository.update {
+                        it.copy(
+                            currentAudioRoute = route.label,
+                            currentRouteCompensationMs = routeCompensationMs,
+                        )
+                    }
                 }
-        }
-    }
-
-    /** The route the live trim currently belongs to. Null until the first detection. */
-    private var trimRoute: AudioRoute? = null
-
-    /**
-     * Writes the user's hand-tuned values back against the output they were tuned on.
-     *
-     * Each write re-emits the settings flow and re-enters here, where the profile now matches and
-     * nothing is written. One extra pass, then it settles.
-     */
-    private suspend fun rememberTrimFor(route: AudioRoute, settings: AppSettings) {
-        val live = AvTrim(settings.audioDelayMs, settings.beatDelayMs)
-        if (settings.avTrimProfiles[route.key] == live) return
-        Logger.i("Audio route: remembering audio=${live.audioMs}ms beat=${live.beatMs}ms for ${route.label}")
-        settingsRepository.update { it.copy(avTrimProfiles = it.avTrimProfiles + (route.key to live)) }
-    }
-
-    private suspend fun applyTrimFor(route: AudioRoute, settings: AppSettings) {
-        val saved = settings.avTrimProfiles[route.key]
-        val trim = saved ?: seedFor(route, settings)
-        if (saved == null) {
-            Logger.i(
-                "Audio route: first time on ${route.label} - seeding trim " +
-                    "audio=${trim.audioMs}ms beat=${trim.beatMs}ms"
-            )
-        }
-        val alreadyLive = settings.audioDelayMs == trim.audioMs && settings.beatDelayMs == trim.beatMs
-
-        // Written unconditionally, unlike the trim itself: the label is what Settings uses to name
-        // the output a delay belongs to, and it has to be right even when the numbers did not move.
-        settingsRepository.update {
-            it.copy(
-                audioDelayMs = trim.audioMs,
-                beatDelayMs = trim.beatMs,
-                avTrimProfiles = it.avTrimProfiles + (route.key to trim),
-                currentAudioRoute = route.label,
-            )
-        }
-        if (alreadyLive) return
-
-        // The beat trim can move under a running stream; the audio trim cannot. extraDelayMs is
-        // pre-buffered as silence when the stream starts, so changing it mid-session would put a
-        // gap in the music -- worse than being briefly out of sync -- and restarting the receivers
-        // to apply it would drop the session outright, which is worse still. It lands on the next
-        // connect instead, and that is said out loud rather than left to look like a bug.
-        airPlayReceiver?.setBeatDelayMs(trim.beatMs)
-        if (_airPlayState.value == ProtocolState.CONNECTED && settings.audioDelayMs != trim.audioMs) {
-            Logger.i(
-                "Audio route: audio trim for ${route.label} is ${trim.audioMs}ms - applies from " +
-                    "the next connect; this stream keeps ${settings.audioDelayMs}ms"
-            )
+                    .onFailure { Logger.w("Audio route: could not record the output name - ${it.message}") }
+            }
         }
     }
 
     /**
-     * The starting point for an output that has never been tuned.
+     * Milliseconds of visual delay owed to the current output. Not a setting, never persisted.
      *
-     * The first route seen on a device that has never used this feature inherits whatever the user
-     * had already dialled in by hand, so upgrading changes nothing audible. After that a new output
-     * starts from zero -- except Bluetooth, where zero is not a neutral default but a confident
-     * claim of no delay. See [AvTrim.BLUETOOTH_SEED_BEAT_MS].
+     * Held here so a receiver built after the route was detected starts with the right value rather
+     * than at zero until the next route change — which, for a speaker that was already connected
+     * when the app launched, would be never.
      */
-    private fun seedFor(route: AudioRoute, settings: AppSettings): AvTrim = when {
-        settings.avTrimProfiles.isEmpty() -> AvTrim(settings.audioDelayMs, settings.beatDelayMs)
-        route.isBluetooth -> AvTrim(audioMs = 0, beatMs = AvTrim.BLUETOOTH_SEED_BEAT_MS)
-        else -> AvTrim()
-    }
+    @Volatile private var routeCompensationMs: Int = 0
 
     // ─── Service Control ─────────────────────────────────────────────────────
 
@@ -1078,7 +1025,7 @@ class PhairPlayService : Service() {
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
             audioBufferMs = settings.audioBufferMs,
-            beatDelayMs = settings.beatDelayMs,
+            beatDelayMs = routeCompensationMs,
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state

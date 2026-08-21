@@ -69,7 +69,10 @@ class AirPlayReceiver(
     private val audioDelayMs: Int = 0,
     /** AudioTrack hardware buffer in ms (AppSettings.audioBufferMs). */
     private val audioBufferMs: Int = com.phairplay.settings.AppSettings.DEFAULT_AUDIO_BUFFER_MS,
-    /** Extra delay for the beat animation only (AppSettings.beatDelayMs). */
+    /**
+     * Visual-only delay owed to the current output — see AudioRoute.BLUETOOTH_COMPENSATION_MS.
+     * Not a user setting; derived from where the audio is going.
+     */
     private val beatDelayMs: Int = 0,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: () -> Surface?,

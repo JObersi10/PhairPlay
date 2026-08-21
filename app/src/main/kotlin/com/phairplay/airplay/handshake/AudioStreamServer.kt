@@ -63,7 +63,7 @@ class AudioStreamServer(
      * [targetDepthFrames].
      */
     private val trackBufferMs: Int = TARGET_BUFFER_MS,
-    /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
+    /** Delay applied to the beat callback only — see AudioRoute.BLUETOOTH_COMPENSATION_MS. */
     beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},

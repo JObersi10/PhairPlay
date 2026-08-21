@@ -74,10 +74,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
     private lateinit var rowPip: View
-    private lateinit var rowBeatDelay: LinearLayout
-    private lateinit var textBeatDelaySubtitle: TextView
     private lateinit var textAudioDelaySubtitle: TextView
-    private lateinit var textBeatDelayValue: TextView
     private lateinit var rowBeatPulse: LinearLayout
     private lateinit var textBeatPulseValue: TextView
     private lateinit var rowAudioDelay: LinearLayout
@@ -152,10 +149,7 @@ class SettingsFragment : Fragment() {
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
         rowPip              = view.findViewById(R.id.row_pip)
-        rowBeatDelay        = view.findViewById(R.id.row_beat_delay)
-        textBeatDelaySubtitle  = view.findViewById(R.id.text_beat_delay_subtitle)
         textAudioDelaySubtitle = view.findViewById(R.id.text_audio_delay_subtitle)
-        textBeatDelayValue  = view.findViewById(R.id.text_beat_delay_value)
         rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
         textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
@@ -301,10 +295,9 @@ class SettingsFragment : Fragment() {
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
-        showTrimOutput(settings.currentAudioRoute)
+        showTrimOutput(settings.currentAudioRoute, settings.currentRouteCompensationMs)
         showAudioBuffer(settings.audioBufferMs)
         showBeatPulse(settings.beatPulse)
-        showBeatDelay(settings.beatDelayMs)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
@@ -393,7 +386,6 @@ class SettingsFragment : Fragment() {
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowAudioBuffer.setOnClickListener { pickAudioBuffer() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
-        rowBeatDelay.setOnClickListener { pickBeatDelay() }
         // Restart, not a plain save: the resolution is baked into the /info response and the mirror
         // video server at receiver startup, so a plain save left the toggle looking broken — it
         // flipped in the UI and nothing changed until the service happened to restart later.
@@ -547,46 +539,19 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Names the output both delays are currently saved against.
+     * Says out loud that a Bluetooth speaker is already being compensated for.
      *
-     * The two dials look global and are not: each output keeps its own pair, swapped automatically
-     * when the speaker changes. Without saying so, a user who tunes for a Bluetooth speaker and then
-     * turns it off sees their setting apparently revert on its own.
+     * The compensation is not a setting and the row above still reads whatever the user chose, so
+     * without this line the only evidence of it is that things happen to be in sync. Stating it is
+     * also what stops someone dialling in another 350ms by hand on top of it.
      */
-    private fun showTrimOutput(routeLabel: String) {
-        if (routeLabel.isBlank()) return   // before the first detection there is nothing truthful to say
-        textAudioDelaySubtitle.text = getString(
-            R.string.setting_delay_for_output, getString(R.string.setting_audio_delay_subtitle), routeLabel)
-        textBeatDelaySubtitle.text = getString(
-            R.string.setting_delay_for_output, getString(R.string.setting_beat_delay_subtitle), routeLabel)
-    }
-
-    private fun showBeatDelay(ms: Int) {
-        textBeatDelayValue.text = if (ms == 0) getString(R.string.setting_audio_delay_none) else "+$ms ms"
-    }
-
-    /**
-     * Shifts the beat animation later without touching audio timing.
-     *
-     * A Bluetooth speaker's own output latency is invisible to AudioTrack's timestamp, so the beat
-     * fires when the PCM leaves the device rather than when the user hears it. Correcting that with
-     * the audio delay would push the audio itself out of sync with the sender, so it gets its own dial.
-     */
-    private fun pickBeatDelay() {
-        val labels = BEAT_DELAY_CHOICES.map {
-            if (it == 0) getString(R.string.setting_audio_delay_none) else "+$it ms"
-        }.toTypedArray()
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.setting_beat_delay)
-            .setItems(labels) { _, which ->
-                val ms = BEAT_DELAY_CHOICES[which]
-                save { it.copy(beatDelayMs = ms) }
-                showBeatDelay(ms)
-                Logger.i("Beat delay set to $ms ms — restarting receivers to apply")
-                ServiceController.restart(requireContext())
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+    private fun showTrimOutput(routeLabel: String, compensationMs: Int) {
+        if (routeLabel.isBlank() || compensationMs <= 0) {
+            textAudioDelaySubtitle.setText(R.string.setting_audio_delay_subtitle)
+            return
+        }
+        textAudioDelaySubtitle.text =
+            getString(R.string.setting_audio_delay_bluetooth, routeLabel, compensationMs)
     }
 
     private fun backActionLabel(action: BackAction): String = getString(when (action) {
@@ -883,7 +848,6 @@ class SettingsFragment : Fragment() {
         private const val UPDATE_TIMEOUT_MS = 15_000
         // 350 is here because it is AvTrim.BLUETOOTH_SEED_BEAT_MS: a seeded value the picker cannot
         // display as selected is a value the user cannot get back after changing it.
-        val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 350, 400, 500, 750, 1000)
     }
 
     /**
