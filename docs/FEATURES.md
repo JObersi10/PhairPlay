@@ -65,8 +65,8 @@ Three backdrops, selectable in Settings:
   a black rectangle sixty times a second.
 
 Visuals are delayed by the measured output latency so they land with the sound, not ahead of it.
-Beat Pulse strength (Calm / Normal / Strong / Insane) and a manual beat delay are in Settings, and
-apply to both Dynamic and Projector. Intensity is applied to the drawing rather than to the level,
+Beat Pulse strength (Calm / Normal / Strong / Insane) is in Settings and applies to both Dynamic
+and Projector. Timing follows Audio delay and the route compensation; there is no separate dial. Intensity is applied to the drawing rather than to the level,
 so turning it up keeps adding movement instead of flattening everything against the top of the range.
 
 Palette comes from the artwork, with greyscale covers detected and kept grey rather than having a
@@ -112,7 +112,7 @@ No API key required.
 ## Settings
 
 PIN pairing (off / remember senders / every time) · which receivers run · device name ·
-screensaver timeout · backdrop (Dynamic / Projector / Black) · Beat Pulse · beat delay · volume mode ·
+screensaver timeout · backdrop (Dynamic / Projector / Black) · Beat Pulse · audio delay · volume mode ·
 Back behaviour (stop stream / go home / exit) · stream-end behaviour · start on boot ·
 Picture-in-picture · online cover art · playback quality
 
