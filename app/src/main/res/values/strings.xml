@@ -147,6 +147,9 @@
     <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>
     <string name="setting_beat_delay">Beat delay</string>
     <string name="setting_beat_delay_subtitle">Shift the beat animation later to match a Bluetooth speaker</string>
+    <!-- Both delay rows name the output they are saved against, so it is obvious the value follows
+         the speaker rather than the app. %1$s is the subtitle above, %2$s the output name. -->
+    <string name="setting_delay_for_output">%1$s \u2022 saved for %2$s</string>
     <string name="setting_pip">Picture-in-picture</string>
     <string name="setting_pip_subtitle">Shrink mirrored video into a corner when you leave the app</string>
     <string name="setting_back_action">Back button</string>

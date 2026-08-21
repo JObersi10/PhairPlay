@@ -95,6 +95,9 @@ the event never happened, not that the server is broken.
 - `NowPlayingScreen` — audio card: artwork crossfade, marquee text, MENU info
   panel, idle screensaver, debug HUD. Also used by DLNA playback
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
+- `AudioRouteMonitor` — which output is playing (HDMI / speakers / a named Bluetooth sink); the
+  service swaps the remembered A/V trim to match. Bluetooth link latency is **not** measurable —
+  `getTimestamp()` stops at the HAL — so a first-seen BT speaker is seeded at 350ms of visual delay
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
 `docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app

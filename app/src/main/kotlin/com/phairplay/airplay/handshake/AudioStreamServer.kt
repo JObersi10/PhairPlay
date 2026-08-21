@@ -64,7 +64,7 @@ class AudioStreamServer(
      */
     private val trackBufferMs: Int = TARGET_BUFFER_MS,
     /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
-    private val beatDelayMs: Long = 0,
+    beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
     /**
@@ -982,6 +982,27 @@ class AudioStreamServer(
      * Shared by [emitDelayed] and the band emission: both describe the same PCM, so they must be
      * delayed by the same amount or the orbs would react on a different beat from the pulse.
      */
+    /**
+     * Live, because the output can change under a running stream: connecting a Bluetooth speaker
+     * mid-track makes the sound genuinely later, and the visuals have to follow within the session
+     * rather than at the next connect. Safe to move at any moment — unlike [extraDelayMs], which is
+     * pre-buffered as silence at stream start and cannot change without a gap in the audio.
+     */
+    @Volatile private var beatDelayMs: Long = beatDelayMs
+
+    /** Applies a new visual trim to a running stream. See [com.phairplay.media.AudioRouteMonitor]. */
+    fun setBeatDelayMs(ms: Long) { beatDelayMs = ms.coerceAtLeast(0L) }
+
+    /**
+     * The output AudioTrack is genuinely writing to, or null before the track exists.
+     *
+     * Authoritative in a way that scanning connected devices is not: the Fire TV reports HDMI and
+     * its built-in speaker as permanently connected, so "which of these is playing" is otherwise an
+     * inference from Android's routing policy rather than an observation.
+     */
+    fun routedDevice(): android.media.AudioDeviceInfo? =
+        runCatching { audioTrack?.routedDevice }.getOrNull()
+
     private fun beatEmitDelayMs(): Long {
         // OUR queue only. AudioTrack's own holding is [outputLatencyMs] below and must not be
         // counted twice.

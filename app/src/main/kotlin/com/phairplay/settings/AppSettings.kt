@@ -211,6 +211,30 @@ data class AppSettings(
      */
     val beatDelayMs: Int = 0,
 
+    /**
+     * Remembered A/V trims, keyed by [AudioRoute.key], so a speaker keeps its own sync.
+     *
+     * [audioDelayMs] and [beatDelayMs] above stay the live values — everything that consumes a trim
+     * reads those and needs no idea that routes exist. This map is the memory behind them: when the
+     * output changes, the entry for the new route is written into those two fields, and when the
+     * user tunes them the new numbers are written back here against whatever is playing at the time.
+     *
+     * A route with no entry has never been tuned. Bluetooth is seeded on first sight; see
+     * [AvTrim.BLUETOOTH_SEED_BEAT_MS] for why that seed is not zero.
+     */
+    val avTrimProfiles: Map<String, AvTrim> = emptyMap(),
+
+    /**
+     * Human-readable name of the output the live trim currently belongs to, or blank before the
+     * first detection.
+     *
+     * Runtime state in a persisted store, which is a fair objection — but Settings has to be able to
+     * say *which speaker* the delay it is showing belongs to, and routing it through the settings
+     * flow means the rows update themselves when a speaker connects with the screen already open.
+     * A second AudioRouteMonitor inside the fragment would answer the same question twice.
+     */
+    val currentAudioRoute: String = "",
+
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
     val onboardingComplete: Boolean = false,

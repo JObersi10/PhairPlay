@@ -28,10 +28,13 @@ import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.airplay.DacpClient
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
+import com.phairplay.media.AudioRouteMonitor
 import com.phairplay.media.DeviceVolumeController
 import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
+import com.phairplay.settings.AudioRoute
+import com.phairplay.settings.AvTrim
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.diagnostic.DiagnosticServer
 import com.phairplay.diagnostic.LogBuffer
@@ -44,6 +47,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -207,6 +211,7 @@ class PhairPlayService : Service() {
 
     // Receiver instances — null when not running
     private var airPlayReceiver: AirPlayReceiver? = null
+    private var audioRouteMonitor: AudioRouteMonitor? = null
     private var miracastReceiver: MiracastReceiver? = null
     private var dlnaServer: DlnaServer? = null
 
@@ -248,6 +253,7 @@ class PhairPlayService : Service() {
         // showing whatever it last selected.
         PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
         DiagnosticServer.start(serviceScope)
+        startAudioRouteWatcher()
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
         // "created" then "destroying" 200ms later, with no "Starting receivers" between them. That
@@ -659,11 +665,121 @@ class PhairPlayService : Service() {
         Logger.i("PhairPlayService destroying")
         unregisterNetworkWatcher()
         unregisterDisplayWatcher()
+        audioRouteMonitor?.stop()
+        audioRouteMonitor = null
         PhairPlayAccessibilityService.onForegroundApp = null
         stopAllReceiversInternal()
         DiagnosticServer.stop()
         serviceJob.cancel()
         super.onDestroy()
+    }
+
+    // ─── Audio route ─────────────────────────────────────────────────────────
+
+    /**
+     * Keeps the A/V-sync trim attached to the speaker rather than to the app.
+     *
+     * The problem this solves: a Bluetooth speaker is genuinely late. The encoder, the radio link
+     * and the speaker's own jitter buffer add somewhere around 150-250ms that Android reports
+     * nowhere -- `AudioTrack.getTimestamp()`, which `AudioStreamServer.outputLatencyMs()` already
+     * consults, stops at the HAL -- so the beat pulse and the lyric timeline land early against
+     * what the room actually hears. There is no measurement to be had here. What there is, is a
+     * value the user can dial in by ear once; and the thing worth automating is not the number but
+     * *remembering* it. Switch to the TV's own speakers and the offset should vanish, switch back
+     * and it should return, without anyone opening Settings.
+     *
+     * [AppSettings.audioDelayMs] and [AppSettings.beatDelayMs] remain the live values every consumer
+     * reads. This only swaps what is in them when the output changes.
+     */
+    private fun startAudioRouteWatcher() {
+        val monitor = AudioRouteMonitor(applicationContext).also { audioRouteMonitor = it }
+        monitor.start()
+        serviceScope.launch {
+            // Both directions, from one collector. A route change pushes the saved trim into the
+            // live settings; a settings change with the route unchanged is the user tuning by ear,
+            // and gets written back to whatever is playing. Watching only the first direction looks
+            // right until you switch speakers and come back, and find the dial you just turned has
+            // been overwritten by the value it had before you touched it.
+            combine(monitor.route, settingsRepository.settingsFlow) { r, s -> r to s }
+                .collect { (route, settings) ->
+                    if (route.key == AudioRoute.UNKNOWN.key) return@collect
+                    runCatching {
+                        if (trimRoute?.key != route.key) {
+                            trimRoute = route
+                            applyTrimFor(route, settings)
+                        } else {
+                            rememberTrimFor(route, settings)
+                        }
+                    }.onFailure { Logger.w("Audio route: could not apply trim - ${it.message}") }
+                }
+        }
+    }
+
+    /** The route the live trim currently belongs to. Null until the first detection. */
+    private var trimRoute: AudioRoute? = null
+
+    /**
+     * Writes the user's hand-tuned values back against the output they were tuned on.
+     *
+     * Each write re-emits the settings flow and re-enters here, where the profile now matches and
+     * nothing is written. One extra pass, then it settles.
+     */
+    private suspend fun rememberTrimFor(route: AudioRoute, settings: AppSettings) {
+        val live = AvTrim(settings.audioDelayMs, settings.beatDelayMs)
+        if (settings.avTrimProfiles[route.key] == live) return
+        Logger.i("Audio route: remembering audio=${live.audioMs}ms beat=${live.beatMs}ms for ${route.label}")
+        settingsRepository.update { it.copy(avTrimProfiles = it.avTrimProfiles + (route.key to live)) }
+    }
+
+    private suspend fun applyTrimFor(route: AudioRoute, settings: AppSettings) {
+        val saved = settings.avTrimProfiles[route.key]
+        val trim = saved ?: seedFor(route, settings)
+        if (saved == null) {
+            Logger.i(
+                "Audio route: first time on ${route.label} - seeding trim " +
+                    "audio=${trim.audioMs}ms beat=${trim.beatMs}ms"
+            )
+        }
+        val alreadyLive = settings.audioDelayMs == trim.audioMs && settings.beatDelayMs == trim.beatMs
+
+        // Written unconditionally, unlike the trim itself: the label is what Settings uses to name
+        // the output a delay belongs to, and it has to be right even when the numbers did not move.
+        settingsRepository.update {
+            it.copy(
+                audioDelayMs = trim.audioMs,
+                beatDelayMs = trim.beatMs,
+                avTrimProfiles = it.avTrimProfiles + (route.key to trim),
+                currentAudioRoute = route.label,
+            )
+        }
+        if (alreadyLive) return
+
+        // The beat trim can move under a running stream; the audio trim cannot. extraDelayMs is
+        // pre-buffered as silence when the stream starts, so changing it mid-session would put a
+        // gap in the music -- worse than being briefly out of sync -- and restarting the receivers
+        // to apply it would drop the session outright, which is worse still. It lands on the next
+        // connect instead, and that is said out loud rather than left to look like a bug.
+        airPlayReceiver?.setBeatDelayMs(trim.beatMs)
+        if (_airPlayState.value == ProtocolState.CONNECTED && settings.audioDelayMs != trim.audioMs) {
+            Logger.i(
+                "Audio route: audio trim for ${route.label} is ${trim.audioMs}ms - applies from " +
+                    "the next connect; this stream keeps ${settings.audioDelayMs}ms"
+            )
+        }
+    }
+
+    /**
+     * The starting point for an output that has never been tuned.
+     *
+     * The first route seen on a device that has never used this feature inherits whatever the user
+     * had already dialled in by hand, so upgrading changes nothing audible. After that a new output
+     * starts from zero -- except Bluetooth, where zero is not a neutral default but a confident
+     * claim of no delay. See [AvTrim.BLUETOOTH_SEED_BEAT_MS].
+     */
+    private fun seedFor(route: AudioRoute, settings: AppSettings): AvTrim = when {
+        settings.avTrimProfiles.isEmpty() -> AvTrim(settings.audioDelayMs, settings.beatDelayMs)
+        route.isBluetooth -> AvTrim(audioMs = 0, beatMs = AvTrim.BLUETOOTH_SEED_BEAT_MS)
+        else -> AvTrim()
     }
 
     // ─── Service Control ─────────────────────────────────────────────────────
@@ -970,6 +1086,12 @@ class PhairPlayService : Service() {
                 // PLAY/PAUSE to the active MediaSession rather than to the focused Activity, which
                 // is why the Activity's key handler never saw one.
                 updateMediaButtons(state == ProtocolState.CONNECTED)
+                // Only while a stream is up is there an AudioTrack to ask, and its answer beats
+                // the connected-device guess: this Fire TV reports HDMI and its built-in speaker as
+                // permanently present, so which of them is playing is otherwise an inference.
+                audioRouteMonitor?.setRoutedDevice(
+                    if (state == ProtocolState.CONNECTED) airPlayReceiver?.routedAudioDevice() else null
+                )
                 when (state) {
                     ProtocolState.CONNECTED   -> {
                         // See endOtherSession: AirPlay and DLNA share one audio output.

@@ -152,6 +152,18 @@ class AirPlayReceiver(
     @Volatile private var audioServer: AudioStreamServer? = null
 
     /**
+     * Retargets the beat visuals without touching the audio, for when the output changes mid-stream.
+     *
+     * No-op when nothing is playing: the next server is built with the current value anyway.
+     */
+    fun setBeatDelayMs(ms: Int) {
+        audioServer?.setBeatDelayMs(ms.toLong())
+    }
+
+    /** The device the audio is actually being written to, or null when nothing is playing. */
+    fun routedAudioDevice(): android.media.AudioDeviceInfo? = audioServer?.routedDevice()
+
+    /**
      * The last gain the sender asked for, kept across audio servers.
      *
      * Senders set volume on connect and between tracks, both of which happen while no server

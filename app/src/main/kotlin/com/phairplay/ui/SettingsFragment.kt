@@ -75,6 +75,8 @@ class SettingsFragment : Fragment() {
     private lateinit var textBackActionValue: TextView
     private lateinit var rowPip: View
     private lateinit var rowBeatDelay: LinearLayout
+    private lateinit var textBeatDelaySubtitle: TextView
+    private lateinit var textAudioDelaySubtitle: TextView
     private lateinit var textBeatDelayValue: TextView
     private lateinit var rowBeatPulse: LinearLayout
     private lateinit var textBeatPulseValue: TextView
@@ -151,6 +153,8 @@ class SettingsFragment : Fragment() {
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
         rowPip              = view.findViewById(R.id.row_pip)
         rowBeatDelay        = view.findViewById(R.id.row_beat_delay)
+        textBeatDelaySubtitle  = view.findViewById(R.id.text_beat_delay_subtitle)
+        textAudioDelaySubtitle = view.findViewById(R.id.text_audio_delay_subtitle)
         textBeatDelayValue  = view.findViewById(R.id.text_beat_delay_value)
         rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
         textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
@@ -297,6 +301,7 @@ class SettingsFragment : Fragment() {
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
+        showTrimOutput(settings.currentAudioRoute)
         showAudioBuffer(settings.audioBufferMs)
         showBeatPulse(settings.beatPulse)
         showBeatDelay(settings.beatDelayMs)
@@ -539,6 +544,21 @@ class SettingsFragment : Fragment() {
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
+    }
+
+    /**
+     * Names the output both delays are currently saved against.
+     *
+     * The two dials look global and are not: each output keeps its own pair, swapped automatically
+     * when the speaker changes. Without saying so, a user who tunes for a Bluetooth speaker and then
+     * turns it off sees their setting apparently revert on its own.
+     */
+    private fun showTrimOutput(routeLabel: String) {
+        if (routeLabel.isBlank()) return   // before the first detection there is nothing truthful to say
+        textAudioDelaySubtitle.text = getString(
+            R.string.setting_delay_for_output, getString(R.string.setting_audio_delay_subtitle), routeLabel)
+        textBeatDelaySubtitle.text = getString(
+            R.string.setting_delay_for_output, getString(R.string.setting_beat_delay_subtitle), routeLabel)
     }
 
     private fun showBeatDelay(ms: Int) {
@@ -861,7 +881,9 @@ class SettingsFragment : Fragment() {
 
         /** Connect and read timeout for the update download. */
         private const val UPDATE_TIMEOUT_MS = 15_000
-        val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 400, 500, 750, 1000)
+        // 350 is here because it is AvTrim.BLUETOOTH_SEED_BEAT_MS: a seeded value the picker cannot
+        // display as selected is a value the user cannot get back after changing it.
+        val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 350, 400, 500, 750, 1000)
     }
 
     /**

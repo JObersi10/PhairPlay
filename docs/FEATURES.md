@@ -74,6 +74,29 @@ hue invented for them. When a cover does not contain three separable colours, th
 filled with lighter and darker shades of the accents it *does* have — never with a rotated hue,
 which is how an all-orange sleeve used to end up with blue and green orbs.
 
+## A/V sync per output
+
+Two trims, both in Settings, both remembered **per speaker** rather than globally:
+
+- **Audio delay** holds the audio back to meet the sender's timeline.
+- **Beat delay** holds the *visuals* back to meet audio that has already left the building.
+
+`AudioRouteMonitor` watches which output is actually playing — HDMI, the TV's speakers, a wired
+headset, or one specific Bluetooth sink — and swaps both values when it changes. Tune once for a
+Bluetooth speaker; turn it off and the offset vanishes, turn it back on and it returns, with nobody
+opening Settings. The rows name the output they are saved against so this is visible rather than
+spooky.
+
+A Bluetooth output that has never been tuned starts at **350ms of visual delay**, measured by ear on
+this hardware. That is a seed, not a measurement: Android exposes no API for a Bluetooth link's
+latency, and the one figure that exists — `AudioTrack.getTimestamp()`, which
+`AudioStreamServer.outputLatencyMs()` already consults — stops at the HAL, before the encoder, the
+radio link and the speaker's own jitter buffer, which are the majority of the delay.
+
+The beat trim applies to a stream already playing. The audio trim does not: it is pre-buffered as
+silence at stream start, so moving it mid-session would put a gap in the music. It lands on the next
+connect, and the log says so.
+
 ## Cover art
 
 AirPlay senders supply artwork. DLNA control points often do not, so:
