@@ -347,6 +347,9 @@ class AirPlayReceiver(
 
     private val mirrorKeys = arrayOfNulls<MirrorKeys>(MAX_SLOTS)
 
+    /** Decoder throughput each tile has reserved, in pixels per second. See [startMirrorStream]. */
+    private val mirrorCosts = LongArray(MAX_SLOTS)
+
     // ─── Now-playing (audio-only) state ──────────────────────────────────────
     // The now-playing card shows only when audio plays WITHOUT video. We track both stream kinds
     // plus the latest DMAP metadata/artwork and recompute on every change (see [emitNowPlaying]).
@@ -1034,6 +1037,28 @@ class AirPlayReceiver(
             Logger.i("Tile $slot renegotiated — cancelling its pending stop")
         }
         if (slot in pendingVideoStops.indices) pendingVideoStops[slot] = null
+        // ADMIT BY THROUGHPUT, WITH THE REAL RESOLUTION IN HAND.
+        //
+        // The session capacity is a coarse gate applied when the control socket opens, before
+        // anyone knows what will be streamed. Here we know: charge this sender for the size it
+        // negotiated and refuse it if the decoder cannot carry the total. A 1440p Mac costs 1.78x
+        // what a 1080p phone does, so "how many fit" genuinely has no fixed answer — which is why
+        // counting streams admitted a third sender that then sat on a frozen frame.
+        //
+        // Refusing returns port 0. The sender loses video and its session survives, which is the
+        // honest outcome: better a device that plainly did not start than one that appears to be
+        // mirroring and is not.
+        val cost = com.phairplay.media.DecoderCapacity.costOf(mirrorWidth, mirrorHeight)
+        val committed = mirrorCosts.filterIndexed { i, _ -> i != slot }.sum()
+        val budget = com.phairplay.media.DecoderCapacity.pixelBudgetPerSecond()
+        if (committed + cost > budget) {
+            Logger.w("Tile $slot refused: ${mirrorWidth}x$mirrorHeight needs " +
+                     "${cost / 1_000_000}M px/s, only ${(budget - committed) / 1_000_000}M left " +
+                     "of ${budget / 1_000_000}M")
+            return 0
+        }
+        mirrorCosts[slot] = cost
+
         val keys = mirrorKeys.getOrNull(slot)
             ?: run { Logger.e("mirror stream start before keys set (tile $slot)"); return 0 }
         val aesKey = keys.aes
@@ -1214,6 +1239,7 @@ class AirPlayReceiver(
         if (!videoPlaying && mirrorServers[slot] == null) return
         mirrorServers[slot]?.stop()
         mirrorServers[slot] = null
+        mirrorCosts[slot] = 0L      // give the throughput back so the next sender can have it
         publishMirrorSlots()
         // Video is only "over" once the LAST tile has gone. Clearing this on the first teardown
         // would drop the overlay while another sender was still mirroring into it.
@@ -1294,7 +1320,7 @@ class AirPlayReceiver(
         // Deliberately NOT closing audioSocket here. It belongs to the receiver, not the session --
         // closing it between sessions reopens the very race that made Music unusable. The player it
         // feeds is still released below, so packets arriving between sessions are simply dropped.
-        mirrorServers.indices.forEach { mirrorServers[it]?.stop(); mirrorServers[it] = null }
+        mirrorServers.indices.forEach { mirrorServers[it]?.stop(); mirrorServers[it] = null; mirrorCosts[it] = 0L }
         publishMirrorSlots()
         positionTicker?.cancel(); positionTicker = null
         anchorStartTs = -1L

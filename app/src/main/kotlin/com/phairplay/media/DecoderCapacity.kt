@@ -131,6 +131,40 @@ object DecoderCapacity {
         return (fps / REFERENCE_FPS).toInt().coerceAtLeast(UNKNOWN)
     }
 
+    /**
+     * The decoder's total throughput, in pixels per second.
+     *
+     * A COUNT OF STREAMS IS THE WRONG UNIT and this is the right one. "How many mirrors fit" has no
+     * fixed answer, because it depends entirely on what they are streaming: a 1440p Mac is 1.78x the
+     * pixels of a 1080p phone, so two of those do not cost the same as two of these. Budgeting in
+     * pixels lets each sender be charged for what it actually negotiated, which is the difference
+     * between admitting a sender that works and admitting one that freezes.
+     *
+     * Derived from the hardware decoder's own advertised frame rate at 1080p — on this Fire TV,
+     * 120fps, i.e. 1920 x 1080 x 120 pixels per second. Nothing here is a constant anyone typed.
+     */
+    fun pixelBudgetPerSecond(): Long {
+        budget?.let { return it }
+        val fps = runCatching { advertisedFrameRate(REFERENCE_WIDTH, REFERENCE_HEIGHT) }.getOrNull()
+        val measured = if (fps == null || fps <= 0.0) {
+            // No usable answer: budget exactly one reference stream, which is what the receiver
+            // did before any of this existed.
+            REFERENCE_WIDTH.toLong() * REFERENCE_HEIGHT * REFERENCE_FPS.toLong()
+        } else {
+            (REFERENCE_WIDTH.toLong() * REFERENCE_HEIGHT * fps).toLong()
+        }
+        budget = measured
+        Logger.i("Decoder throughput: ${measured / 1_000_000}M pixels/sec " +
+                 "(${REFERENCE_WIDTH}x$REFERENCE_HEIGHT @ ${fps ?: REFERENCE_FPS}fps)")
+        return measured
+    }
+
+    @Volatile private var budget: Long? = null
+
+    /** What one mirror of this size costs per second, assumed at the reference frame rate. */
+    fun costOf(width: Int, height: Int): Long =
+        width.coerceAtLeast(1).toLong() * height.coerceAtLeast(1) * REFERENCE_FPS.toLong()
+
     /** The hardware decoder's advertised frame rate for one stream of the given size. */
     private fun advertisedFrameRate(width: Int, height: Int): Double? {
         for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
