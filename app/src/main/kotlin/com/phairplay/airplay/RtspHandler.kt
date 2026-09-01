@@ -117,7 +117,9 @@ open class RtspHandler(
     @Volatile private var pinPaired = false
 
     /** Last volume the sender set (AirPlay dB); returned to GET_PARAMETER volume queries. */
-    @Volatile private var currentVolume: Float = 0f
+    private var currentVolume: Float
+        get() = client.currentVolume
+        set(v) { client.currentVolume = v }
 
     private var serverSocket: ServerSocket? = null
 
@@ -130,10 +132,72 @@ open class RtspHandler(
      */
     private val sessions = SessionRegistry(capacity = 1)
 
+    // ─── Per-connection state ────────────────────────────────────────────────
+    /**
+     * Everything that belongs to ONE sender's control connection.
+     *
+     * These used to be plain fields on the handler, shared by every connection — which is why the
+     * receiver could only ever serve one sender. `handleClient` reset `pairingSession` and
+     * `fairPlay` on entry, so a second sender arriving mid-handshake wiped the first one's keys and
+     * *both* sessions then failed, the first with a decryption error pointing nowhere near the
+     * cause. Nothing about that was recoverable by raising the session capacity; the state had to
+     * stop being shared first.
+     *
+     * Deliberately NOT in here: [group] (SETPEERS/SETRATEANCHORTIME arrive around SETUP and a
+     * per-connection object would be rebuilt underneath them), and `legacyPin` / `pinPaired`
+     * (macOS runs the PIN handshake across SEPARATE TCP connections, so those must outlive any one
+     * of them). Both are documented at their declarations.
+     */
+    private class ClientState {
+        var currentCSeq: Int = 0
+        var currentVolume: Float = 0f
+        var currentSession: SessionDescription? = null
+        var pairingSession: PairingSession? = null
+        var fairPlay: FairPlay? = null
+        var currentRemoteAddress: java.net.InetAddress? = null
+        var currentLocalAddress: java.net.InetAddress? = null
+        var isMirrorSession = false
+        val activeStreamTypes = mutableSetOf<Int>()
+        var setupCount = 0
+        var pendingDeviceName: String? = null
+        var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
+        var lastLoggedNpTitle: String? = null
+        var lastLoggedNpArtist: String? = null
+        var connectStartMs = 0L
+    }
+
+    /**
+     * The state of whichever connection the calling thread is serving.
+     *
+     * Thread-scoped rather than passed as a parameter, and that is a deliberate trade. Threading a
+     * `ClientState` argument through `routeRequest` and every handler below it would be the more
+     * explicit design; it would also be a sixty-odd call-site change to code that currently works,
+     * made without the ability to test two senders against it. Binding it to the thread keeps the
+     * diff to the declarations and leaves every call site — and therefore every existing behaviour
+     * — untouched.
+     *
+     * **This is only correct because `handleClient` is a plain blocking function.** It is launched
+     * once per connection with `scope.launch(Dispatchers.IO) { handleClient(socket) }` and contains
+     * no suspension points, so it occupies exactly one thread from first byte to last. If it ever
+     * becomes a `suspend fun`, or gains a `withContext`, the coroutine may resume on a different
+     * thread and each half will silently see a different (empty) state. Keep it blocking, or move
+     * to explicit parameter passing.
+     *
+     * The IO dispatcher reuses threads, so [handleClient] must `remove()` this on the way out or
+     * the next connection to land on that thread inherits the last one's half-finished handshake.
+     * That removal is also what replaces the old "reset pairingSession and fairPlay on entry": a
+     * fresh connection now gets a fresh object structurally instead of by remembering to clear it.
+     */
+    private val clientState = ThreadLocal.withInitial { ClientState() }
+    private val client: ClientState get() = clientState.get()
+
+
     @Volatile
     private var running = false
 
-    private var currentCSeq: Int = 0
+    private var currentCSeq: Int
+        get() = client.currentCSeq
+        set(v) { client.currentCSeq = v }
 
     /**
      * Group membership and the shared playback anchor, from SETPEERS / SETRATEANCHORTIME.
@@ -143,40 +207,57 @@ open class RtspHandler(
      */
     val group = com.phairplay.airplay.handshake.MultiRoomGroup()
 
-    @Volatile
-    private var currentSession: SessionDescription? = null
+    private var currentSession: SessionDescription?
+        get() = client.currentSession
+        set(v) { client.currentSession = v }
 
     /** Per-connection AirPlay pairing state (pair-setup / pair-verify). */
-    @Volatile
-    private var pairingSession: PairingSession? = null
+    private var pairingSession: PairingSession?
+        get() = client.pairingSession
+        set(v) { client.pairingSession = v }
 
     /** Per-connection FairPlay state (fp-setup handshake + stream-key decrypt). */
-    @Volatile
-    private var fairPlay: FairPlay? = null
+    private var fairPlay: FairPlay?
+        get() = client.fairPlay
+        set(v) { client.fairPlay = v }
 
     /** Remote (sender) address of the active control connection — needed for AirPlay 2 NTP. */
-    @Volatile
-    private var currentRemoteAddress: java.net.InetAddress? = null
+    private var currentRemoteAddress: java.net.InetAddress?
+        get() = client.currentRemoteAddress
+        set(v) { client.currentRemoteAddress = v }
 
     /** Our own address on the socket the sender is talking to — goes into the Apple-Response blob. */
-    private var currentLocalAddress: java.net.InetAddress? = null
+    private var currentLocalAddress: java.net.InetAddress?
+        get() = client.currentLocalAddress
+        set(v) { client.currentLocalAddress = v }
 
     /** True once an AirPlay 2 mirroring SETUP has run on this connection (no ANNOUNCE/SDP). */
-    @Volatile
-    private var isMirrorSession = false
+    private var isMirrorSession: Boolean
+        get() = client.isMirrorSession
+        set(v) { client.isMirrorSession = v }
 
     /** Consumes the RTCP Sender Reports arriving on the interleaved control channel. */
     private val senderReports = SenderReportTracker()
 
     /** Mirror stream types currently active (96 = audio, 110 = video). Drives TEARDOWN routing.
      *  `protected` so tests can seed it without driving the full FairPlay SETUP handshake. */
-    protected val activeStreamTypes = mutableSetOf<Int>()
+    protected val activeStreamTypes: MutableSet<Int> get() = client.activeStreamTypes
 
-    private var setupCount = 0
-    private var pendingDeviceName: String? = null
-    private var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
-    private var lastLoggedNpTitle: String? = null
-    private var lastLoggedNpArtist: String? = null
+    private var setupCount: Int
+        get() = client.setupCount
+        set(v) { client.setupCount = v }
+    private var pendingDeviceName: String?
+        get() = client.pendingDeviceName
+        set(v) { client.pendingDeviceName = v }
+    private var pendingDeviceType: SenderDeviceType
+        get() = client.pendingDeviceType
+        set(v) { client.pendingDeviceType = v }
+    private var lastLoggedNpTitle: String?
+        get() = client.lastLoggedNpTitle
+        set(v) { client.lastLoggedNpTitle = v }
+    private var lastLoggedNpArtist: String?
+        get() = client.lastLoggedNpArtist
+        set(v) { client.lastLoggedNpArtist = v }
 
     private val requestReader = RtspRequestReader(
         maxMessageBytes = MAX_MESSAGE_BYTES,
@@ -209,7 +290,9 @@ open class RtspHandler(
      * ends the session the way a sender expects, while the server keeps listening.
      */
     /** Milestone timing for connect diagnosis: how long each handshake leg takes. */
-    private var connectStartMs = 0L
+    private var connectStartMs: Long
+        get() = client.connectStartMs
+        set(v) { client.connectStartMs = v }
     private fun stamp(what: String) {
         if (connectStartMs == 0L) return
         Logger.i("Connect timing: $what +${System.currentTimeMillis() - connectStartMs}ms")
@@ -289,13 +372,17 @@ open class RtspHandler(
                     continue
                 }
 
-                connectStartMs = System.currentTimeMillis()
+                val acceptedAtMs = System.currentTimeMillis()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
                 // Only for a sender we are actually going to serve. Firing this for a rejected
                 // connection would put the video surface up for a session that never happens.
                 runCatching { onSenderApproaching() }
 
-                scope.launch(Dispatchers.IO) { handleClient(clientSocket) }
+                // The accept time is PASSED IN, not stored in a field. Connection state is scoped
+                // to the thread that serves the connection, and this is the accept loop's thread —
+                // writing connectStartMs here would stamp the accept loop's own state object and
+                // leave the client's at zero, silently disabling the connect timing log.
+                scope.launch(Dispatchers.IO) { handleClient(clientSocket, acceptedAtMs) }
             }
         } catch (e: Exception) {
             if (running) {
@@ -306,10 +393,14 @@ open class RtspHandler(
         }
     }
 
-    private fun handleClient(socket: Socket) {
+    private fun handleClient(socket: Socket, acceptedAtMs: Long = System.currentTimeMillis()) {
         val inputStream = socket.getInputStream()
         val outputStream = socket.getOutputStream()
 
+        // A fresh ClientState is created for this thread on first touch; clear anything a previous
+        // connection on this same pooled thread left behind before we do.
+        clientState.remove()
+        connectStartMs = acceptedAtMs
         // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
         fairPlay = FairPlay()
@@ -373,13 +464,11 @@ open class RtspHandler(
             // this block running; clearing unconditionally would hand that newcomer's slot away and
             // let a third connection in behind it.
             sessions.release(socket)
-            currentSession = null
-            pairingSession = null
-            fairPlay = null
-            isMirrorSession = false
-            activeStreamTypes.clear()
-            setupCount = 0
             onStreamingStopped()
+            // Hand the pooled thread back with nothing on it. The individual field clears that used
+            // to be here are now implied: the whole state object goes, so a field added later
+            // cannot be forgotten in this list.
+            clientState.remove()
         }
     }
 
