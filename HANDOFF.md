@@ -1,7 +1,7 @@
 # PhairPlay — Handoff
 
-Last updated: 2026-08-09.
-Branch `feature/receiver-controls-and-miracast`, last pushed commit `c3d0114` on the `jobersi`
+Last updated: 2026-09-01.
+Branch `feature/bluetooth-av-sync`, last pushed commit `e16b7cf` on the `jobersi`
 remote (github.com/JObersi10/PhairPlay). `origin` points at mazer666's copy — do not push there.
 
 The tree is clean; everything below is committed and pushed.
@@ -136,11 +136,26 @@ remote control and multi-room.
 
 ---
 
-## Deferred: Now Playing redesign (2026-08-31)
+## Deferred: Now Playing redesign (2026-08-31, still open)
 
 Home, Settings, onboarding and the waiting screen were redesigned. **Now Playing was deliberately
-left alone** — it is the largest UI file (`NowPlayingScreen.kt`, ~1,560 lines) and deserves its own
+left alone** — it is the largest UI file (`NowPlayingScreen.kt`, ~1,570 lines) and deserves its own
 pass rather than being bolted onto a diff that was already large.
+
+Since then only one thing has been touched there, on 2026-09-01: `letterSpacing` on the album,
+secondary-meta and pill-label lines. Everything below is still to do.
+
+**Leave the playback bar alone unless the change is provably safe.** The user has had it break on
+previous Now Playing edits, and asked explicitly. That means `ProgressView`, `positionTick`,
+`senderPositionMs`, `formatTime` and the two time labels. One optimisation was spotted and
+deliberately *not* taken: `positionTick` keeps running while the card is hidden but still attached
+(`onVisibilityChanged` removes `debugTick` and not `positionTick`). Stopping it while invisible would
+save a wake-up per second, but getting the restart wrong freezes the position display — exactly the
+class of breakage being avoided. Only do it with a sender connected to verify against.
+
+The screen is already well optimised, so do not go looking for easy wins: artwork is downsampled to
+the tile size before decode, the marquee is a single out-and-back pass rather than a loop, and the
+`TransitionDrawable` is swapped back out after the fade so two full bitmaps are not held.
 
 When picking it up, the plan agreed was:
 
@@ -153,8 +168,58 @@ When picking it up, the plan agreed was:
 - Animate track changes rather than hard-swapping text (`ProtocolCardAnimator` is the pattern).
 - Leave the position/progress logic alone — it is derived from the audio clock and is correct.
 
-## Not built: multi-screen mirroring
+## Multi-screen mirroring: measured, started, NOT usable yet (2026-09-01)
 
-Planned only, in `docs/MULTI_SCREEN.md`. **Gated on one measurement that has not been taken:** how
-many concurrent hardware H.264 decoders this Fire TV will actually grant. If the answer is one, the
-feature is dead. That probe is step 1 and is a single throwaway commit.
+`docs/MULTI_SCREEN.md` is the full plan. State:
+
+**Step 1 done — the hardware is not the blocker.** `OMX.MTK.VIDEO.DECODER.AVC` declares
+`concurrent-instances max="5"` and `performance-point-1920x1080` of 120, so two 1080p60 mirrors fit
+with headroom and a four-tile grid is within the device. `DecoderCapacity` reports it at runtime and
+it is in the `:8001` header as `decode:` (reads `5` on the Fire TV, verified on device).
+
+> Ask the **hardware** decoder specifically. The first version took the max across every AVC decoder
+> and reported **32**, because `c2.android.avc.decoder` is software and advertises 32 — nothing in it
+> is a fixed resource. Sizing a tile grid off that would promise mirrors the CPU cannot decode.
+
+**Step 2 done — `SessionRegistry` replaces `RtspHandler.activeClient`.** Capacity is 1, so behaviour
+is unchanged: one sender served, everyone else refused on the spot, never queued. `SessionRegistryTest`
+covers the refusal, the slot coming back, the stale-release race, and reclaiming a socket whose sender
+vanished without a teardown.
+
+**Step 3 is the whole remaining job, and it is the reason capacity is still 1.** `RtspHandler` keeps
+the entire handshake in fields shared by every connection — `currentSession`, `pairingSession`,
+`fairPlay`, `isMirrorSession`, `currentVolume`, `currentRemoteAddress`, `activeStreamTypes`,
+`setupCount`. `handleClient` resets `pairingSession` and `fairPlay` on entry, so a second sender
+connecting mid-handshake wipes the first one's keys and **both** sessions fail — the first with a
+decryption error that points nowhere near the cause. These have to move into a per-connection object
+that `handleClient` owns and `routeRequest` is handed: wide, mechanical, through a ~1,500-line class.
+
+Do not raise `SessionRegistry.capacity` before that lands. The registry will happily admit four
+senders today; nothing below it is ready for them.
+
+The awkward part: that refactor is verifiable for the single-sender case (every existing test) and
+**unverifiable for the case it exists to enable**, without two sending devices. Sequence it so
+single-sender behaviour is provably unchanged first, then raise capacity as its own commit that can
+be reverted on its own.
+
+Still unknown and not knowable from here: **whether iOS will agree to be the second sender.** A real
+Apple TV refuses two simultaneous mirrors, so this is outside what Apple tests against.
+[xfirefly/Airplay-SDK](https://github.com/xfirefly/Airplay-SDK) advertises it working, which is
+proof-of-possibility only — it is closed-source with no license statement, so no code from it can be
+read or used.
+
+## Landed 2026-09-01
+
+- Decoder ceiling measured; `DecoderCapacity` + the `decode:` line in the `:8001` header.
+- `SessionRegistry` (capacity 1) replacing the `activeClient` field, with tests.
+- **AVCC→Annex-B converts in place.** A 4-byte length and a 4-byte start code are the same width, so
+  a well-formed payload converts by overwriting eight bytes per NAL and returning the same array. The
+  old path built a `ByteArrayOutputStream` and then `toByteArray()`'d it — two full copies of a few
+  hundred KB, sixty times a second, to rewrite a header. `MirrorAnnexBTest` covers the malformed and
+  truncated tails, where it still falls back to one copy.
+- Now Playing: tracking on the three small text lines only (album, secondary meta, pill label). The
+  title already had negative tracking; small text never got its counterpart.
+
+**Unverified on device:** everything above compiles, passes the matrix, and installs, but no sender
+has connected since. The mirror path in particular (`avccToAnnexBInPlace` runs on every frame) has
+been tested only against synthetic buffers. Connect a real sender before trusting it.
