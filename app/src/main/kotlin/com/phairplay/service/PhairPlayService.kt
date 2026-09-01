@@ -324,6 +324,13 @@ class PhairPlayService : Service() {
      *
      * @param provider Lambda that returns the current [Surface], or null if unavailable.
      */
+    /** Where per-tile decoded sizes go, so each tile letterboxes to its own stream. */
+    @Volatile private var videoSizeSink: ((Int, Int, Int) -> Unit)? = null
+
+    fun setVideoSizeSink(sink: (slot: Int, width: Int, height: Int) -> Unit) {
+        videoSizeSink = sink
+    }
+
     fun setVideoSurfaceProvider(provider: (Int) -> Surface?) {
         videoSurfaceProvider = provider
     }
@@ -1075,6 +1082,7 @@ class PhairPlayService : Service() {
             // device can decode would hand a sender a session that negotiates cleanly and then
             // never shows a picture — strictly worse than the immediate refusal it replaces.
             onMirrorSlotsChanged = { slots -> _activeMirrorSlots.value = slots },
+            onMirrorSizeChanged = { slot, w, h -> videoSizeSink?.invoke(slot, w, h) },
             maxSessions = if (settings.multiScreen) {
                 minOf(DecoderCapacity.maxConcurrentMirrors(), AirPlayReceiver.MAX_SLOTS)
             } else {

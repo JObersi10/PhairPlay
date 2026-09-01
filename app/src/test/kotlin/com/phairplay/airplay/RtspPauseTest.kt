@@ -14,7 +14,7 @@ class RtspPauseTest {
 
     private fun makeHandler() = TestableRtspHandler(
         onStreamingStarted = {},
-        onStreamingStopped = {}
+        onStreamingStopped = { _, _ -> }
     )
 
     private fun pauseRequest() = RtspRequest(

@@ -48,6 +48,8 @@ class MirrorStreamServer(
      * Not called for a deliberate [stop], which is the receiver's own doing and already handled.
      */
     private val onConnectionEnded: () -> Unit = {},
+    /** Decoded size for THIS session, so its tile can letterbox to its own aspect. */
+    private val onOutputSize: (width: Int, height: Int) -> Unit = { _, _ -> },
 ) {
     /** [queuedAtMs] is when the payload arrived, which is what [videoDelayMs] is measured from. */
     private sealed class Item(val queuedAtMs: Long = System.currentTimeMillis())
@@ -342,7 +344,7 @@ class MirrorStreamServer(
         val pps = lastPps ?: return
         if (surface == null) return                            // backgrounded — wait for the surface to return
         val sc = MirrorCrypto.START_CODE
-        decoder = VideoDecoder(surface).also { it.initialize(sc + sps, sc + pps, width, height) }
+        decoder = VideoDecoder(surface, onOutputSize).also { it.initialize(sc + sps, sc + pps, width, height) }
         awaitingKeyframe = true                                // a fresh decoder must start at an IDR
         StreamStats.videoRes = "${width}x${height}"
         Logger.i("Mirror decoder (re)built for ${surfaceLabel(surface)} surface (sps=${sps.size}B pps=${pps.size}B)")

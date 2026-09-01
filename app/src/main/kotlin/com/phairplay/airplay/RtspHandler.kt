@@ -33,7 +33,11 @@ open class RtspHandler(
     private val audioEnabled: Boolean = false,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
-    private val onStreamingStopped: () -> Unit,
+    /**
+     * One sender's session ended. [slot] is its tile; [remainingSessions] is how many other senders
+     * are still connected, so the receiver can tell "this one left" from "everything is over".
+     */
+    private val onStreamingStopped: (slot: Int, remainingSessions: Int) -> Unit,
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
     private val onPhotoCleared: () -> Unit = {},
     /** MediaRemote commands the sender advertised as enabled (see `updateMRSupportedCommands`). */
@@ -54,7 +58,7 @@ open class RtspHandler(
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
     private val onMirrorStreamStart: (slot: Int, streamConnectionId: Long) -> Int = { _, _ -> 0 },
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
+    private val onMirrorAudioStart: (slot: Int, sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
@@ -485,8 +489,9 @@ open class RtspHandler(
             // coroutine, a newcomer can be accepted in the window between this socket erroring and
             // this block running; clearing unconditionally would hand that newcomer's slot away and
             // let a third connection in behind it.
+            val slot = client.slot
             sessions.release(socket)
-            onStreamingStopped()
+            onStreamingStopped(slot, sessions.size())
             // Hand the pooled thread back with nothing on it. The individual field clears that used
             // to be here are now implied: the whole state object goes, so a field added later
             // cannot be forgotten in this list.
@@ -1163,7 +1168,7 @@ open class RtspHandler(
                         // How far behind the sender's own timeline it expects us to play. Ignoring it
                         // made playback run ahead of the phone (audio led its on-screen lyrics).
                         val latencyMin = (stream["latencyMin"] as? Long)?.toInt() ?: DEFAULT_LATENCY_SAMPLES
-                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf, latencyMin)
+                        val (dataPort, controlPort) = onMirrorAudioStart(client.slot, sr, ch, ct, spf, latencyMin)
                         activeStreamTypes.add(96)
                         currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
@@ -1412,7 +1417,9 @@ open class RtspHandler(
             Logger.i("TEARDOWN (session, body=${request.bodyBytes.size}B) — streaming stopping")
         }
         activeStreamTypes.clear()
-        onStreamingStopped()
+        // A TEARDOWN ends THIS session. The socket is still open at this point, so this sender is
+        // still counted — subtract it to report what will actually be left.
+        onStreamingStopped(client.slot, (sessions.size() - 1).coerceAtLeast(0))
         return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
     }
 

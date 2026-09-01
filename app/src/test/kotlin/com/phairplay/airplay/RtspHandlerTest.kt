@@ -330,7 +330,7 @@ class RtspHandlerTest {
             streamingStarted = true
             lastSession = session
         },
-        onStreamingStopped = { streamingStopped = true }
+        onStreamingStopped = { _, _ -> streamingStopped = true }
         ,
         onPhotoReceived = { _, imageType ->
             photoReceived = true
@@ -388,7 +388,7 @@ class RtspHandlerTest {
  */
 class TestableRtspHandler(
     onStreamingStarted: (SessionDescription) -> Unit,
-    onStreamingStopped: () -> Unit,
+    onStreamingStopped: (Int, Int) -> Unit,
     onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
     onPhotoCleared: () -> Unit = {},
     onMirrorAudioStop: () -> Unit = {},

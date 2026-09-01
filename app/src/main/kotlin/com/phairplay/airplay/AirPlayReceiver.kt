@@ -81,6 +81,8 @@ class AirPlayReceiver(
     private val maxSessions: Int = 1,
     /** Fired whenever the set of tiles with a live mirror changes, so the UI can lay that many out. */
     private val onMirrorSlotsChanged: (Set<Int>) -> Unit = {},
+    /** Decoded size for a given tile, so it can letterbox to its own stream's aspect. */
+    private val onMirrorSizeChanged: (slot: Int, width: Int, height: Int) -> Unit = { _, _, _ -> },
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: (slot: Int) -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -217,6 +219,9 @@ class AirPlayReceiver(
     }
 
     @Volatile private var routeVideoDelayMs: Long = 0L
+
+    /** Which tile currently owns the speakers, or null when nothing does. See [startMirrorAudio]. */
+    @Volatile private var audioOwnerSlot: Int? = null
 
     /** The device the audio is actually being written to, or null when nothing is playing. */
     fun routedAudioDevice(): android.media.AudioDeviceInfo? = audioServer?.routedDevice()
@@ -547,7 +552,7 @@ class AirPlayReceiver(
             videoSurfaceProvider = { videoSurfaceProvider(PRIMARY_SLOT) },
             maxSessions = maxSessions,
             onStreamingStarted = { session -> onStreamingStarted(session) },
-            onStreamingStopped = { onStreamingStopped() },
+            onStreamingStopped = { slot, remaining -> onStreamingStopped(slot, remaining) },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
             onSupportedRemoteCommands = { supportedRemoteCommands = it },
@@ -555,7 +560,9 @@ class AirPlayReceiver(
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { slot, streamConnectionId -> startMirrorStream(slot, streamConnectionId) },
-            onMirrorAudioStart = { sampleRate, channels, ct, spf, latency -> startMirrorAudio(sampleRate, channels, ct, spf, latency) },
+            onMirrorAudioStart = { slot, sampleRate, channels, ct, spf, latency ->
+                startMirrorAudio(slot, sampleRate, channels, ct, spf, latency)
+            },
             onMirrorAudioStop = { stopMirrorAudio() },
             onMirrorVideoStop = { slot -> stopMirrorVideo(slot) },
             onBufferedAudioStart = { startBufferedAudio() },
@@ -668,7 +675,30 @@ class AirPlayReceiver(
      * Releases media components and re-advertises so the device reappears
      * in sender pickers immediately.
      */
-    private fun onStreamingStopped() {
+    /**
+     * One sender has gone. Tears the whole receiver down only when it was the LAST one.
+     *
+     * This used to release every media component unconditionally, and it runs whenever any control
+     * connection closes — so with two senders, disconnecting the Mac stopped the iPhone's mirror
+     * and its audio and withdrew mDNS. "I disconnected the Mac and it terminated everything." A
+     * session ending is not the receiver ending.
+     *
+     * The defaults mean the internal callers — endSession and the socket-close path — keep asking
+     * for the full teardown they always did.
+     */
+    private fun onStreamingStopped(slot: Int = PRIMARY_SLOT, remainingSessions: Int = 0) {
+        if (remainingSessions > 0) {
+            Logger.i("Tile $slot ended; $remainingSessions sender(s) still connected — keeping the rest")
+            stopMirrorVideo(slot)
+            if (audioOwnerSlot == slot) {
+                // Hand the speakers back so a surviving sender can claim them on its next SETUP.
+                audioServer?.stop()
+                audioServer = null
+                audioOwnerSlot = null
+                forgetVolume()
+            }
+            return
+        }
         if (streamingStopped) return
         streamingStopped = true
         Logger.i("Streaming stopped — releasing media components")
@@ -946,6 +976,7 @@ class AirPlayReceiver(
             // with its own fullscreen player) used to leave the session "live" with its last frame
             // frozen on the TV. Tear it down ourselves.
             onConnectionEnded = { scheduleMirrorVideoStop(slot) },
+            onOutputSize = { w, h -> runCatching { onMirrorSizeChanged(slot, w, h) } },
         )
             .also {
                 mirrorServers[slot] = it
@@ -960,7 +991,25 @@ class AirPlayReceiver(
     }
 
     /** Mirror SETUP audio stream (type 96): start the AAC-ELD / AAC-LC / ALAC audio server. @return (dataPort, controlPort). */
-    private fun startMirrorAudio(sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int): Pair<Int, Int> {
+    /**
+     * Starts the mirror audio stream — for ONE sender at a time.
+     *
+     * N video, one audio, deliberately. There is a single AudioTrack and a beat/backdrop pipeline
+     * built around one PCM source, and two songs at once is not a feature. Before this check the
+     * second sender's SETUP simply overwrote `audioServer`: the first sender's server kept running
+     * with nothing pointing at it, both fed the same output, and the result was the "audio is weird
+     * now" that outlasted the second sender leaving.
+     *
+     * The owner is whoever got there first, which with one sender is unchanged. A later sender is
+     * refused audio and keeps its video — a silent tile, not a failed session.
+     */
+    private fun startMirrorAudio(slot: Int, sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int): Pair<Int, Int> {
+        val owner = audioOwnerSlot
+        if (owner != null && owner != slot && audioServer != null) {
+            Logger.i("Mirror audio already owned by tile $owner — tile $slot stays video-only")
+            return 0 to 0
+        }
+        audioOwnerSlot = slot
         val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
         val aesIv = mirrorAesIv ?: return 0 to 0
@@ -1015,6 +1064,7 @@ class AirPlayReceiver(
     private fun stopMirrorAudio() {
         audioServer?.stop()
         audioServer = null
+        audioOwnerSlot = null
         forgetVolume()
         audioPlaying = false
         clearNowPlayingMetadata()
@@ -1127,6 +1177,7 @@ class AirPlayReceiver(
         anchorStartTs = -1L
         audioServer?.stop()
         audioServer = null
+        audioOwnerSlot = null
         forgetVolume()
         bufferedAudioServer?.stop()
         bufferedAudioServer = null

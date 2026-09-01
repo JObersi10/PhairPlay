@@ -28,7 +28,14 @@ import com.phairplay.util.Logger
  *   decoder.decodeNalUnit(nalUnitBytes)                    // call for each video chunk
  *   decoder.release()                                       // call when done
  */
-class VideoDecoder(private val outputSurface: Surface) {
+class VideoDecoder(
+    private val outputSurface: Surface,
+    /**
+     * Reports the decoded size to whoever owns this decoder's tile. StreamStats is still written
+     * for the debug HUD, but it is global and therefore useless for per-tile aspect fit.
+     */
+    private val onOutputSize: ((width: Int, height: Int) -> Unit)? = null,
+) {
 
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
@@ -240,6 +247,7 @@ class VideoDecoder(private val outputSurface: Surface) {
             StreamStats.videoPadWidth = padW
             StreamStats.videoPadHeight = padH
             Logger.i("Video output size ${w}x$h (buffer ${padW}x$padH)")
+            runCatching { onOutputSize?.invoke(w, h) }
         }
     }
 

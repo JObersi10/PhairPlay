@@ -65,6 +65,9 @@ class MultiScreenLayout @JvmOverloads constructor(
         return tiles[slot]?.getSurface()
     }
 
+    /** The tile for [slot] if it exists. Null when no session holds it. */
+    fun tileAt(slot: Int): StreamingScreen? = tiles.getOrNull(slot)
+
     private fun ensureTile(slot: Int): StreamingScreen? {
         if (slot !in tiles.indices) return null
         tiles[slot]?.let { return it }

@@ -134,6 +134,10 @@ class MainActivity : AppCompatActivity() {
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
             service?.setVideoSurfaceProvider { slot -> getVideoSurface(slot) }
+            // Per tile, not global: two mirrors have two aspect ratios, and StreamStats has one.
+            service?.setVideoSizeSink { slot, w, h ->
+                runOnUiThread { multiScreen.tileAt(slot)?.setVideoSize(w, h) }
+            }
             // Put the SurfaceView on screen as soon as a sender opens the socket, before we know
             // what kind of session it is. A SurfaceView has no Surface until it is visible, and by
             // the time CONNECTED arrives the sender has already sent its opening IDR.
