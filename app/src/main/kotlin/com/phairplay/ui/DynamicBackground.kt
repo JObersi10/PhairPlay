@@ -59,8 +59,8 @@ class DynamicBackground @JvmOverloads constructor(
     private val choreographer: Choreographer = Choreographer.getInstance()
     /** Frame time of the previous callback, for the elapsed-time smoothing below. 0 = first frame. */
     private var lastFrameNs = 0L
-    /** Milliseconds of real time drawn-but-not-yet-presented, for the PiP half-rate stride. */
-    private var frameDebtMs = 0f
+    /** Vsync counter for the fixed draw stride. */
+    private var frameCount = 0
     private var frameLoopRunning = false
 
     /**
@@ -96,16 +96,28 @@ class DynamicBackground @JvmOverloads constructor(
 
             advanceLevels(dtMs)
 
-            // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
-            // is studying it, but the full-rate redraw competes for CPU with the video decoder and
-            // the audio writer -- which is exactly when the hiccups were reported. Skipping the
-            // DRAW while still advancing the levels above keeps the timing right: the levels are
-            // now elapsed-time based, so a skipped frame costs smoothness and never accuracy.
-            frameDebtMs += dtMs
-            if (!lowPower || frameDebtMs >= LOW_POWER_FRAME_MS) {
-                frameDebtMs = 0f
-                invalidate()
-            }
+            // A FIXED STRIDE, because a steady cadence is what reads as smooth — not a higher
+            // average rate. Skipping the DRAW while still advancing the levels above keeps the
+            // timing right: those are elapsed-time based now, so a skipped frame costs smoothness
+            // and never accuracy. (A PiP window strides further still — the backdrop is a few
+            // hundred pixels wide there and competes for CPU with the video decoder.)
+            //
+            // Measured with gfxinfo: this device spends ~19ms of GPU per frame on the Home screen
+            // AND on Now Playing, with Slow UI thread and Missed Vsync both zero. Identical on two
+            // completely different drawings, which makes it a fill-rate floor for full-screen
+            // alpha-blended content at 1080p rather than anything about the orbs. 16.6ms is
+            // therefore not reachable here at all.
+            //
+            // Left to run free, the loop lands just over one vsync and alternates 1-2-1-2 refreshes
+            // per frame forever — a fluctuating ~50fps whose period keeps changing. Pinning it to
+            // every SECOND vsync gives an exactly even 30fps: every frame is held the same length,
+            // which is the property the eye is actually reading. Lower average, steadier picture.
+            //
+            // If a future device can hold 16.6ms this should drop to 1; it is deliberately a single
+            // constant so that is a one-line change.
+            frameCount++
+            val stride = if (lowPower) LOW_POWER_STRIDE else FRAME_STRIDE
+            if (frameCount % stride == 0) invalidate()
             choreographer.postFrameCallback(this)
         }
     }
@@ -114,7 +126,7 @@ class DynamicBackground @JvmOverloads constructor(
         if (frameLoopRunning) return
         frameLoopRunning = true
         lastFrameNs = 0L
-        frameDebtMs = 0f
+        frameCount = 0
         choreographer.postFrameCallback(frameCallback)
     }
 
@@ -1028,8 +1040,14 @@ class DynamicBackground @JvmOverloads constructor(
          * [decay] converts them to whatever this frame actually cost.
          */
         private const val REF_FRAME_MS = 33.33f
-        /** Redraw interval in a PiP window. Half rate; the levels still advance every vsync. */
-        private const val LOW_POWER_FRAME_MS = 50f
+        /**
+         * Vsyncs per drawn frame. 2 = an exactly even 30fps on a 60Hz panel. See the note in the
+         * frame callback: this device cannot hold 16.6ms, so a steady stride beats a free-running
+         * rate that keeps changing period. Drop to 1 on hardware that can.
+         */
+        private const val FRAME_STRIDE = 2
+        /** Same idea in a PiP window, where the backdrop is small and nobody is studying it. */
+        private const val LOW_POWER_STRIDE = 4
         /** Overall loudness follow, used by the full-screen pulse. */
         private const val ENERGY_RATE = 0.36f
 
