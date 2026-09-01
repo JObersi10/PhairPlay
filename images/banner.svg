@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 400" width="1280" height="400" role="img" aria-label="PhairPlay — an AirPlay 2, Miracast and DLNA receiver for Fire TV">
+  <defs>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#141821"/>
+      <stop offset="1" stop-color="#070910"/>
+    </linearGradient>
+
+    <!-- The receiver field from the app's Home screen: a source, and rings leaving it. -->
+    <radialGradient id="core" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#5AC8FA" stop-opacity="0.55"/>
+      <stop offset="0.45" stop-color="#4C9AFF" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#4C9AFF" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="wordmark" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#BFD4F5"/>
+    </linearGradient>
+
+    <!-- Fades the rings out before they reach the edge, so the field has no boundary. -->
+    <radialGradient id="falloff" cx="50%" cy="50%" r="50%">
+      <stop offset="0.55" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="fieldMask">
+      <rect width="1280" height="400" fill="url(#falloff)"/>
+    </mask>
+  </defs>
+
+  <rect width="1280" height="400" fill="url(#page)"/>
+
+  <!-- Receiver field, anchored right of the wordmark. -->
+  <g mask="url(#fieldMask)">
+    <circle cx="965" cy="200" r="300" fill="url(#core)"/>
+    <g fill="none" stroke="#4C9AFF">
+      <circle cx="965" cy="200" r="72"  stroke-opacity="0.42" stroke-width="1.5"/>
+      <circle cx="965" cy="200" r="126" stroke-opacity="0.28" stroke-width="1.5"/>
+      <circle cx="965" cy="200" r="188" stroke-opacity="0.16" stroke-width="1.5"/>
+      <circle cx="965" cy="200" r="256" stroke-opacity="0.08" stroke-width="1.5"/>
+    </g>
+    <circle cx="965" cy="200" r="7" fill="#7FD4FF"/>
+    <!-- Senders sitting on the rings, in the three protocol colours. -->
+    <circle cx="1091" cy="200" r="4.5" fill="#5AC8FA" fill-opacity="0.9"/>
+    <circle cx="880"  cy="128" r="4"   fill="#7C6CFF" fill-opacity="0.85"/>
+    <circle cx="913"  cy="316" r="4"   fill="#30D158" fill-opacity="0.8"/>
+  </g>
+
+  <!-- Wordmark. Tight tracking: the letters read too far apart at this size otherwise. -->
+  <text x="96" y="196"
+        font-family="SF Pro Display, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+        font-size="92" font-weight="700" letter-spacing="-2.5" fill="url(#wordmark)">PhairPlay</text>
+
+  <text x="100" y="244"
+        font-family="SF Pro Text, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+        font-size="23" font-weight="400" fill="#8A93A6">AirPlay 2, Miracast and DLNA on your Fire TV</text>
+
+  <!-- Protocol chips, matching the colours the app uses for each. -->
+  <g font-family="SF Pro Text, -apple-system, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
+     font-size="14" font-weight="600" letter-spacing="0.6">
+    <g>
+      <rect x="100" y="288" width="104" height="34" rx="17" fill="#5AC8FA" fill-opacity="0.14"/>
+      <circle cx="122" cy="305" r="4" fill="#5AC8FA"/>
+      <text x="136" y="310" fill="#9BDCFF">AirPlay</text>
+    </g>
+    <g>
+      <rect x="216" y="288" width="122" height="34" rx="17" fill="#30D158" fill-opacity="0.13"/>
+      <circle cx="238" cy="305" r="4" fill="#30D158"/>
+      <text x="252" y="310" fill="#8FE3A8">Miracast</text>
+    </g>
+    <g>
+      <rect x="350" y="288" width="92" height="34" rx="17" fill="#7C6CFF" fill-opacity="0.16"/>
+      <circle cx="372" cy="305" r="4" fill="#7C6CFF"/>
+      <text x="386" y="310" fill="#B9B1FF">DLNA</text>
+    </g>
+  </g>
+</svg>
