@@ -674,16 +674,49 @@ class NowPlayingScreen @JvmOverloads constructor(
         // pivot the scaled card is a rect of w*s x h*s centred in the view, and putting it in a
         // corner is just arithmetic — which interpolates cleanly.
         val margin = dp(24).toFloat()
-        val dx = (w - w * s) / 2f - margin
-        val dy = (h - h * s) / 2f - margin
+
+        // PIN THE CONTENT TO THE CORNER, NOT THE BOX AROUND IT.
+        //
+        // contentGroup is MATCH_PARENT x MATCH_PARENT with CENTER_VERTICAL gravity, so the thing
+        // you can actually see — the ~340dp artwork row — floats in the middle of a full-screen
+        // box. Placing the corner by the view's own width/height therefore put the *box* edge at
+        // the margin and left the content stranded near the middle: the card visibly refused to go
+        // any further down, with a large unexplained gap under it. The vertical case is the obvious
+        // one because the content is far shorter than the screen; horizontally the row nearly fills
+        // the width, which is why only "it won't go more down" was noticeable.
+        //
+        // Measured, not assumed: the row's height depends on how many metadata lines the sender
+        // actually sent, so a constant here would be wrong on the next track.
+        var cl = Float.MAX_VALUE; var ct = Float.MAX_VALUE
+        var cr = -Float.MAX_VALUE; var cb = -Float.MAX_VALUE
+        for (i in 0 until contentGroup.childCount) {
+            val child = contentGroup.getChildAt(i)
+            if (child.visibility == View.GONE) continue
+            cl = minOf(cl, child.left.toFloat()); ct = minOf(ct, child.top.toFloat())
+            cr = maxOf(cr, child.right.toFloat()); cb = maxOf(cb, child.bottom.toFloat())
+        }
+        // Before the first layout there are no child bounds to read; fall back to the whole box,
+        // which is the old behaviour and is corrected on the next pass.
+        if (cl > cr || ct > cb) { cl = 0f; ct = 0f; cr = w; cb = h }
+
+        // Scaling happens about the box centre, so the content's centre and half-size move with it.
+        val halfW = (cr - cl) / 2f * s
+        val halfH = (cb - ct) / 2f * s
+        val scaledCx = w / 2f + ((cl + cr) / 2f - w / 2f) * s
+        val scaledCy = h / 2f + ((ct + cb) / 2f - h / 2f) * s
+
         val tx = when (layoutPreset) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> -dx
-            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> dx
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT ->
+                (margin + halfW) - scaledCx
+            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT ->
+                (w - margin - halfW) - scaledCx
             else -> 0f
         }
         val ty = when (layoutPreset) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> -dy
-            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> dy
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT ->
+                (margin + halfH) - scaledCy
+            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT ->
+                (h - margin - halfH) - scaledCy
             else -> 0f
         }
 

@@ -10,14 +10,14 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.os.Handler
-import android.os.Looper
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
+import android.view.Choreographer
 import androidx.palette.graphics.Palette
 import com.phairplay.settings.BackdropTheme
 import com.phairplay.util.Logger
+import kotlin.math.pow
 
 class DynamicBackground @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -56,41 +56,117 @@ class DynamicBackground @JvmOverloads constructor(
         addUpdateListener { colorFade = it.animatedValue as Float }
     }
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val tick = object : Runnable {
-        override fun run() {
-            // These rates are PER FRAME, so halving the frame rate doubles every time constant.
-            // Scaled up to keep the same response in milliseconds as at 60fps -- without this the
-            // orbs get visibly mushier the moment the redraw slows down.
-            energy += (energyTarget - energy) * 0.36f
-            // Per-orb easing toward the latest band level. Asymmetric on purpose: a glow should
-            // arrive with the hit and fade out afterwards, so rising is quick and falling is slow.
-            // Symmetric easing looked like the orbs were breathing on a timer rather than reacting.
-            for (i in 0 until 3) {
-                val d = orbTarget[i] - orbEnergy[i]
-                val rate = if (d > 0f) ORB_ATTACK[i] else ORB_RELEASE[i]
-                orbEnergy[i] += d * rate
-            }
-            bandBass = orbEnergy[0]
-            bandVocal = orbEnergy[1]
-            bandTreble = orbEnergy[2]
-            invalidate()
+    private val choreographer: Choreographer = Choreographer.getInstance()
+    /** Frame time of the previous callback, for the elapsed-time smoothing below. 0 = first frame. */
+    private var lastFrameNs = 0L
+    /** Milliseconds of real time drawn-but-not-yet-presented, for the PiP half-rate stride. */
+    private var frameDebtMs = 0f
+    private var frameLoopRunning = false
+
+    /**
+     * The redraw loop, driven by the display's own vsync rather than a fixed delay.
+     *
+     * It used to be `handler.postDelayed(this, 33L)`. Two things were wrong with that, and the
+     * visible one is not the frame rate:
+     *
+     * **A 33 ms period beats against a 16.67 ms refresh.** The orbs are drawn wherever the orbit
+     * animators happen to be when the Runnable fires, and that instant drifts through the vsync
+     * interval — so a frame is held for two refreshes, then three, then two, forever. The motion is
+     * mathematically perfectly smooth and looks like it is stuttering, which is exactly the
+     * complaint. Nothing about a fixed `postDelayed` can be in phase with the display; only a
+     * Choreographer callback is. (Apple's equivalent, and the reason Music's visuals look glued to
+     * the screen, is CADisplayLink.)
+     *
+     * **The orbs move continuously, even when the levels do not.** The old comment justified 30fps
+     * on the grounds that band levels only arrive every 33 ms, so a 60fps redraw would be showing
+     * data that had not changed. That is true of the *swell* and false of the *position*: t1/t2/t3
+     * run 20/27/34-second orbits that are a different value at every single vsync. Halving the
+     * sample rate of a continuous motion halves its smoothness no matter how slowly its brightness
+     * changes.
+     */
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!frameLoopRunning) return
+
+            // Clamped: a GC pause or a backgrounded window can hand back an arbitrarily large gap,
+            // and letting that through would snap every orb straight to its target in one step.
+            val dtMs = if (lastFrameNs == 0L) REF_FRAME_MS
+                       else ((frameTimeNanos - lastFrameNs) / 1_000_000f).coerceIn(1f, 100f)
+            lastFrameNs = frameTimeNanos
+
+            advanceLevels(dtMs)
+
             // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
             // is studying it, but the full-rate redraw competes for CPU with the video decoder and
-            // the audio writer -- which is exactly when the hiccups were reported.
-            // 30fps, NOT 60. The band levels this is drawn from are emitted every 33ms, so half of
-            // a 60fps redraw was recomposing four screen-sized gradients to show data that had not
-            // changed. Nothing on screen moves faster than its source.
-            handler.postDelayed(this, if (lowPower) 50L else 33L)
+            // the audio writer -- which is exactly when the hiccups were reported. Skipping the
+            // DRAW while still advancing the levels above keeps the timing right: the levels are
+            // now elapsed-time based, so a skipped frame costs smoothness and never accuracy.
+            frameDebtMs += dtMs
+            if (!lowPower || frameDebtMs >= LOW_POWER_FRAME_MS) {
+                frameDebtMs = 0f
+                invalidate()
+            }
+            choreographer.postFrameCallback(this)
         }
+    }
+
+    private fun startFrameLoop() {
+        if (frameLoopRunning) return
+        frameLoopRunning = true
+        lastFrameNs = 0L
+        frameDebtMs = 0f
+        choreographer.postFrameCallback(frameCallback)
+    }
+
+    private fun stopFrameLoop() {
+        frameLoopRunning = false
+        choreographer.removeFrameCallback(frameCallback)
+    }
+
+    /**
+     * Advances every smoothed level by [dtMs] of real time.
+     *
+     * The rates are written as "fraction of the remaining gap closed in one [REF_FRAME_MS] frame",
+     * which is how they were originally tuned, and are converted here to the equivalent for however
+     * long this frame actually took. Applying a fixed per-frame fraction — which is what this did
+     * before — makes every time constant a function of the frame rate, so the orbs got mushier
+     * whenever the redraw slowed down and snappier whenever it sped up. Compounding it properly
+     * means a gap takes the same wall-clock time to close at 60fps, at 30fps, and while stuttering.
+     */
+    private fun advanceLevels(dtMs: Float) {
+        energy += (energyTarget - energy) * decay(ENERGY_RATE, dtMs)
+        // Per-orb easing toward the latest band level. Asymmetric on purpose: a glow should
+        // arrive with the hit and fade out afterwards, so rising is quick and falling is slow.
+        // Symmetric easing looked like the orbs were breathing on a timer rather than reacting.
+        for (i in 0 until 3) {
+            val d = orbTarget[i] - orbEnergy[i]
+            val rate = if (d > 0f) ORB_ATTACK[i] else ORB_RELEASE[i]
+            orbEnergy[i] += d * decay(rate, dtMs)
+        }
+        bandBass = orbEnergy[0]
+        bandVocal = orbEnergy[1]
+        bandTreble = orbEnergy[2]
+    }
+
+    /**
+     * The fraction of the remaining gap to close this frame, for a rate expressed per
+     * [REF_FRAME_MS]. Two half-length frames compose to exactly one full-length one.
+     */
+    private fun decay(ratePerRefFrame: Float, dtMs: Float): Float {
+        if (ratePerRefFrame >= 1f) return 1f
+        return 1f - (1f - ratePerRefFrame).toDouble().pow((dtMs / REF_FRAME_MS).toDouble()).toFloat()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         t1.start(); t2.start(); t3.start()
-        if (backdropTheme != BackdropTheme.BLACK) handler.post(tick)
+        if (backdropTheme != BackdropTheme.BLACK) startFrameLoop()
     }
-    override fun onDetachedFromWindow() { super.onDetachedFromWindow(); t1.cancel(); t2.cancel(); t3.cancel(); handler.removeCallbacks(tick) }
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        t1.cancel(); t2.cancel(); t3.cancel()
+        stopFrameLoop()
+    }
 
     fun setEnergy(e: Float) {
         energyTarget = e
@@ -393,7 +469,7 @@ class DynamicBackground @JvmOverloads constructor(
         // BLACK stops the redraw loop rather than merely drawing nothing. A 60fps invalidate that
         // paints one rectangle is still 60 frames a second of compositing on a device that has
         // little to spare, for a picture that cannot change. The loop restarts on the way out.
-        if (theme == BackdropTheme.BLACK) handler.removeCallbacks(tick) else handler.post(tick)
+        if (theme == BackdropTheme.BLACK) stopFrameLoop() else startFrameLoop()
         invalidate()
     }
 
@@ -924,6 +1000,17 @@ class DynamicBackground @JvmOverloads constructor(
          * Release is always slower than attack so the glow trails the hit instead of flickering off
          * with it. At 60fps a rate of 0.10 closes ~86% of a gap in a quarter second.
          */
+        /**
+         * The frame length the smoothing rates below were tuned against — the old fixed 33 ms
+         * loop. Keeping the constants in those units means the tuning survives the move to vsync;
+         * [decay] converts them to whatever this frame actually cost.
+         */
+        private const val REF_FRAME_MS = 33.33f
+        /** Redraw interval in a PiP window. Half rate; the levels still advance every vsync. */
+        private const val LOW_POWER_FRAME_MS = 50f
+        /** Overall loudness follow, used by the full-screen pulse. */
+        private const val ENERGY_RATE = 0.36f
+
         private val ORB_ATTACK = floatArrayOf(0.37f, 0.49f, 0.66f)
         private val ORB_RELEASE = floatArrayOf(0.052f, 0.077f, 0.127f)
 
