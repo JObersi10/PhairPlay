@@ -707,6 +707,11 @@ class PhairPlayService : Service() {
                 // for the next session. Safe because it moves the beat callback only -- the audio
                 // trim is pre-buffered as silence at stream start and cannot move without a gap.
                 airPlayReceiver?.setBeatDelayMs(routeCompensationMs)
+                // Same number, second consumer. The compensation is a property of the OUTPUT, so
+                // everything the user perceives as "in sync with the sound" owes it -- the beat
+                // visuals and the mirrored picture alike. Only the audio itself is exempt, because
+                // the audio is the side that is already late.
+                airPlayReceiver?.setVideoDelayMs(routeCompensationMs)
                 Logger.i(
                     "Audio route: ${route.label} — compensating ${routeCompensationMs}ms " +
                         "(user audio delay is separate and unchanged)"
@@ -1118,6 +1123,10 @@ class PhairPlayService : Service() {
                 }
             }
         ).also { it.start() }
+        // The route watcher's flow only re-emits when the ROUTE changes, so a receiver built while
+        // a Bluetooth speaker was already connected would have started uncompensated and stayed
+        // that way for the whole session. Seed it from the value we already hold.
+        airPlayReceiver?.setVideoDelayMs(routeCompensationMs)
         Logger.d("AirPlay receiver started (displayName='${settings.effectiveDisplayName}')")
     }
 

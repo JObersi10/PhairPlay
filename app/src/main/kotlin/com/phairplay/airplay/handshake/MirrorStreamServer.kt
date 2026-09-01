@@ -49,9 +49,34 @@ class MirrorStreamServer(
      */
     private val onConnectionEnded: () -> Unit = {},
 ) {
-    private sealed class Item
+    /** [queuedAtMs] is when the payload arrived, which is what [videoDelayMs] is measured from. */
+    private sealed class Item(val queuedAtMs: Long = System.currentTimeMillis())
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
     private class Frame(val annexB: ByteArray) : Item()
+
+    /**
+     * Holds the picture back to meet audio that is arriving late — a Bluetooth speaker, which adds
+     * roughly [com.phairplay.settings.AudioRoute.BLUETOOTH_COMPENSATION_MS] that Android will not
+     * report. Zero on HDMI and on the built-in speakers.
+     *
+     * **Applied here, on the compressed frames, and NOT at the decoder's output.** Scheduling a
+     * future render time with `releaseOutputBuffer(index, timestampNs)` is the obvious way to delay
+     * video and it does not work on this path: the Surface's BufferQueue holds only about three
+     * frames, so a 350ms hold — twenty-one frames at 60fps — back-pressures the decoder within a
+     * few frames, the upstream queue saturates, and the stream degrades into dropped and corrupt
+     * frames. See the note in `VideoDecoder.releaseOutputBuffers`.
+     *
+     * Holding NAL units before they are decoded costs only memory, and very little of it: 350ms of
+     * a mirror stream is a couple of hundred KB, and the queue already has room for 1.5 seconds.
+     */
+    @Volatile private var videoDelayMs: Long = 0L
+
+    fun setVideoDelayMs(ms: Long) {
+        val next = ms.coerceIn(0L, MAX_VIDEO_DELAY_MS)
+        if (next == videoDelayMs) return
+        videoDelayMs = next
+        Logger.i("Mirror: video delayed ${next}ms to meet the audio output")
+    }
 
     private val cipher = MirrorCrypto.streamCipher(aesKey, ecdhSecret, streamConnectionId)
     private val serverSocket = ServerSocket(0)            // OS-assigned free port
@@ -238,11 +263,38 @@ class MirrorStreamServer(
         Logger.e("Mirror: failed to parse SPS/PPS", e); null
     }
 
+    /**
+     * Blocks until [item] is due, when the audio route calls for a video delay.
+     *
+     * Slept in short slices rather than one long sleep so a TEARDOWN is not left waiting out the
+     * full delay: `stop()` clears `running`, and the loop has to notice that promptly or the whole
+     * session teardown inherits the compensation as latency.
+     *
+     * Delays every item, including SPS/PPS, so the stream stays in the order the sender sent it.
+     */
+    private fun awaitPresentation(item: Item) {
+        val delay = videoDelayMs
+        if (delay <= 0L) return
+        val dueAt = item.queuedAtMs + delay
+        while (running) {
+            val remaining = dueAt - System.currentTimeMillis()
+            if (remaining <= 0L) return
+            try {
+                Thread.sleep(remaining.coerceAtMost(DELAY_SLICE_MS))
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
     // ─── Decoder thread: consume the queue; the only thread that touches the decoder ──────────
     private fun runDecoder() {
         try {
             while (running) {
                 val item = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                awaitPresentation(item)
+                if (!running) break
                 when (item) {
                     is Config -> configureDecoder(item.sps, item.pps)
                     is Frame -> decodeFrame(item.annexB)
@@ -449,6 +501,16 @@ class MirrorStreamServer(
         private const val DEAD_SENDER_MS = 30_000
 
         private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
+
+        /**
+         * Ceiling on the route compensation this will honour. The queue holds ~1.5s, and a delay
+         * approaching that would leave no headroom for the decoder to fall behind in — the hold
+         * would start causing the drops it is meant to avoid.
+         */
+        private const val MAX_VIDEO_DELAY_MS = 800L
+
+        /** Sleep granularity while waiting out the delay, so teardown stays responsive. */
+        private const val DELAY_SLICE_MS = 25L
         private const val SURFACE_WAIT_TRIES = 3      // ~300ms, then decode off-screen instead
         private const val SURFACE_WAIT_MS = 100L
 

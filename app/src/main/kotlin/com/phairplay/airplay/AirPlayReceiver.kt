@@ -163,6 +163,25 @@ class AirPlayReceiver(
         audioServer?.setBeatDelayMs(ms.toLong())
     }
 
+    /**
+     * Holds MIRRORED VIDEO back by the same amount the current output is late, so the picture meets
+     * the sound instead of running ahead of it.
+     *
+     * The beat visuals already got this treatment; mirroring did not, so with a Bluetooth speaker
+     * the video ran ~350ms ahead of the audio — the worst direction for lip sync, because the mouth
+     * moving before the voice is the one offset people notice immediately.
+     *
+     * Live, like [setBeatDelayMs]: a speaker connecting mid-mirror has to be followed. Kept in a
+     * field as well so the NEXT mirror session starts already compensated rather than snapping into
+     * alignment a moment after it opens.
+     */
+    fun setVideoDelayMs(ms: Int) {
+        routeVideoDelayMs = ms.toLong()
+        mirrorServer?.setVideoDelayMs(routeVideoDelayMs)
+    }
+
+    @Volatile private var routeVideoDelayMs: Long = 0L
+
     /** The device the audio is actually being written to, or null when nothing is playing. */
     fun routedAudioDevice(): android.media.AudioDeviceInfo? = audioServer?.routedDevice()
 
@@ -887,7 +906,13 @@ class AirPlayReceiver(
             // frozen on the TV. Tear it down ourselves.
             onConnectionEnded = { scheduleMirrorVideoStop() },
         )
-            .also { mirrorServer = it; it.start(scope); videoPlaying = true; emitNowPlaying() }
+            .also {
+                mirrorServer = it
+                it.setVideoDelayMs(routeVideoDelayMs)
+                it.start(scope)
+                videoPlaying = true
+                emitNowPlaying()
+            }
             .dataPort
             .also { Logger.i("Mirror data server started on port $it") }
     }
