@@ -51,6 +51,13 @@ data class AudioRoute(
          * Delaying the *audio* instead would be the wrong direction: the sound is already late, and
          * holding it back further would only make it later. The visuals are the side that can move.
          */
-        const val BLUETOOTH_COMPENSATION_MS = 350
+        /**
+         * Trimmed 350 -> 325 on 2026-09-01: at 350 the visuals read slightly LATE against the
+         * sound on an Echo, both for the beat and for mirrored video. Link latency is not
+         * measurable (`getTimestamp()` stops at the HAL), so this figure is only ever calibrated by
+         * watching it, and it is speaker-specific — a different Bluetooth device will want a
+         * different number. Nudge it here; every consumer reads this one constant.
+         */
+        const val BLUETOOTH_COMPENSATION_MS = 325
     }
 }

@@ -500,14 +500,30 @@ class MirrorStreamServer(
         /** No video for this long means the sender is wedged or gone; drop the session. */
         private const val DEAD_SENDER_MS = 30_000
 
-        private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
+        /**
+         * How far the decoder may fall behind before frames are dropped: ~1.5s at 60fps.
+         *
+         * This is a DROP MARGIN, and the A/V delay must not be paid for out of it. Holding frames
+         * for [MAX_VIDEO_DELAY_MS] raises steady-state occupancy by that many frames — measured at
+         * 20-22 of 90 with a 350ms delay, where it had been near zero — so without the extra room
+         * below, every millisecond of lip-sync compensation was a millisecond less slack before the
+         * queue overflowed. That matters more than the numbers suggest, because macOS emits
+         * keyframes sparsely: ONE dropped frame sets awaitingKeyframe and the picture then stays
+         * visibly broken until the sender happens to send the next IDR, which is the smearing that
+         * only clears when you force a redraw.
+         */
+        private const val DROP_MARGIN_FRAMES = 90
+
+        /** Room for the held frames themselves, on top of the margin. ~0.5s at 60fps. */
+        private const val DELAY_HEADROOM_FRAMES = 30
+
+        private const val QUEUE_CAPACITY = DROP_MARGIN_FRAMES + DELAY_HEADROOM_FRAMES
 
         /**
-         * Ceiling on the route compensation this will honour. The queue holds ~1.5s, and a delay
-         * approaching that would leave no headroom for the decoder to fall behind in — the hold
-         * would start causing the drops it is meant to avoid.
+         * Ceiling on the route compensation this will honour, sized to [DELAY_HEADROOM_FRAMES] so
+         * the hold always fits in the room added for it.
          */
-        private const val MAX_VIDEO_DELAY_MS = 800L
+        private const val MAX_VIDEO_DELAY_MS = 500L
 
         /** Sleep granularity while waiting out the delay, so teardown stays responsive. */
         private const val DELAY_SLICE_MS = 25L
