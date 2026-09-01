@@ -29,6 +29,7 @@ import com.phairplay.airplay.DacpClient
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
 import com.phairplay.media.AudioRouteMonitor
+import com.phairplay.media.DecoderCapacity
 import com.phairplay.media.DeviceVolumeController
 import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
@@ -746,7 +747,10 @@ class PhairPlayService : Service() {
         return buildString {
             appendLine("---- PHAIRPLAY ----")
             appendLine("build:  ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA} (${BuildConfig.BUILD_TYPE})")
-            append("output: $where")
+            appendLine("output: $where")
+            // The ceiling on multi-screen casting, and cheap enough to re-read that there is no
+            // reason to guess at it from a phone in another room.
+            append("decode: ${DecoderCapacity.maxConcurrentAvcDecoders()} concurrent H.264")
         }
     }
 

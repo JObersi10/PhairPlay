@@ -2,7 +2,26 @@
 
 Receiving **more than one sender at once** and showing them side by side, up to four.
 
-Status: **plan only. Nothing here is built.**
+Status: **step 1 measured, step 2 partly built. No second sender has ever been served.**
+
+## Measured: the decoder ceiling is not the problem
+
+Read off the target Fire TV (`/vendor/etc/media_codecs_mediatek_video_svp.xml`):
+
+```xml
+<MediaCodec name="OMX.MTK.VIDEO.DECODER.AVC" type="video/avc">
+    <Limit name="concurrent-instances" max="5" />
+    <Limit name="performance-point-1920x1080" value="120" />
+</MediaCodec>
+```
+
+Five concurrent H.264 decoder instances, and 120fps of 1080p decode budget — enough for two 1080p60
+mirrors with headroom, and a four-tile layout is within the hardware. `DecoderCapacity` reports the
+same number at runtime (it is in the `:8001` header as `decode:`), because the vendor XML is what the
+device claims and not necessarily what it hands out under memory pressure.
+
+**Step 1 passes. The feature is not blocked on hardware.** It is blocked on the state untangling
+below.
 
 ---
 
@@ -102,15 +121,41 @@ and Back ends the focused session only.
 
 ## Order of work
 
-1. **Measure the decoder ceiling.** One throwaway commit. If the answer is one, stop here.
-2. **Extract `MirrorSession` + `SessionRegistry`**, capacity of exactly 1. No behaviour change, fully
-   testable, independently valuable.
-3. Lift the `activeClient` rejection to a capacity check.
+1. ~~**Measure the decoder ceiling.**~~ **Done — 5 instances.** See above.
+2. ~~Lift the `activeClient` field to a capacity-bounded `SessionRegistry`.~~ **Done, capacity 1.**
+   Identical behaviour: one sender in, everyone else refused on the spot. Covered by
+   `SessionRegistryTest`.
+3. **Make `RtspHandler`'s per-connection state per-connection.** ← *this is the next real step, and
+   it is the whole job.* See below.
 4. `MultiScreenLayout` with tiles, still capacity 1.
 5. Raise capacity to the measured number. Audio primary + muting.
 6. Remote semantics for a focused tile.
 
-Steps 1–2 are worth doing regardless. Steps 3–6 are only worth starting once step 1 returns ≥ 2.
+### Why step 3 is the blocker
+
+`SessionRegistry.capacity` can be set to 4 today and the accept loop will happily admit four senders.
+It must not be, because `RtspHandler` still keeps the entire handshake in fields shared by every
+connection:
+
+```kotlin
+private var currentSession: ...      // stream list, hasVideo
+private var pairingSession: ...      // pair-verify secret
+private var fairPlay: ...            // FairPlay state machine
+private var isMirrorSession: Boolean
+private var currentVolume: Float
+private var currentRemoteAddress: InetAddress
+private var activeStreamTypes / setupCount
+```
+
+`handleClient` resets `pairingSession` and `fairPlay` on entry, so a second sender connecting
+mid-handshake would wipe the first one's keys and both sessions would fail — the first with a
+decryption error that looks nothing like its cause. These have to move into a per-connection object
+that `handleClient` owns and `routeRequest` is handed, which is a wide but mechanical change through
+a 1,500-line class.
+
+Doing that with only one iPhone to test against is the risk: the refactor is verifiable for the
+single-sender case (which is every existing test) and unverifiable for the case it exists to enable.
+Sequence it so single-sender behaviour is provably unchanged first, and only then raise the capacity.
 
 ## Risks
 

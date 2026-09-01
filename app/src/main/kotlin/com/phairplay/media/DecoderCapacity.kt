@@ -1,0 +1,103 @@
+package com.phairplay.media
+
+import android.media.MediaCodecInfo
+import android.media.MediaCodecList
+import android.media.MediaFormat
+import com.phairplay.util.Logger
+
+/**
+ * How many H.264 streams this device can decode at once.
+ *
+ * This is the binding constraint on multi-screen casting: every simultaneous mirror needs its own
+ * `MediaCodec`, and a TV stick has a small, fixed number of hardware decoder instances. Asking the
+ * question is cheap; guessing is not, because the failure mode of over-committing is a second
+ * sender that connects, negotiates, and then shows nothing.
+ *
+ * Measured on the Fire TV this project targets (MediaTek): `OMX.MTK.VIDEO.DECODER.AVC` declares
+ * `concurrent-instances max="5"` and a `performance-point-1920x1080` of 120, i.e. enough decode
+ * budget for two 1080p60 mirrors with room to spare.
+ *
+ * `maxSupportedInstances` is what the vendor claims, not what the device will actually hand out
+ * under memory pressure, so treat the result as an upper bound rather than a promise.
+ */
+object DecoderCapacity {
+
+    /** Fallback when the query fails outright. One decoder is the only number always safe. */
+    private const val UNKNOWN = 1
+
+    @Volatile
+    private var cached: Int? = null
+
+    /**
+     * Vendor-declared maximum concurrent AVC decoder instances, across every non-secure hardware
+     * decoder on the device. Queried once and cached — the codec list is immutable for the life of
+     * the process, and walking it is not free.
+     */
+    fun maxConcurrentAvcDecoders(): Int {
+        cached?.let { return it }
+        val measured = runCatching { query() }
+            .onFailure { Logger.i("Decoder capacity query failed, assuming $UNKNOWN: ${it.message}") }
+            .getOrDefault(UNKNOWN)
+        cached = measured
+        return measured
+    }
+
+    private fun query(): Int {
+        var hardwareBest = 0
+        var hardwareName = "none"
+        var softwareBest = 0
+
+        for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
+            if (info.isEncoder) continue
+            // Secure decoders are reserved for DRM playback and are separately (and much more
+            // tightly) limited — counting one would overstate what mirroring can have.
+            if (info.name.endsWith(".secure")) continue
+            if (MediaFormat.MIMETYPE_VIDEO_AVC !in info.supportedTypes) continue
+            val caps: MediaCodecInfo.CodecCapabilities =
+                runCatching { info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC) }
+                    .getOrNull() ?: continue
+            val instances = caps.maxSupportedInstances
+            if (isHardware(info)) {
+                if (instances > hardwareBest) {
+                    hardwareBest = instances
+                    hardwareName = info.name
+                }
+            } else if (instances > softwareBest) {
+                softwareBest = instances
+            }
+        }
+
+        // The software decoder's limit is not a capability, it is an absence of one: `c2.android`
+        // advertises 32 instances because nothing in it is a fixed hardware resource. Taking the
+        // max across every decoder therefore reported 32 on a stick that has five real ones, which
+        // would have sized the tile grid off a number the CPU cannot honour — software-decoding two
+        // 1080p60 mirrors is not something this device can do at all.
+        val answer = if (hardwareBest > 0) hardwareBest else softwareBest
+        Logger.i("Decoder capacity: hardware=$hardwareBest ($hardwareName), software=$softwareBest " +
+                 "— using $answer")
+        return answer.coerceAtLeast(UNKNOWN)
+    }
+
+    /**
+     * Whether [info] is a hardware decoder.
+     *
+     * `isHardwareAccelerated` only exists from API 29; below that the naming convention is the only
+     * signal available, and it is a reliable one — Google's own software decoders are the
+     * `OMX.google.` and `c2.android.` prefixes, and everything else is the vendor's.
+     */
+    private fun isHardware(info: MediaCodecInfo): Boolean =
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+            info.isHardwareAccelerated
+        } else {
+            !info.name.startsWith("OMX.google.") && !info.name.startsWith("c2.android.")
+        }
+
+    /**
+     * How many simultaneous mirrors the hardware could support, leaving one decoder in reserve.
+     *
+     * The reserve is not superstition: DLNA and AirPlay URL playback both build their own decoder
+     * through ExoPlayer, and a mirror session that consumed the last instance would make the next
+     * video play fail with no obvious cause.
+     */
+    fun maxConcurrentMirrors(): Int = (maxConcurrentAvcDecoders() - 1).coerceAtLeast(1)
+}

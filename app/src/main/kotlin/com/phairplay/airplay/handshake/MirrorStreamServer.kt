@@ -155,7 +155,9 @@ class MirrorStreamServer(
                             // which we cannot influence — worth separating from our own setup cost.
                             Logger.i("Mirror timing: first video payload +${firstVideoAtMs - listenMs}ms after listen")
                         }
-                        val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
+                        // In-place: cipher.update() hands back a fresh array nothing else holds,
+                        // so the conversion can overwrite it instead of copying the frame twice.
+                        val annexB = MirrorCrypto.avccToAnnexBInPlace(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
                     1 -> {

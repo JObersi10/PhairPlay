@@ -323,6 +323,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         albumView = TextView(context).apply {
             setTextColor(Color.argb(140, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            // Tracking is size-specific, and it runs the opposite way at the two ends of the scale:
+            // the 36sp title is pulled tighter (-0.02) because letters read too far apart as they
+            // grow, while these dim lower lines are opened up slightly so they stay legible small,
+            // dim, and several feet away. A single tracking value across the card would be wrong at
+            // one end or the other.
+            letterSpacing = 0.01f
             gravity = Gravity.START
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -330,6 +336,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         metaSecondaryView = TextView(context).apply {
             setTextColor(Color.argb(100, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            letterSpacing = 0.02f
             gravity = Gravity.START
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -390,6 +397,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         pillLabel = TextView(context).apply {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            letterSpacing = 0.03f
         }
         pill.addView(pillIcon); pill.addView(pillLabel)
 

@@ -121,8 +121,14 @@ open class RtspHandler(
 
     private var serverSocket: ServerSocket? = null
 
-    @Volatile
-    private var activeClient: Socket? = null
+    /**
+     * The senders currently being served. Capacity 1 is the shipped policy and is what every
+     * other field on this class still assumes — `currentSession`, `pairingSession`, `fairPlay`
+     * and `isMirrorSession` are all handler-wide, so a second admitted sender would overwrite the
+     * first one's handshake. Raising [SessionRegistry.capacity] is safe only after those become
+     * per-connection; `docs/MULTI_SCREEN.md` tracks that work.
+     */
+    private val sessions = SessionRegistry(capacity = 1)
 
     @Volatile
     private var running = false
@@ -210,21 +216,19 @@ open class RtspHandler(
     }
 
     fun disconnectActiveClient() {
-        val client = activeClient ?: return
+        if (sessions.isEmpty()) return
         Logger.i("Dropping active RTSP client on user request")
-        runCatching { client.close() }
-        activeClient = null
+        sessions.closeAll()
     }
 
     fun stop() {
         running = false
         try {
-            activeClient?.close()
+            sessions.closeAll()
             serverSocket?.close()
         } catch (e: Exception) {
             Logger.e("Error closing RTSP sockets (non-fatal)", e)
         }
-        activeClient = null
         serverSocket = null
         Logger.i("RTSP handler stopped")
     }
@@ -277,9 +281,9 @@ open class RtspHandler(
                 // what makes the one-sender-at-a-time policy below actually work: the newcomer
                 // gets an immediate 503 instead of being left hanging, and its next attempt
                 // succeeds the moment the first sender goes away.
-                val current = activeClient
-                if (current != null && !current.isClosed) {
-                    Logger.w("Rejecting second client ${clientSocket.inetAddress.hostAddress} — already streaming")
+                if (!sessions.admit(clientSocket)) {
+                    Logger.w("Rejecting client ${clientSocket.inetAddress.hostAddress} — " +
+                             "at capacity (${sessions.size()}/${sessions.capacity})")
                     runCatching { sendServiceUnavailable(clientSocket) }
                     runCatching { clientSocket.close() }
                     continue
@@ -291,7 +295,6 @@ open class RtspHandler(
                 // connection would put the video surface up for a session that never happens.
                 runCatching { onSenderApproaching() }
 
-                activeClient = clientSocket
                 scope.launch(Dispatchers.IO) { handleClient(clientSocket) }
             }
         } catch (e: Exception) {
@@ -369,7 +372,7 @@ open class RtspHandler(
             // coroutine, a newcomer can be accepted in the window between this socket erroring and
             // this block running; clearing unconditionally would hand that newcomer's slot away and
             // let a third connection in behind it.
-            if (activeClient === socket) activeClient = null
+            sessions.release(socket)
             currentSession = null
             pairingSession = null
             fairPlay = null
