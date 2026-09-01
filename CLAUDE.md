@@ -136,6 +136,16 @@ The permanent Home/Settings nav panel is gone — Settings is a button on Home, 
   Bluetooth route silently adds 350ms of **visual** delay (`AudioRoute.BLUETOOTH_COMPENSATION_MS`),
   derived from the route rather than stored, and invisible in Settings — the user's Audio delay is a
   separate dial that still reads 0. Link latency is not measurable: `getTimestamp()` stops at the HAL
+- `SessionRegistry` — the capacity-bounded set of RTSP control connections, replacing the old
+  single `activeClient` field. **Capacity is 1 and must stay there** until `RtspHandler`'s
+  `currentSession` / `pairingSession` / `fairPlay` / `isMirrorSession` become per-connection: a
+  second admitted sender would wipe the first one's handshake and both would fail, the first with a
+  decryption error that looks nothing like its cause. `docs/MULTI_SCREEN.md` has the rest
+- `DecoderCapacity` — concurrent H.264 decoder instances, the ceiling on multi-screen. **Ask the
+  hardware decoder, not the max across all of them**: `c2.android.avc.decoder` advertises 32
+  because it is software and nothing in it is a fixed resource, so the naive max reported 32 on a
+  device that has 5. Measured on this Fire TV: **5 instances, `performance-point-1920x1080` = 120**,
+  so two 1080p60 mirrors fit. Shown in the `:8001` header as `decode:`
 - `DiagnosticServer` — `:8001` dump, `:8002` tail
 
 `docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app
