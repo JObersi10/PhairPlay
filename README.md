@@ -63,6 +63,7 @@ libraries built through CMake/NDK.
 
 | Doc | What's in it |
 |---|---|
+| [`docs/SETTINGS.md`](docs/SETTINGS.md) | Every setting, what it does, and what it costs |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the receivers, service and UI fit together |
 | [`docs/FEATURES.md`](docs/FEATURES.md) | Full feature list and known limits |
 | [`docs/PROTOCOL_RESOURCES.md`](docs/PROTOCOL_RESOURCES.md) | AirPlay protocol references, including dead ends |

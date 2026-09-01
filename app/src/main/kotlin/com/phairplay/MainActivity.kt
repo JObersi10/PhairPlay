@@ -71,8 +71,6 @@ import timber.log.Timber
 class MainActivity : AppCompatActivity() {
 
     // UI references
-    private lateinit var navItemHome: TextView
-    private lateinit var navItemSettings: TextView
     private lateinit var contentContainer: FrameLayout
     private lateinit var streamingContainer: com.phairplay.ui.TouchOverlayFrameLayout
 
@@ -156,7 +154,6 @@ class MainActivity : AppCompatActivity() {
         openedBySender = intent?.getBooleanExtra(EXTRA_OPENED_BY_SENDER, false) == true
         bindViews()
         setupOverlayScreens()
-        setupNavigation()
 
         applyNowPlayingSettings()
 
@@ -170,7 +167,7 @@ class MainActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 val settings = SettingsRepository(this@MainActivity).settingsFlow.first()
                 if (settings.onboardingComplete) {
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                     requestNotificationPermission()
                 } else {
                     showOnboarding()
@@ -195,12 +192,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun showOnboarding() {
         onboardingVisible = true
-        navPanelVisible(false)
         val fragment = OnboardingFragment().also { f ->
             f.onFinished = {
                 onboardingVisible = false
-                navPanelVisible(true)
-                navigateTo(HomeFragment(), navItemHome)
+                navigateTo(HomeFragment())
                 requestNotificationPermission()
                 // The receivers started in onCreate, seconds before onboarding wrote the user's
                 // answers, so they are still running on pre-onboarding defaults — a chosen PIN
@@ -213,8 +208,7 @@ class MainActivity : AppCompatActivity() {
                 // page: it asks the user to pick up a second device, so it does not belong in the
                 // middle of a sequence they are trying to get through.
                 showHomeKitSetup(startAtCode = false) {
-                    navPanelVisible(true)
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                 }
             }
         }
@@ -235,7 +229,6 @@ class MainActivity : AppCompatActivity() {
      */
     fun showHomeKitSetup(startAtCode: Boolean, onDone: (() -> Unit)? = null) {
         onboardingVisible = true
-        navPanelVisible(false)
         val fragment = HomeKitSetupFragment().also { f ->
             f.startAtCode = startAtCode
             f.onSetEnabled = { enabled ->
@@ -250,8 +243,7 @@ class MainActivity : AppCompatActivity() {
                 if (onDone != null) {
                     onDone()
                 } else {
-                    navPanelVisible(true)
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                 }
             }
         }
@@ -260,11 +252,6 @@ class MainActivity : AppCompatActivity() {
             .commit()
     }
 
-    private fun navPanelVisible(visible: Boolean) {
-        val v = if (visible) View.VISIBLE else View.GONE
-        navItemHome.visibility = v
-        navItemSettings.visibility = v
-    }
 
     /**
      * launchMode="singleTop" means an auto-open while we're already running is delivered here
@@ -429,6 +416,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        // Back leaves Settings for Home. With the nav panel gone this is the only way back, so it
+        // has to come before the backAction branch below -- otherwise Back inside Settings would
+        // stop the stream or quit the app, depending on a preference that is about the *stream*
+        // and has nothing to say about which screen you are reading.
+        if (selectedNavIndex == 1 && currentPin == null && streamingContainer.visibility != View.VISIBLE) {
+            navigateTo(HomeFragment())
+            return
+        }
+
         // Back closes the track-info panel before it touches the session — otherwise opening the
         // credits and pressing Back would kill the stream instead of just closing the card.
         if (nowPlayingScreen.visibility == View.VISIBLE && nowPlayingScreen.dismissInfoPanel()) return
@@ -483,8 +479,6 @@ class MainActivity : AppCompatActivity() {
     // ─── View Setup ──────────────────────────────────────────────────────────
 
     private fun bindViews() {
-        navItemHome       = findViewById(R.id.nav_item_home)
-        navItemSettings   = findViewById(R.id.nav_item_settings)
         contentContainer  = findViewById(R.id.content_container)
         streamingContainer = findViewById(R.id.streaming_container)
     }
@@ -597,64 +591,34 @@ class MainActivity : AppCompatActivity() {
     private fun setOverlayOwnsInput(owns: Boolean) {
         contentContainer.descendantFocusability =
             if (owns) FrameLayout.FOCUS_BLOCK_DESCENDANTS else FrameLayout.FOCUS_AFTER_DESCENDANTS
-        navItemHome.isFocusable = !owns
-        navItemSettings.isFocusable = !owns
         // Swallow stray touches so nothing beneath the full-screen overlay is clickable either.
         streamingContainer.isClickable = owns
     }
 
-    /**
-     * Sets up click listeners for the navigation panel items.
-     * Also updates the visual selected state (text color) of the active item.
-     */
-    private fun setupNavigation() {
-        navItemHome.setOnClickListener {
-            if (selectedNavIndex != 0) {
-                navigateTo(HomeFragment(), navItemHome)
-            }
-        }
-        navItemSettings.setOnClickListener {
-            if (selectedNavIndex != 1) {
-                navigateTo(SettingsFragment(), navItemSettings)
-            }
-        }
-
-        // Set initial selected state
-        setNavSelected(navItemHome, true)
-        setNavSelected(navItemSettings, false)
-    }
 
     /**
-     * Replaces the content_container fragment with [fragment] and updates
-     * the nav panel selection highlight.
+     * Swaps the fragment in content_container.
      *
-     * @param fragment  The Fragment to show in the content area.
-     * @param navItem   The nav panel TextView that was clicked (for highlight update).
+     * [selectedNavIndex] is kept because the streaming overlay restores whichever screen you were
+     * on when a stream ends; there is no longer a highlight to update.
      */
-    private fun navigateTo(fragment: Fragment, navItem: TextView) {
-        // Update nav highlight
-        setNavSelected(navItemHome, navItem == navItemHome)
-        setNavSelected(navItemSettings, navItem == navItemSettings)
-        selectedNavIndex = if (navItem == navItemHome) 0 else 1
-
-        // Replace fragment
+    private fun navigateTo(fragment: Fragment) {
+        selectedNavIndex = if (fragment is HomeFragment) 0 else 1
         supportFragmentManager.beginTransaction()
+            .setCustomAnimations(
+                R.anim.fragment_enter, R.anim.fragment_exit,
+                R.anim.fragment_pop_enter, R.anim.fragment_pop_exit,
+            )
             .replace(R.id.content_container, fragment)
             .commit()
     }
 
-    /**
-     * Updates the nav panel item's visual state.
-     *
-     * @param item     The nav item TextView.
-     * @param selected True if this item is currently active.
-     */
-    private fun setNavSelected(item: TextView, selected: Boolean) {
-        item.isSelected = selected
-        item.setTextColor(
-            getColor(if (selected) R.color.text_primary else R.color.nav_item_normal)
-        )
+    /** Opens Settings from Home. Back returns, via [onBackPressed]. */
+    fun openSettings() {
+        if (selectedNavIndex != 1) navigateTo(SettingsFragment())
     }
+
+
 
     /**
      * Shows the full-screen streaming overlay (called by PhairPlayService

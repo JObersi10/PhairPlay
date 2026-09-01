@@ -18,7 +18,6 @@
     <!-- ── HomeFragment ────────────────────────────────────────── -->
     <string name="home_title">Ready for connections</string>
     <!-- %1$s = device name shown in sender pickers -->
-    <string name="home_device_visible_as">Visible as: %1$s</string>
 
     <!-- ── Protocol names ──────────────────────────────────────── -->
     <string name="protocol_airplay">AirPlay</string>
@@ -84,7 +83,7 @@
     <string name="setting_miracast_enabled">Miracast Receiver</string>
     <string name="setting_miracast_subtitle">Accept connections from Windows and Android</string>
     <string name="setting_homekit_enabled">HomeKit</string>
-    <string name="setting_homekit_subtitle">Add PhairPlay to the Home app as a TV. Lets you use the iPhone remote and Siri.</string>
+    <string name="setting_homekit_subtitle">Add to the Home app for iPhone remote and Siri.</string>
     <string name="setting_homekit_code">Pairing code: %1$s</string>
     <string name="setting_homekit_paired">Paired with your Home</string>
     <string name="setting_homekit_off">Turn HomeKit on to see the pairing code</string>
@@ -150,7 +149,7 @@
          %2$d the milliseconds. -->
     <string name="setting_audio_delay_bluetooth">%1$s detected \u2022 already compensating %2$d ms automatically</string>
     <string name="setting_pip">Picture-in-picture</string>
-    <string name="setting_pip_subtitle">Shrink mirrored video into a corner when you leave the app</string>
+    <string name="setting_pip_subtitle">Shrink video to a corner when you leave the app</string>
     <string name="setting_back_action">Back button</string>
     <string name="setting_back_action_subtitle">What happens when you press Back</string>
     <string name="back_action_stop_stream">Stop the stream</string>
@@ -260,7 +259,7 @@
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>
-    <string name="setting_remember_pin_subtitle">A sender that has entered the PIN once won\'t be asked again</string>
+    <string name="setting_remember_pin_subtitle">Ask each sender for the PIN only once</string>
     <string name="setting_forget_pairings">Forget paired senders</string>
     <string name="setting_input_apps">Home app shortcuts</string>
     <string name="setting_input_apps_none">None</string>
@@ -295,20 +294,20 @@
     <string name="setting_perm_remote">Remote control outside PhairPlay</string>
     <string name="setting_perm_remote_granted">Granted. The remote can navigate outside PhairPlay — but Fire TV blocks the normal way to move the selection, so expect it to be unresponsive or to skip around on the home screen and in apps like Netflix. Root is the only way to make this reliable everywhere.</string>
     <string name="setting_remote">Remote control</string>
-    <string name="setting_remote_subtitle">Off by default. Works properly inside PhairPlay; unreliable elsewhere — see the permission notice below.</string>
+    <string name="setting_remote_subtitle">Reliable inside PhairPlay only. See Permissions.</string>
 
     <string name="setting_artwork_lookup">Find missing album art</string>
-    <string name="setting_artwork_lookup_subtitle">When a sender streams without cover art — most DLNA apps do — look one up by title using MusicBrainz and the Cover Art Archive. Track names are sent to those services while this is on.</string>
+    <string name="setting_artwork_lookup_subtitle">Look up missing cover art online. Sends track names to MusicBrainz.</string>
     <string name="setting_backdrop">Backdrop</string>
     <string name="setting_backdrop_subtitle">What fills the screen behind the Now Playing card.</string>
     <string name="backdrop_dynamic">Dynamic</string>
     <string name="backdrop_dynamic_detail">Album colours across the whole screen, moving with the beat.</string>
     <string name="backdrop_projector">Projector</string>
-    <string name="backdrop_projector_detail">Three band orbs on true black, faded out on every side so a projected image has no visible edge.</string>
+    <string name="backdrop_projector_detail">Three orbs on true black, edges faded for projectors.</string>
     <string name="backdrop_black">Black</string>
     <string name="backdrop_black_detail">Plain black. No colour and nothing moving.</string>
     <string name="setting_stream_end">Exit when the stream ends</string>
-    <string name="setting_stream_end_subtitle">Leave for the Fire TV home screen as soon as the sender stops. Off keeps PhairPlay on screen, ready for the next stream.</string>
+    <string name="setting_stream_end_subtitle">Leave for the TV home screen when the sender stops</string>
     <string name="setting_perm_overlay">Show the remote\'s focus ring</string>
     <string name="setting_perm_overlay_granted">Granted. The remote draws its own highlight in apps that will not move theirs — the Fire TV launcher among them.</string>
     <string name="setting_perm_overlay_explanation">The Fire TV launcher refuses to move its highlight for the remote, so PhairPlay draws its own ring instead. Without this the remote still navigates and selects — you just cannot see where it is.</string>
@@ -322,11 +321,17 @@
 
     <!-- Settings categories (left pane). These replaced the old settings_section_* headers:
          the category name now labels the pane, so a separate in-pane header repeated it. -->
-    <string name="settings_cat_general">General</string>
-    <string name="settings_cat_protocols">Protocols</string>
-    <string name="settings_cat_av">Audio &amp; video</string>
-    <string name="settings_cat_nowplaying">Now Playing</string>
+    <!-- Settings sections, ordered the way someone actually arrives at them: how the TV is found,
+         how it lets senders in, then how a stream sounds, looks, and is controlled. -->
+    <string name="settings_cat_connection">Connection</string>
     <string name="settings_cat_pairing">Pairing &amp; security</string>
-    <string name="settings_cat_permissions">Permissions</string>
+    <string name="settings_cat_audio">Audio</string>
+    <string name="settings_cat_video">Mirroring &amp; video</string>
+    <string name="settings_cat_nowplaying">Now Playing</string>
+    <string name="settings_cat_remote">Remote &amp; buttons</string>
+    <string name="settings_cat_system">System</string>
     <string name="settings_cat_about">About</string>
+
+    <!-- Home hero: labels the device name as the thing to choose on the phone. -->
+    <string name="home_pick_this">Select this on your device</string>
 </resources>

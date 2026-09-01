@@ -73,6 +73,15 @@ names one of them, it cites a specific behaviour or constant that was verified i
 
 ---
 
+## Icons
+
+- **DLNA mark** — `app/src/main/res/drawable/ic_cast.xml`, converted to an Android VectorDrawable
+  from [SVG Repo](https://www.svgrepo.com/svg/305857/dlna). Check that collection's license terms
+  before redistributing; DLNA is a trademark of its respective owner.
+- The AirPlay and Miracast glyphs are drawn for this project.
+
+---
+
 ## Trademarks
 
 AirPlay, Apple, iPhone, iPad, macOS and Apple TV are trademarks of Apple Inc. Fire TV and Amazon are

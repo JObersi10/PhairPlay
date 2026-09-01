@@ -2,7 +2,7 @@
 <resources>
     <!-- ─── Backgrounds ─────────────────────────────────────── -->
     <!-- True black — best for OLED, minimal visual noise on TV -->
-    <color name="background_dark">#FF000000</color>
+    <color name="background_dark">#FF0B0E15</color>
     <!-- Surface elevation: cards, sheets, nav panel -->
     <color name="background_surface">#FF1C1C1E</color>
     <!-- Slightly lighter surface for hover/pressed states -->
@@ -51,10 +51,39 @@
     <color name="row_pressed">#FF3A3A3C</color>
     <!-- Selected but focus has moved to another pane: quiet enough not to look focused, visible
          enough to keep the user's place. -->
-    <color name="row_selected_unfocused">#1AFFFFFF</color>
+    <color name="row_selected_unfocused">#26FFFFFF</color>
+    <!-- Resting surface for every row. Present so no row reads as unfinished next to its
+         neighbours, faint enough that the focused row still wins by a wide margin. -->
+    <color name="row_resting">#0FFFFFFF</color>
 
     <!-- ─── Focus ring ────────────────────────────────────────── -->
     <!-- Brighter than accent_blue. The ring sits on a dark surface at ten feet, where the
          Google-blue #1A73E8 is legible on a monitor and muddy on a television. -->
     <color name="focus_ring_bright">#FF4C9AFF</color>
+
+    <!-- ─── Depth ─────────────────────────────────────────────── -->
+    <!-- The page is a very dark blue rather than pure black, and it lightens toward the top. On an
+         OLED true black is the right call for a *video* surface; for a UI surface it flattens
+         everything into one plane, because nothing can ever sit behind anything else. A few points
+         of blue give the surfaces something to be lighter than. -->
+    <color name="bg_top">#FF141821</color>
+    <color name="bg_bottom">#FF070910</color>
+
+    <!-- Card surfaces, as a gradient rather than a flat fill: the top edge catches slightly more
+         light, which is what makes a rectangle read as a raised panel instead of a grey box. -->
+    <color name="surface_top">#FF23283A</color>
+    <color name="surface_bottom">#FF191D2A</color>
+    <color name="surface_focused_top">#FF33405E</color>
+    <color name="surface_focused_bottom">#FF232B40</color>
+
+    <!-- A more saturated accent than the Google-blue it replaces; that one goes muddy against a
+         dark surface at ten feet. -->
+    <color name="accent">#FF4C9AFF</color>
+    <color name="accent_dim">#332F7FE0</color>
+
+    <!-- Protocol identity colours, used for the icon chip on each Home card so the three are
+         distinguishable at a glance rather than three identical grey tiles. -->
+    <color name="chip_airplay">#FF5AC8FA</color>
+    <color name="chip_dlna">#FF7C6CFF</color>
+    <color name="chip_miracast">#FF30D158</color>
 </resources>

@@ -1,85 +1,92 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    fragment_home.xml — HomeFragment layout (Google TV Streamer style).
+    fragment_home.xml — the screen you land on.
 
-    Layout:
-    ┌──────────────────────────────────────────────────────────┐
-    │  "Ready for connections"           [●] Service Running   │
-    │                                                          │
-    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
-    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 DLNA    │       │
-    │  │  ●Running   │ │  ●Running   │ │  ●Running   │       │
-    │  │  Waiting... │ │  Waiting... │ │  Waiting... │       │
-    │  └─────────────┘ └─────────────┘ └─────────────┘       │
-    │                                                          │
-    │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-    │  │  ▶ Start │  │  ■ Stop  │  │  ↺ Restart│             │
-    │  └──────────┘  └──────────┘  └──────────┘              │
-    └──────────────────────────────────────────────────────────┘
+    The one job of this screen is answering "what do I pick on my phone, and is it listening?".
+    So the device name is the largest thing on it, the service state sits next to the name rather
+    than in a corner, and everything else is secondary.
+
+    Shape: a title bar, one hero card carrying the identity, then a row of protocol tiles and a row
+    of controls. The tile row follows the pattern TV casting receivers converge on, for the good
+    reason that a horizontal strip is the cheapest thing to move across with a D-pad.
+
+    Every id from the previous layout is preserved, so HomeFragment binds unchanged.
 -->
 <ScrollView
     xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/background_dark"
-    android:fillViewport="true">
+    android:background="@drawable/app_background"
+    android:fillViewport="true"
+    android:scrollbars="none">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="32dp">
+        android:baselineAligned="false"
+        android:paddingHorizontal="@dimen/screen_margin_horizontal"
+        android:paddingVertical="@dimen/screen_margin_vertical">
 
-        <!-- ── Header row ──────────────────────────────────────────────── -->
+        <!-- ── Title bar ────────────────────────────────────────── -->
+        <TextView
+            android:id="@+id/text_page_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/text_title"
+            android:fontFamily="sans-serif-light"
+            android:layout_marginBottom="@dimen/space_md" />
+
+        <!-- ── Hero: who this receiver is ───────────────────────── -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:orientation="vertical"
             android:baselineAligned="false"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="32dp">
+            android:background="@drawable/card_surface"
+            android:padding="@dimen/space_md"
+            android:layout_marginBottom="@dimen/space_md">
 
-            <LinearLayout
-                android:layout_width="0dp"
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
+                android:text="@string/home_pick_this"
+                android:textColor="@color/text_secondary"
+                android:textSize="@dimen/text_section"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:fontFamily="sans-serif-medium" />
 
-                <TextView
-                    android:id="@+id/text_page_title"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/home_title"
-                    android:textColor="@color/text_primary"
-                    android:textSize="32sp"
-                    android:fontFamily="sans-serif-light" />
+            <!-- The name the user is hunting for in their AirPlay picker. Biggest thing here
+                 on purpose: at ten feet it has to be readable at a glance. -->
+            <TextView
+                android:id="@+id/text_device_name"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_sm"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/text_title"
+                android:fontFamily="sans-serif-light"
+                android:singleLine="true"
+                android:ellipsize="end" />
 
-                <TextView
-                    android:id="@+id/text_device_name"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="16sp" />
-            </LinearLayout>
-
-            <!-- Global service state badge -->
+            <!-- Service state, beside the identity rather than off in a corner: "is it listening"
+                 is the same question as "what do I pick", so they belong together. -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/focus_ring_selector"
-                android:paddingHorizontal="16dp"
-                android:paddingVertical="10dp">
+                android:layout_marginTop="@dimen/space_sm">
 
                 <View
                     android:id="@+id/dot_service_state"
                     android:layout_width="10dp"
                     android:layout_height="10dp"
                     android:background="@drawable/status_dot"
-                    android:layout_marginEnd="8dp" />
+                    android:layout_marginEnd="@dimen/space_sm" />
 
                 <TextView
                     android:id="@+id/text_service_state"
@@ -87,20 +94,21 @@
                     android:layout_height="wrap_content"
                     android:text="@string/service_state_stopped"
                     android:textColor="@color/text_secondary"
-                    android:textSize="16sp" />
+                    android:textSize="@dimen/text_body" />
             </LinearLayout>
         </LinearLayout>
 
-        <!-- ── Section: Protocol status cards ────────────────────────── -->
+        <!-- ── Protocol tiles ───────────────────────────────────── -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/section_protocols"
             android:textColor="@color/text_secondary"
-            android:textSize="14sp"
+            android:textSize="@dimen/text_section"
             android:textAllCaps="true"
             android:letterSpacing="0.1"
-            android:layout_marginBottom="12dp" />
+            android:fontFamily="sans-serif-medium"
+            android:layout_marginBottom="@dimen/space_sm" />
 
         <LinearLayout
             android:id="@+id/protocol_cards_row"
@@ -108,46 +116,43 @@
             android:layout_height="wrap_content"
             android:baselineAligned="false"
             android:orientation="horizontal"
-            android:layout_marginBottom="40dp">
+            android:layout_marginBottom="@dimen/space_md">
 
-            <!-- AirPlay card -->
             <include
                 android:id="@+id/card_airplay"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginEnd="12dp" />
+                android:layout_marginEnd="@dimen/space_md" />
 
-            <!-- Miracast card -->
             <include
                 android:id="@+id/card_miracast"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginEnd="12dp" />
+                android:layout_marginEnd="@dimen/space_md" />
 
-            <!-- DLNA card -->
             <include
                 android:id="@+id/card_dlna"
                 layout="@layout/card_protocol_status"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1" />
-
         </LinearLayout>
 
-        <!-- ── Section: Service controls ──────────────────────────────── -->
+        <!-- ── Controls ─────────────────────────────────────────── -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/section_controls"
             android:textColor="@color/text_secondary"
-            android:textSize="14sp"
+            android:textSize="@dimen/text_section"
             android:textAllCaps="true"
             android:letterSpacing="0.1"
-            android:layout_marginBottom="12dp" />
+            android:fontFamily="sans-serif-medium"
+            android:layout_marginBottom="@dimen/space_sm" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -158,12 +163,12 @@
             <Button
                 android:id="@+id/btn_start"
                 android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:layout_marginEnd="12dp"
-                android:paddingHorizontal="24dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="@dimen/space_md"
+                android:paddingHorizontal="@dimen/space_lg"
                 android:text="@string/action_start"
                 android:textColor="@color/text_primary"
-                android:textSize="18sp"
+                android:textSize="@dimen/text_body"
                 android:background="@drawable/btn_control_selector"
                 android:focusable="true"
                 android:nextFocusRight="@id/btn_stop" />
@@ -171,12 +176,12 @@
             <Button
                 android:id="@+id/btn_stop"
                 android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:layout_marginEnd="12dp"
-                android:paddingHorizontal="24dp"
+                android:layout_height="44dp"
+                android:layout_marginEnd="@dimen/space_md"
+                android:paddingHorizontal="@dimen/space_lg"
                 android:text="@string/action_stop"
                 android:textColor="@color/text_primary"
-                android:textSize="18sp"
+                android:textSize="@dimen/text_body"
                 android:background="@drawable/btn_control_selector"
                 android:focusable="true"
                 android:nextFocusLeft="@id/btn_start"
@@ -185,15 +190,29 @@
             <Button
                 android:id="@+id/btn_restart"
                 android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:paddingHorizontal="24dp"
+                android:layout_height="44dp"
+                android:paddingHorizontal="@dimen/space_lg"
                 android:text="@string/action_restart"
                 android:textColor="@color/text_primary"
-                android:textSize="18sp"
+                android:textSize="@dimen/text_body"
                 android:background="@drawable/btn_control_selector"
                 android:focusable="true"
-                android:nextFocusLeft="@id/btn_stop" />
+                android:nextFocusLeft="@id/btn_stop"
+                android:nextFocusRight="@id/btn_settings" />
 
+            <!-- Settings lives here now that the permanent left nav panel is gone. -->
+            <Button
+                android:id="@+id/btn_settings"
+                android:layout_width="wrap_content"
+                android:layout_height="44dp"
+                android:layout_marginStart="@dimen/space_md"
+                android:paddingHorizontal="@dimen/space_lg"
+                android:text="@string/nav_settings"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/text_body"
+                android:background="@drawable/btn_control_selector"
+                android:focusable="true"
+                android:nextFocusLeft="@id/btn_restart" />
         </LinearLayout>
 
     </LinearLayout>

@@ -13,7 +13,6 @@
 
     <!-- ── HomeFragment ────────────────────────────────────────── -->
     <string name="home_title">Bereit für Verbindungen</string>
-    <string name="home_device_visible_as">Sichtbar als: %1$s</string>
 
     <!-- ── Protocol states ─────────────────────────────────────── -->
     <string name="protocol_state_disabled">Deaktiviert</string>

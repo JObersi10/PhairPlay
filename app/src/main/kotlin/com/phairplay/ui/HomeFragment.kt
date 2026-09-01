@@ -69,6 +69,7 @@ class HomeFragment : Fragment() {
     private lateinit var cardDlna: View
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    private lateinit var btnSettings: android.widget.Button
     private lateinit var btnRestart: Button
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
@@ -109,6 +110,11 @@ class HomeFragment : Fragment() {
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
+        btnSettings      = view.findViewById(R.id.btn_settings)
+        FocusMotion.attach(btnStart)
+        FocusMotion.attach(btnStop)
+        FocusMotion.attach(btnRestart)
+        FocusMotion.attach(btnSettings)
     }
 
     /**
@@ -116,20 +122,31 @@ class HomeFragment : Fragment() {
      * The dynamic parts (state, detail text) are updated when service state changes.
      */
     private fun configureProtocolCards() {
-        setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
-        setupCard(cardDlna,      R.drawable.ic_cast,     R.string.protocol_dlna)
+        setupCard(cardAirPlay, R.drawable.ic_airplay, R.string.protocol_airplay, R.color.chip_airplay)
+        setupCard(cardDlna,    R.drawable.ic_cast,    R.string.protocol_dlna,    R.color.chip_dlna)
         // Fire TV cannot complete a Miracast session, so the card would sit on "Advertising" for
         // ever and invite the user to try something that never connects. See DeviceFeatures.
         if (DeviceFeatures.MIRACAST_SUPPORTED) {
-            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast)
+            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast, R.color.chip_miracast)
         } else {
             cardMiracast.visibility = View.GONE
         }
     }
 
-    private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
-        card.findViewById<android.widget.ImageView>(R.id.img_protocol_icon)?.setImageResource(iconRes)
+    private fun setupCard(card: View, iconRes: Int, nameRes: Int, chipColorRes: Int) {
+        card.findViewById<android.widget.ImageView>(R.id.img_protocol_icon)?.let { icon ->
+            icon.setImageResource(iconRes)
+            // The chip carries the protocol's colour and the glyph is punched out of it in the
+            // page colour, so the three cards are told apart before any text is read. They used to
+            // be three identical grey tiles distinguished only by their labels.
+            val chip = androidx.core.content.ContextCompat.getColor(requireContext(), chipColorRes)
+            icon.backgroundTintList = android.content.res.ColorStateList.valueOf(chip)
+            icon.imageTintList = android.content.res.ColorStateList.valueOf(
+                androidx.core.content.ContextCompat.getColor(requireContext(), R.color.bg_bottom)
+            )
+        }
         card.findViewById<TextView>(R.id.text_protocol_name)?.setText(nameRes)
+        FocusMotion.attach(card)
     }
 
     /**
@@ -137,6 +154,9 @@ class HomeFragment : Fragment() {
      * Calls [ServiceController] which sends Intent actions to [PhairPlayService].
      */
     private fun configureButtons() {
+        btnSettings.setOnClickListener {
+            (activity as? com.phairplay.MainActivity)?.openSettings()
+        }
         btnStart.setOnClickListener {
             Logger.d("User tapped Start")
             ServiceController.start(requireContext())
@@ -157,7 +177,10 @@ class HomeFragment : Fragment() {
      */
     private fun showDeviceName() {
         val name = NetworkUtils.getDeviceName(requireContext())
-        textDeviceName.text = getString(R.string.home_device_visible_as, name)
+        // The name alone. It is the hero of the screen now, at display size, and the card's own
+        // label above it already says what it is for -- "Visible as: Living Room" set in 40sp read
+        // as a sentence that had been enlarged by mistake.
+        textDeviceName.text = name
     }
 
     // ─── State Observation ───────────────────────────────────────────────────

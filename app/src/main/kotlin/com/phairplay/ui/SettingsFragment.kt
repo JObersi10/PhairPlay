@@ -107,7 +107,7 @@ class SettingsFragment : Fragment() {
         loadAndPopulate()
     }
 
-    private lateinit var paneTitle: TextView
+    private lateinit var paneScroll: android.widget.ScrollView
     private lateinit var categories: List<Category>
 
     // ─── View Binding ────────────────────────────────────────────────────────
@@ -165,42 +165,49 @@ class SettingsFragment : Fragment() {
     }
 
     /**
-     * Wires the left-hand category list to the right-hand panes.
+     * Wires the shortcut list to the one continuous scroller.
      *
-     * Focus, not clicks, drives the selection: on a remote you arrive at a category by moving onto
-     * it, and requiring a second press of OK to see what is inside it is a press that buys nothing.
-     * Moving RIGHT then enters the rows, and LEFT comes back.
+     * The shortcuts scroll; they do not hide anything. Focusing one glides the list to that
+     * section, so moving down the shortcuts previews the whole page, and moving RIGHT drops you
+     * into the rows exactly where you were looking.
      */
     private fun bindCategories(view: View) {
-        paneTitle = view.findViewById(R.id.settings_pane_title)
-        categories = CATEGORY_IDS.map { (navId, paneId, titleRes) ->
-            Category(view.findViewById(navId), view.findViewById(paneId), titleRes)
+        paneScroll = view.findViewById(R.id.settings_pane_scroll)
+        categories = CATEGORY_IDS.map { (navId, sectionId) ->
+            Category(view.findViewById(navId), view.findViewById(sectionId))
         }
         categories.forEach { category ->
             category.nav.setOnFocusChangeListener { _, hasFocus ->
-                if (hasFocus) select(category)
+                if (hasFocus) scrollTo(category)
             }
-            // OK on a category moves into its rows rather than doing nothing.
             category.nav.setOnClickListener {
-                select(category)
-                category.pane.getChildAt(0)?.requestFocus()
+                scrollTo(category)
+                // OK jumps into the section's first row rather than doing nothing visible.
+                (category.section.parent as? ViewGroup)
+                    ?.let { parent -> parent.indexOfChild(category.section) }
+                    ?.let { idx -> (category.section.parent as ViewGroup).getChildAt(idx + 1) }
+                    ?.requestFocus()
             }
         }
-        categories.firstOrNull()?.let { select(it); it.nav.requestFocus() }
-    }
-
-    private fun select(category: Category) {
-        categories.forEach {
-            val chosen = it === category
-            it.pane.visibility = if (chosen) View.VISIBLE else View.GONE
-            // Keeps a marker on the category you came from once focus moves into the rows, so the
-            // screen never shows nothing as current.
-            it.nav.isSelected = chosen
+        // Focus motion on the shortcuts and on every row in the list.
+        (view.findViewById<ViewGroup>(R.id.settings_categories))?.let(FocusMotion::attachToChildren)
+        (view.findViewById<ViewGroup>(R.id.settings_content))?.let { content ->
+            for (i in 0 until content.childCount) {
+                (content.getChildAt(i) as? ViewGroup)?.let(FocusMotion::attachToChildren)
+            }
         }
-        paneTitle.setText(category.titleRes)
+        categories.firstOrNull()?.nav?.requestFocus()
     }
 
-    private data class Category(val nav: View, val pane: ViewGroup, val titleRes: Int)
+    /** Glides the scroller so [category]'s heading sits at the top of the visible area. */
+    private fun scrollTo(category: Category) {
+        categories.forEach { it.nav.isSelected = it === category }
+        // smoothScrollTo, not scrollTo: the jump is what makes a shortcut list feel like it
+        // teleported you somewhere unrelated. The glide shows you how far you moved.
+        paneScroll.smoothScrollTo(0, (category.section.top - SECTION_TOP_GAP_PX).coerceAtLeast(0))
+    }
+
+    private data class Category(val nav: View, val section: View)
 
 
     /** Sets all row labels and subtitles from string resources. */
@@ -850,16 +857,20 @@ class SettingsFragment : Fragment() {
     }
 
     private companion object {
-        /** Left-hand list order: nav item, the pane it reveals, and the pane's title. */
+        /** Shortcut list order: the nav item and the section heading it scrolls to. */
         val CATEGORY_IDS = listOf(
-            Triple(R.id.cat_general,     R.id.pane_general,     R.string.settings_cat_general),
-            Triple(R.id.cat_protocols,   R.id.pane_protocols,   R.string.settings_cat_protocols),
-            Triple(R.id.cat_av,          R.id.pane_av,          R.string.settings_cat_av),
-            Triple(R.id.cat_nowplaying,  R.id.pane_nowplaying,  R.string.settings_cat_nowplaying),
-            Triple(R.id.cat_pairing,     R.id.pane_pairing,     R.string.settings_cat_pairing),
-            Triple(R.id.cat_permissions, R.id.pane_permissions, R.string.settings_cat_permissions),
-            Triple(R.id.cat_about,       R.id.pane_about,       R.string.settings_cat_about),
+            R.id.cat_connection   to R.id.section_connection,
+            R.id.cat_pairing      to R.id.section_pairing,
+            R.id.cat_audio        to R.id.section_audio,
+            R.id.cat_video        to R.id.section_video,
+            R.id.cat_nowplaying   to R.id.section_nowplaying,
+            R.id.cat_remote       to R.id.section_remote,
+            R.id.cat_system       to R.id.section_system,
+            R.id.cat_about        to R.id.section_about,
         )
+
+        /** Breathing room above a section heading once scrolled to, so it is not flush at the top. */
+        const val SECTION_TOP_GAP_PX = 24
 
         val SCREENSAVER_TIMEOUT_CHOICES = listOf(1, 2, 5, 10, 15, 30, 60)
 
