@@ -41,7 +41,15 @@ class MultiScreenLayout @JvmOverloads constructor(
     /** Index 0 is created eagerly and permanent; the rest exist only while a session holds them. */
     private val tiles = arrayOfNulls<StreamingScreen>(AirPlayReceiver.MAX_SLOTS)
 
-    private var tileCount: Int = 1
+    /**
+     * The slots that currently have a session, in order — and the tile ORDER on screen.
+     *
+     * Positions come from a tile's place in THIS list, not from its slot number. Laying out by slot
+     * leaves a hole when a lower slot disconnects: the iPhone on tile 0 ending left the grid still
+     * two wide, with its frozen last frame sitting in the empty half while the Mac stayed squeezed
+     * into the other. What should happen is the survivor takes the whole screen.
+     */
+    private var order: List<Int> = listOf(AirPlayReceiver.PRIMARY_SLOT)
 
     init {
         val first = StreamingScreen(context)
@@ -70,7 +78,11 @@ class MultiScreenLayout @JvmOverloads constructor(
 
     private fun ensureTile(slot: Int): StreamingScreen? {
         if (slot !in tiles.indices) return null
-        tiles[slot]?.let { return it }
+        tiles[slot]?.let {
+            // A tile that was parked has no Surface; showing it again is what creates one.
+            if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE
+            return it
+        }
         val tile = StreamingScreen(context)
         tiles[slot] = tile
         addView(tile, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
@@ -98,10 +110,19 @@ class MultiScreenLayout @JvmOverloads constructor(
         for (slot in tiles.indices) {
             if (slot in activeSlots) ensureTile(slot) else removeTile(slot)
         }
-        val highest = (activeSlots.maxOrNull() ?: 0) + 1
-        if (highest != tileCount) {
-            tileCount = highest.coerceIn(1, AirPlayReceiver.MAX_SLOTS)
-            Logger.i("MultiScreenLayout: $tileCount tile(s)")
+
+        // THE PRIMARY IS PERMANENT BUT NOT ALWAYS SHOWN. It cannot be removed — every single-stream
+        // path draws into it — but leaving it visible with no session left the last frame of a
+        // sender that had disconnected frozen on screen next to the one still going. Parking it
+        // clears that, and also releases its Surface, which is correct: nothing is decoding into it.
+        val primaryHasSession = AirPlayReceiver.PRIMARY_SLOT in activeSlots
+        primary.visibility =
+            if (!primaryHasSession && activeSlots.isNotEmpty()) View.INVISIBLE else View.VISIBLE
+
+        val next = activeSlots.sorted().ifEmpty { listOf(AirPlayReceiver.PRIMARY_SLOT) }
+        if (next != order) {
+            order = next
+            Logger.i("MultiScreenLayout: ${next.size} tile(s) — slots ${next.joinToString()}")
         }
         relayoutTiles()
     }
@@ -114,8 +135,8 @@ class MultiScreenLayout @JvmOverloads constructor(
         tiles.forEach { it?.invalidateAspectFit() }
     }
 
-    private fun columns() = if (tileCount <= 1) 1 else 2
-    private fun rows() = if (tileCount <= 2) 1 else 2
+    private fun columns() = if (order.size <= 1) 1 else 2
+    private fun rows() = if (order.size <= 2) 1 else 2
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
@@ -144,8 +165,16 @@ class MultiScreenLayout @JvmOverloads constructor(
 
         tiles.forEachIndexed { slot, tile ->
             tile ?: return@forEachIndexed
-            val col = slot % cols
-            val row = slot / cols
+            // Position by place in `order`, never by slot — see the note there. A tile with no
+            // session is parked over the whole frame; it is INVISIBLE, so this only keeps it laid
+            // out and measured rather than putting anything on screen.
+            val index = order.indexOf(slot)
+            if (index < 0) {
+                tile.layout(0, 0, w, h)
+                return@forEachIndexed
+            }
+            val col = index % cols
+            val row = index / cols
             tile.layout(col * tw, row * th, col * tw + tw, row * th + th)
         }
     }

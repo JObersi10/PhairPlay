@@ -1018,10 +1018,25 @@ class AirPlayReceiver(
      * refused audio and keeps its video — a silent tile, not a failed session.
      */
     private fun startMirrorAudio(slot: Int, sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int): Pair<Int, Int> {
-        val owner = audioOwnerSlot
-        if (owner != null && owner != slot && audioServer != null) {
-            Logger.i("Mirror audio already owned by tile $owner — tile $slot stays video-only")
-            return 0 to 0
+        // THE NEWEST SENDER TO ASK GETS THE SPEAKERS.
+        //
+        // The first version gave them to whoever asked first and refused everyone after. That is a
+        // defensible rule and it produced a dead end: a refused sender never asks again, so once
+        // the iPhone owned audio the Mac was silent for the rest of its session — even after the
+        // iPhone was paused, and even after it disconnected entirely. There is no event that would
+        // have given it another turn.
+        //
+        // Last-wins has no dead end. Connecting a device, or restarting its stream, is a deliberate
+        // act and it is the one thing a user can do to say "I want to hear this one". Safe now only
+        // because the previous server is stopped below rather than abandoned; before that fix this
+        // would have stacked two of them on one AudioTrack.
+        //
+        // Still one audio stream at a time. Mixing N senders is a different feature, and the
+        // per-tile override (highlight a tile, audio follows) is the real answer to "no, the other
+        // one" — this is the sane default underneath it.
+        val previousOwner = audioOwnerSlot
+        if (previousOwner != null && previousOwner != slot) {
+            Logger.i("Audio moving from tile $previousOwner to tile $slot")
         }
         audioOwnerSlot = slot
         val keys = mirrorKeys.getOrNull(slot)
