@@ -271,7 +271,7 @@ class AirPlayReceiver(
     @Volatile private var eventSocket: ServerSocket? = null
     @Volatile private var eventClientSocket: java.net.Socket? = null
     /** Deferred end-of-video, pending a possible renegotiation. See [scheduleMirrorVideoStop]. */
-    @Volatile private var pendingVideoStop: kotlinx.coroutines.Job? = null
+    private val pendingVideoStops = arrayOfNulls<kotlinx.coroutines.Job>(MAX_SLOTS)
 
     /**
      * The event channel's encryption state and output stream, held so the TV remote can *send* on
@@ -286,9 +286,19 @@ class AirPlayReceiver(
     private val eventCseq = java.util.concurrent.atomic.AtomicInteger(1)
     /** MediaRemote commands the current sender said it would accept. Empty until it tells us. */
     @Volatile private var supportedRemoteCommands: Set<Int> = emptySet()
-    @Volatile private var mirrorAesKey: ByteArray? = null
-    @Volatile private var mirrorEcdhSecret: ByteArray? = null
-    @Volatile private var mirrorAesIv: ByteArray? = null
+    /**
+     * The mirroring stream keys, PER SENDER.
+     *
+     * These were three shared fields, and with two senders that is a correctness bug rather than an
+     * inconvenience: the second sender's SETUP overwrote the first's keys, so anything the first
+     * sender negotiated afterwards — pausing and resuming its audio is enough — built a decryptor
+     * with the OTHER device's key. What comes out is not "glitchy audio", it is noise being decoded
+     * as if it were PCM, and there is nothing in the log to say so because every layer did exactly
+     * what it was told.
+     */
+    private class MirrorKeys(val aes: ByteArray, val ecdh: ByteArray, val iv: ByteArray)
+
+    private val mirrorKeys = arrayOfNulls<MirrorKeys>(MAX_SLOTS)
 
     // ─── Now-playing (audio-only) state ──────────────────────────────────────
     // The now-playing card shows only when audio plays WITHOUT video. We track both stream kinds
@@ -556,8 +566,8 @@ class AirPlayReceiver(
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
             onSupportedRemoteCommands = { supportedRemoteCommands = it },
-            onMirrorSetupKeys = { _, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
-                startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
+            onMirrorSetupKeys = { slot, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
+                startMirrorKeys(slot, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
             onMirrorStreamStart = { slot, streamConnectionId -> startMirrorStream(slot, streamConnectionId) },
             onMirrorAudioStart = { slot, sampleRate, channels, ct, spf, latency ->
@@ -869,15 +879,14 @@ class AirPlayReceiver(
     }
 
     private fun startMirrorKeys(
+        slot: Int,
         aesKey: ByteArray,
         ecdhSecret: ByteArray,
         aesIv: ByteArray,
         remoteAddress: java.net.InetAddress,
         senderTimingPort: Int,
     ): Pair<Int, Int> {
-        mirrorAesKey = aesKey
-        mirrorEcdhSecret = ecdhSecret
-        mirrorAesIv = aesIv
+        mirrorKeys[slot.coerceIn(0, MAX_SLOTS - 1)] = MirrorKeys(aesKey, ecdhSecret, aesIv)
         val event = ServerSocket(0)
         eventSocket = event
         // Accept and *answer* on the event connection.
@@ -962,10 +971,15 @@ class AirPlayReceiver(
      */
     private fun startMirrorStream(slot: Int, streamConnectionId: Long): Int {
         // A stream is back: whatever close we were waiting out was a renegotiation, not an ending.
-        pendingVideoStop?.let { it.cancel(); Logger.i("Video stream renegotiated — cancelling pending stop") }
-        pendingVideoStop = null
-        val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
-        val ecdhSecret = mirrorEcdhSecret ?: return 0
+        pendingVideoStops.getOrNull(slot)?.let {
+            it.cancel()
+            Logger.i("Tile $slot renegotiated — cancelling its pending stop")
+        }
+        if (slot in pendingVideoStops.indices) pendingVideoStops[slot] = null
+        val keys = mirrorKeys.getOrNull(slot)
+            ?: run { Logger.e("mirror stream start before keys set (tile $slot)"); return 0 }
+        val aesKey = keys.aes
+        val ecdhSecret = keys.ecdh
         return MirrorStreamServer(
             aesKey, ecdhSecret, streamConnectionId,
             // Each tile draws into its own Surface. With one shared provider two senders decoded
@@ -1010,9 +1024,20 @@ class AirPlayReceiver(
             return 0 to 0
         }
         audioOwnerSlot = slot
-        val aesKey = mirrorAesKey ?: run { Logger.e("audio start before keys set"); return 0 to 0 }
-        val ecdhSecret = mirrorEcdhSecret ?: return 0 to 0
-        val aesIv = mirrorAesIv ?: return 0 to 0
+        val keys = mirrorKeys.getOrNull(slot)
+            ?: run { Logger.e("audio start before keys set (tile $slot)"); return 0 to 0 }
+        val aesKey = keys.aes
+        val ecdhSecret = keys.ecdh
+        val aesIv = keys.iv
+
+        // REPLACE, never stack. This assigned over `audioServer` without stopping what was already
+        // there, so a sender renegotiating its audio — which is what pausing and resuming does —
+        // left the previous server running and un-referenced, with two of them writing into one
+        // AudioTrack. That is audible as the stutter that survives the renegotiation.
+        audioServer?.let {
+            Logger.i("Replacing the audio server for tile $slot")
+            it.stop()
+        }
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
             extraDelayMs = audioDelayMs.toLong(),
@@ -1082,18 +1107,25 @@ class AirPlayReceiver(
      * both into a quit, which is worse than the frozen frame it replaced. Any new mirror stream
      * within the grace window cancels this.
      */
+    /**
+     * Per tile, because the grace period is per sender.
+     *
+     * A single shared job meant a second sender arriving cancelled the first one's pending stop —
+     * so a sender that had genuinely gone away stayed "live" forever, holding its decoder and its
+     * tile, because the timer that would have cleaned it up belonged to someone else.
+     */
     private fun scheduleMirrorVideoStop(slot: Int) {
-        pendingVideoStop?.cancel()
-        pendingVideoStop = scope.launch {
+        pendingVideoStops[slot]?.cancel()
+        pendingVideoStops[slot] = scope.launch {
             delay(MIRROR_RESUME_GRACE_MS)
             Logger.i("No video stream returned within ${MIRROR_RESUME_GRACE_MS}ms — ending video")
             stopMirrorVideo(slot)
+            pendingVideoStops[slot] = null
         }
     }
 
     private fun stopMirrorVideo(slot: Int) {
-        pendingVideoStop?.cancel()
-        pendingVideoStop = null
+        pendingVideoStops.indices.forEach { pendingVideoStops[it]?.cancel(); pendingVideoStops[it] = null }
         // Both a TEARDOWN and the connection ending can land here for one session; the second call
         // has nothing to do and must not re-emit state.
         if (!videoPlaying && mirrorServers[slot] == null) return
@@ -1109,11 +1141,19 @@ class AirPlayReceiver(
         // reads "null while CONNECTED" as "a video session is running", so stopping mirroring on
         // the phone left the TV sitting on a frozen last frame. The RTSP session itself stays up,
         // so an iOS renegotiation re-emits CONNECTED and the picture comes straight back.
-        if (!audioPlaying) {
-            Logger.i("Mirror video stopped and nothing else is playing — session idle")
-            emitState(ProtocolState.ADVERTISING)
-        } else {
-            Logger.i("Mirror video stream stopped (audio playback continues)")
+        // ADVERTISING IS A STATEMENT ABOUT THE WHOLE RECEIVER, not about this tile. Emitting it
+        // because one sender stopped told the service nothing was streaming at all, which dropped
+        // the overlay — and with it the OTHER sender's tile, still mirroring. Ending mirroring on
+        // the iPhone took the Mac's picture with it.
+        val stillMirroring = mirrorServers.any { it != null }
+        when {
+            stillMirroring ->
+                Logger.i("Tile $slot stopped; other tiles still mirroring — staying connected")
+            !audioPlaying -> {
+                Logger.i("Mirror video stopped and nothing else is playing — session idle")
+                emitState(ProtocolState.ADVERTISING)
+            }
+            else -> Logger.i("Mirror video stream stopped (audio playback continues)")
         }
     }
 
@@ -1195,9 +1235,7 @@ class AirPlayReceiver(
         // macOS can re-add a dynamic stream on the same live session without re-sending keys (that
         // dynamic-readd path is why the keys must survive a stream stop). Clearing here prevents a
         // brand-new control connection from reusing a previous session's stale keys.
-        mirrorAesKey = null
-        mirrorEcdhSecret = null
-        mirrorAesIv = null
+        mirrorKeys.indices.forEach { mirrorKeys[it] = null }
         videoDecoder?.release()
         videoDecoder = null
         audioPlayer?.release()
