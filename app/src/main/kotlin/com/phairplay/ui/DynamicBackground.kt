@@ -166,6 +166,11 @@ class DynamicBackground @JvmOverloads constructor(
         super.onDetachedFromWindow()
         t1.cancel(); t2.cancel(); t3.cancel()
         stopFrameLoop()
+        // A 960x540 ARGB_8888 buffer is ~2 MB. The view is detached and reattached every time the
+        // overlay hides, so holding it would be 2 MB kept for a screen nobody is looking at.
+        scratch?.recycle()
+        scratch = null
+        scratchCanvas = null
     }
 
     fun setEnergy(e: Float) {
@@ -306,7 +311,69 @@ class DynamicBackground @JvmOverloads constructor(
         colorAnim.cancel(); colorAnim.start()
     }
 
+    /**
+     * Composites the backdrop into a half-resolution buffer and scales it up.
+     *
+     * Measured on the Fire TV with `dumpsys gfxinfo`: 18 ms median frame, **19–20 ms of it on the
+     * GPU**, 71% of frames janky — while `Slow UI thread` and `Missed Vsync` were both zero. So the
+     * Kotlin costs nothing and the shortfall is pure fill rate: the field is an opaque base plus
+     * four full-screen blobs plus three orbs of two gradients each plus a vignette, every one of
+     * them SCREEN-blended across all 1920x1080. Ten-odd full-screen passes will not fit in 16.6 ms
+     * on this GPU no matter how the loop is scheduled, which is why vsync alignment alone left it
+     * at roughly 50fps.
+     *
+     * Quartering the pixels quarters all of that, at a cost of one bilinear upscale. It is close to
+     * free *visually* because every source here is a wide, soft radial gradient — there is no
+     * high-frequency detail for the half-resolution grid to lose. This is not a trick that would
+     * survive on text or on the artwork; it works because of what this particular view draws.
+     *
+     * The canvas is pre-scaled rather than the geometry, so every coordinate below stays in
+     * full-resolution space and the composition is identical — radii, centres and the vignette all
+     * keep their tuned values instead of needing a second set for the scaled buffer.
+     */
     override fun onDraw(canvas: Canvas) {
+        if (backdropTheme == BackdropTheme.BLACK) {
+            canvas.drawColor(Color.BLACK)
+            return
+        }
+        val w = width
+        val h = height
+        val bw = w / RENDER_DOWNSCALE
+        val bh = h / RENDER_DOWNSCALE
+        // Too small to be worth the indirection (a PiP window is already cheap), or not laid out.
+        if (bw < 16 || bh < 16) {
+            drawBackdrop(canvas)
+            return
+        }
+        var buffer = scratch
+        if (buffer == null || buffer.width != bw || buffer.height != bh) {
+            buffer?.recycle()
+            buffer = runCatching { Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888) }.getOrNull()
+            scratch = buffer
+            scratchCanvas = buffer?.let { Canvas(it) }
+        }
+        val target = scratchCanvas
+        if (buffer == null || target == null) {
+            // Allocation failed — full resolution is slower, not broken. Never skip the frame.
+            drawBackdrop(canvas)
+            return
+        }
+        val save = target.save()
+        target.scale(1f / RENDER_DOWNSCALE, 1f / RENDER_DOWNSCALE)
+        drawBackdrop(target)
+        target.restoreToCount(save)
+
+        upscaleDst.set(0f, 0f, w.toFloat(), h.toFloat())
+        canvas.drawBitmap(buffer, null, upscaleDst, upscalePaint)
+    }
+
+    private var scratch: Bitmap? = null
+    private var scratchCanvas: Canvas? = null
+    private val upscaleDst = android.graphics.RectF()
+    /** FILTER_BITMAP_FLAG is what makes the upscale bilinear rather than blocky. */
+    private val upscalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    private fun drawBackdrop(canvas: Canvas) {
         // Nothing to compose: no palette, no beat, no edge treatment. Just the card on black.
         if (backdropTheme == BackdropTheme.BLACK) {
             canvas.drawColor(Color.BLACK)
@@ -1005,6 +1072,13 @@ class DynamicBackground @JvmOverloads constructor(
          * loop. Keeping the constants in those units means the tuning survives the move to vsync;
          * [decay] converts them to whatever this frame actually cost.
          */
+        /**
+         * Linear scale factor for the offscreen the field is composited into — 2 means quarter the
+         * pixels. See [onDraw]. Raise it only if the GPU still cannot keep up; every step is another
+         * halving of resolution, and the gradients stay smooth long after a photograph would not.
+         */
+        private const val RENDER_DOWNSCALE = 2
+
         private const val REF_FRAME_MS = 33.33f
         /** Redraw interval in a PiP window. Half rate; the levels still advance every vsync. */
         private const val LOW_POWER_FRAME_MS = 50f

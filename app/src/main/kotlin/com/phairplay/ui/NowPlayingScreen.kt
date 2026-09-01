@@ -460,7 +460,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         // sliding around and re-measuring -- which is the compact "glitching" rather than any
         // rendering fault. Ellipsis is the honest treatment at this size: it does not move, and a
         // truncated title in a thumbnail is readable in a way a moving one is not.
-        if (isCompact) {
+        if (scrollingSuppressed()) {
             // Horizontal scrolling has to go, not just the animation. A TextView with
             // setHorizontallyScrolling(true) does not apply ellipsize at all and can still hold a
             // scroll offset, so the "static, truncated" title was neither: it kept whatever offset
@@ -498,7 +498,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         out.addListener(object : android.animation.AnimatorListenerAdapter() {
             override fun onAnimationCancel(animation: android.animation.Animator) { cancelled = true }
             override fun onAnimationEnd(animation: android.animation.Animator) {
-                if (cancelled || isCompact || !view.isAttachedToWindow) return
+                if (cancelled || scrollingSuppressed() || !view.isAttachedToWindow) return
                 scrollAnimators[view] = back
                 back.start()
             }
@@ -509,6 +509,23 @@ class NowPlayingScreen @JvmOverloads constructor(
         scrollAnimators[view] = out
         out.start()
     }
+
+    /**
+     * Whether the marquee should be replaced by an ellipsis rather than animated.
+     *
+     * True in PiP, and true in any MINI_* preset — which is the remaining half of the "glitchy
+     * marquee". Delaying the pass until the transform settles fixed it being sized against the
+     * wrong width; it did not fix what happens afterwards. A mini preset leaves `contentGroup`
+     * scaled by a FRACTIONAL factor for as long as it is on screen, and the scroll is driven by
+     * `scrollTo(Int, 0)` — whole pixels in the view's own space, which the scale then maps onto
+     * fractional device pixels. The rounding lands differently on every frame, so the glyphs
+     * shimmer against each other while the text slides.
+     *
+     * Nothing about the animation can fix that: the text is being resampled, not mis-timed. So take
+     * the same decision the PiP branch already takes for the same reason — at this size a truncated
+     * title is more readable than a moving one, and it does not move, so it cannot shimmer.
+     */
+    private fun scrollingSuppressed(): Boolean = isCompact || layoutPreset != LayoutPreset.FULL
 
     /** Restarts every scroll pass — called when the displayed text changes. */
     private fun restartScrolls() = scrollTrackedViews.forEach { scheduleScroll(it) }
