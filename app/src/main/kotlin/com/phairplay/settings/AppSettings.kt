@@ -213,6 +213,29 @@ data class AppSettings(
     val multiScreen: Boolean = false,
 
     /**
+     * Offer the rolling `dev` prerelease instead of the last tagged release.
+     *
+     * Off by default. The dev channel is republished on every push to `main`, is compared by commit
+     * rather than version, and is exactly as finished as `main` happens to be at that moment.
+     */
+    val betaUpdates: Boolean = false,
+
+    /**
+     * Check for a new build in the background, at most once every few hours.
+     *
+     * CHECKS ONLY. It never downloads and never installs — a sideloaded receiver silently replacing
+     * itself on someone's television is not a thing this app does. The result is a line in Settings,
+     * not a dialog that interrupts a stream.
+     */
+    val autoUpdateCheck: Boolean = true,
+
+    /** When the last automatic check ran, so it does not repeat on every launch. */
+    val lastUpdateCheckAtMs: Long = 0L,
+
+    /** Tag of an update the background check found and the user has not acted on. Blank if none. */
+    val pendingUpdateTag: String = "",
+
+    /**
      * How fast the projector orbs drift around each other: 0 = Slow, 1 = Normal, 2 = Fast.
      *
      * Separate from [beatPulse], which is how hard they react to the music. One is the tempo of the

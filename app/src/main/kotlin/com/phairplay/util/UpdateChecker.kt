@@ -26,6 +26,18 @@ object UpdateChecker {
     /** The repo releases are published from — the user's fork, not the upstream one. */
     private const val RELEASES_URL = "https://api.github.com/repos/JObersi10/PhairPlay/releases/latest"
 
+    /**
+     * The rolling prerelease every push to `main` republishes — the beta channel.
+     *
+     * A SEPARATE endpoint, not a filter on the list, because GitHub deliberately excludes
+     * prereleases from `/releases/latest` and that exclusion is what keeps dev builds away from
+     * people who did not ask for them. Asking for the tag by name is the only way to see it.
+     */
+    private const val DEV_RELEASE_URL = "https://api.github.com/repos/JObersi10/PhairPlay/releases/tags/dev"
+
+    /** Finds the commit SHA CI stamps into the dev release's name. */
+    private val SHA_PATTERN = Regex("\\b[0-9a-f]{7,40}\\b")
+
     sealed interface Result {
         /** A newer release exists. [tag] is what to show; [assetUrl] may be null if none was attached. */
         data class Available(val tag: String, val notes: String, val assetUrl: String?) : Result
@@ -115,4 +127,55 @@ object UpdateChecker {
 
     /** Release notes are shown in a dialog on a TV, so a novel-length body helps nobody. */
     private const val NOTES_LIMIT = 600
+
+    /**
+     * Checks the rolling `dev` prerelease instead of the last tagged release.
+     *
+     * **Compared by COMMIT, not by version.** The dev tag is the literal string `dev` and its
+     * `versionName` is whatever the last real release was, so both halves of the usual comparison
+     * are constant — a numeric check would report "up to date" against every dev build ever
+     * published. CI puts the commit SHA in the release name and this matches it against
+     * [currentSha] (`BuildConfig.GIT_SHA`), which is the only thing that actually differs between
+     * a device's build and the newest one.
+     *
+     * A missing SHA is reported as a failure rather than assumed up to date. That distinction is
+     * the whole lesson of this file: an updater that cannot tell should say so, because a silent
+     * "you are current" is indistinguishable from working and stays wrong forever.
+     */
+    suspend fun checkBeta(currentSha: String, flavor: String): Result = withContext(Dispatchers.IO) {
+        runCatching {
+            val json = JSONObject(fetch(DEV_RELEASE_URL))
+            val name = json.optString("name")
+            val remoteSha = SHA_PATTERN.find(name)?.value
+                ?: return@runCatching Result.Failed(
+                    "The dev release carries no build id — CI has to publish the commit in its name")
+            val notes = json.optString("body").take(NOTES_LIMIT)
+            val asset = pickAsset(json, flavor)
+                ?: return@runCatching Result.Failed("The dev release has no $flavor build attached")
+
+            // Prefix match in both directions: BuildConfig.GIT_SHA is short and the release name
+            // carries the full hash, but a future change to either length should not silently
+            // start reporting every build as new.
+            val same = currentSha.isNotBlank() && currentSha != "unknown" &&
+                (remoteSha.startsWith(currentSha) || currentSha.startsWith(remoteSha))
+            val shortSha = remoteSha.take(7)
+            if (same) Result.UpToDate("dev · $shortSha")
+            else Result.Available("dev · $shortSha", notes, asset)
+        }.getOrElse { Result.Failed(it.message ?: it.javaClass.simpleName) }
+    }
+
+    /** The APK for [flavor], with the same "one unnamed APK is fine, several ambiguous ones are not" rule. */
+    private fun pickAsset(json: JSONObject, flavor: String): String? {
+        val apks = json.optJSONArray("assets")?.let { assets ->
+            (0 until assets.length())
+                .map { assets.getJSONObject(it) }
+                .filter { it.optString("name").endsWith(".apk", ignoreCase = true) }
+        }.orEmpty()
+        val match = apks.firstOrNull { it.optString("name").contains(flavor, ignoreCase = true) }
+        return when {
+            match != null -> match.optString("browser_download_url")
+            apks.size == 1 -> apks[0].optString("browser_download_url")
+            else -> null
+        }
+    }
 }

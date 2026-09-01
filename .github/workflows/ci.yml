@@ -169,7 +169,12 @@ jobs:
         with:
           tag_name: dev
           target_commitish: ${{ github.sha }}
-          name: Latest build
+          # THE SHA IS THE BUILD IDENTITY, and the beta updater depends on it being here.
+          # The tag is the literal string "dev" and never changes, so there is no version number to
+          # compare — a device on the beta channel decides whether it is out of date by matching
+          # this against its own BuildConfig.GIT_SHA. Drop it and every beta device silently
+          # believes it is up to date forever.
+          name: Latest build · ${{ github.sha }}
           body: ${{ steps.notes.outputs.body }}
           prerelease: true
           make_latest: 'false'   # the updater reads /releases/latest; a prerelease must not claim it

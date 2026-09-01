@@ -57,6 +57,9 @@ class SettingsFragment : Fragment() {
     private lateinit var rowHomeKitReset: View
     private lateinit var rowMirrorAudio: View
     private lateinit var rowMultiScreen: View
+    private lateinit var rowBetaUpdates: View
+    /** Cached so the update check does not have to suspend on DataStore to know its channel. */
+    private var betaUpdates = false
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
@@ -127,6 +130,7 @@ class SettingsFragment : Fragment() {
         rowHomeKitReset     = view.findViewById(R.id.row_homekit_reset)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
         rowMultiScreen      = view.findViewById(R.id.row_multi_screen)
+        rowBetaUpdates      = view.findViewById(R.id.row_beta_updates)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
@@ -234,6 +238,7 @@ class SettingsFragment : Fragment() {
         rowHomeKitReset.findViewById<SwitchCompat>(R.id.switch_setting)?.visibility = View.GONE
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
         configureToggleRow(rowMultiScreen,  R.string.setting_multi_screen,       R.string.setting_multi_screen_subtitle)
+        configureToggleRow(rowBetaUpdates,  R.string.setting_beta_updates,       R.string.setting_beta_updates_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
         configureToggleRow(rowRemoteEnabled, R.string.setting_remote,             R.string.setting_remote_subtitle)
@@ -312,6 +317,11 @@ class SettingsFragment : Fragment() {
         renderHomeKitStatus(settings.homeKitEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
         setToggle(rowMultiScreen,  settings.multiScreen)
+        setToggle(rowBetaUpdates,  settings.betaUpdates)
+        // What the background check last found, so a waiting update is visible without pressing
+        // anything. Blank clears it, which is what happens once the check says we are current.
+        textUpdateValue.text = settings.pendingUpdateTag.ifBlank { "" }
+        betaUpdates = settings.betaUpdates
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
@@ -402,6 +412,11 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
         // Restart required: the session capacity is fixed when the RTSP handler is constructed.
         setToggleListener(rowMultiScreen)  { enabled -> saveAndRestart { it.copy(multiScreen = enabled) } }
+        // No restart: this only changes which endpoint the next update check reads.
+        setToggleListener(rowBetaUpdates)  { enabled ->
+            betaUpdates = enabled
+            save { it.copy(betaUpdates = enabled) }
+        }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
@@ -1083,7 +1098,12 @@ class SettingsFragment : Fragment() {
         textUpdateValue.setText(R.string.setting_update_checking)
         rowUpdate.isEnabled = false
         viewLifecycleOwner.lifecycleScope.launch {
-            val result = com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            // The beta channel is compared by COMMIT, the stable one by version — see UpdateChecker.
+            val result = if (betaUpdates) {
+                com.phairplay.util.UpdateChecker.checkBeta(BuildConfig.GIT_SHA, BuildConfig.FLAVOR)
+            } else {
+                com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            }
             rowUpdate.isEnabled = true
             when (result) {
                 is com.phairplay.util.UpdateChecker.Result.UpToDate ->

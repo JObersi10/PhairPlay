@@ -168,6 +168,7 @@ class MainActivity : AppCompatActivity() {
         setupOverlayScreens()
 
         applyNowPlayingSettings()
+        maybeCheckForUpdate()
 
         // Start the service immediately so it's running before any sender discovers us
         ServiceController.start(this)
@@ -669,6 +670,51 @@ class MainActivity : AppCompatActivity() {
             .commit()
     }
 
+    /**
+     * Background update check, at most once per [UPDATE_CHECK_INTERVAL_MS].
+     *
+     * CHECKS AND NOTHING ELSE. It records what it found and stops; downloading and installing stay
+     * behind the button in Settings, because a sideloaded receiver that replaces itself on someone's
+     * television unprompted is not a thing this app should do. The result surfaces as a line in
+     * Settings rather than a dialog, so it can never interrupt a stream.
+     *
+     * A failure is stored as "no update", not surfaced. The manual check is the one that owes the
+     * user an explanation; a background poll that cannot reach GitHub should be silent and try again
+     * later.
+     */
+    private fun maybeCheckForUpdate() {
+        lifecycleScope.launch {
+            val repo = SettingsRepository(this@MainActivity)
+            val settings = repo.settingsFlow.first()
+            if (!settings.autoUpdateCheck) return@launch
+            val since = System.currentTimeMillis() - settings.lastUpdateCheckAtMs
+            if (since in 0 until UPDATE_CHECK_INTERVAL_MS) return@launch
+
+            val result = if (settings.betaUpdates) {
+                com.phairplay.util.UpdateChecker.checkBeta(BuildConfig.GIT_SHA, BuildConfig.FLAVOR)
+            } else {
+                com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            }
+            val tag = when (result) {
+                is com.phairplay.util.UpdateChecker.Result.Available -> {
+                    Logger.i("Update available: ${result.tag}")
+                    result.tag
+                }
+                is com.phairplay.util.UpdateChecker.Result.UpToDate -> {
+                    Logger.i("Update check: up to date (${result.tag})")
+                    ""
+                }
+                is com.phairplay.util.UpdateChecker.Result.Failed -> {
+                    Logger.i("Background update check failed: ${result.reason}")
+                    ""
+                }
+            }
+            repo.update {
+                it.copy(lastUpdateCheckAtMs = System.currentTimeMillis(), pendingUpdateTag = tag)
+            }
+        }
+    }
+
     /** Opens Settings from Home. Back returns, via [onBackPressed]. */
     fun openSettings() {
         if (selectedNavIndex != 1) navigateTo(SettingsFragment())
@@ -1086,6 +1132,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** How often the background check may run. Six hours; a receiver is not a store client. */
+        private const val UPDATE_CHECK_INTERVAL_MS = 6L * 60 * 60 * 1000
         /** How long Menu must be held to open the credits instead of moving the card. */
         private const val MENU_LONG_PRESS_MS = 600L
 
@@ -1345,8 +1393,25 @@ class MainActivity : AppCompatActivity() {
         // a few seconds after every stream that had opened it -- which is every stream started from
         // a phone. That was the old unconditional behaviour wearing a setting's name; if the user
         // has not asked to leave, we do not leave.
-        val leaving = streamEndAction == StreamEndAction.EXIT_APP
-        if (!leaving) return
+        // THE BACK SETTING HAS THE LAST WORD.
+        //
+        // These are two settings answering different questions — what to do when the SENDER
+        // finishes, versus what Back does — and they can contradict each other. A user whose Back
+        // action is "stop the stream and stay" has said plainly that they want to remain in
+        // PhairPlay; honouring "exit on stream end" then quits the app the moment they stop
+        // AirPlay on the phone, which is the same "it still kicks me out" from the other direction.
+        //
+        // Only when BOTH say leave does the app leave. Choosing to stay is the stronger statement:
+        // exiting against it is unrecoverable from the sofa, while staying against it costs one
+        // Home press.
+        val leaving = streamEndAction == StreamEndAction.EXIT_APP &&
+            backAction == BackAction.EXIT_APP
+        if (!leaving) {
+            if (streamEndAction == StreamEndAction.EXIT_APP) {
+                Timber.d("Stream ended: exit-on-end is set, but Back is $backAction — staying")
+            }
+            return
+        }
 
         // Still not instant, and deliberately so. Switching from screen mirroring to AirPlay video
         // tears the first session down and opens a second a beat later; leaving on that gap made

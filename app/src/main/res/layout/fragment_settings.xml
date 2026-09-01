@@ -383,6 +383,13 @@
             android:paddingVertical="@dimen/space_sm" />
 
         <include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_beta_updates"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+
+        <include layout="@layout/settings_toggle_row"
             android:id="@+id/row_multi_screen"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
