@@ -649,6 +649,48 @@
         </LinearLayout>
 
 
+        <LinearLayout
+            android:id="@+id/row_orb_speed"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="@dimen/row_padding_horizontal"
+            android:background="@drawable/row_focus_selector"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_orb_speed"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/text_body" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_orb_speed_subtitle"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/text_secondary" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/text_orb_speed_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_secondary"
+                android:textSize="16sp" />
+        </LinearLayout>
+
+
 
         <include layout="@layout/settings_toggle_row"
             android:id="@+id/row_screensaver"

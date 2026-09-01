@@ -69,6 +69,8 @@ class SettingsFragment : Fragment() {
     private lateinit var textAudioDelaySubtitle: TextView
     private lateinit var rowBeatPulse: LinearLayout
     private lateinit var textBeatPulseValue: TextView
+    private lateinit var rowOrbSpeed: LinearLayout
+    private lateinit var textOrbSpeedValue: TextView
     private lateinit var rowAudioDelay: LinearLayout
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
@@ -136,6 +138,8 @@ class SettingsFragment : Fragment() {
         textAudioDelaySubtitle = view.findViewById(R.id.text_audio_delay_subtitle)
         rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
         textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
+        rowOrbSpeed         = view.findViewById(R.id.row_orb_speed)
+        textOrbSpeedValue   = view.findViewById(R.id.text_orb_speed_value)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
@@ -316,6 +320,7 @@ class SettingsFragment : Fragment() {
         showTrimOutput(settings.currentAudioRoute, settings.currentRouteCompensationMs)
         showAudioBuffer(settings.audioBufferMs)
         showBeatPulse(settings.beatPulse)
+        showOrbSpeed(settings.orbSpeed)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
@@ -404,6 +409,7 @@ class SettingsFragment : Fragment() {
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowAudioBuffer.setOnClickListener { pickAudioBuffer() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
+        rowOrbSpeed.setOnClickListener { pickOrbSpeed() }
         // Restart, not a plain save: the resolution is baked into the /info response and the mirror
         // video server at receiver startup, so a plain save left the toggle looking broken — it
         // flipped in the UI and nothing changed until the service happened to restart later.
@@ -541,6 +547,27 @@ class SettingsFragment : Fragment() {
     })
 
     private fun showBeatPulse(level: Int) { textBeatPulseValue.text = beatPulseLabel(level) }
+
+    private fun orbSpeedLabel(level: Int): String = getString(when (level) {
+        0 -> R.string.setting_orb_speed_slow
+        2 -> R.string.setting_orb_speed_fast
+        else -> R.string.setting_orb_speed_normal
+    })
+
+    private fun showOrbSpeed(level: Int) { textOrbSpeedValue.text = orbSpeedLabel(level) }
+
+    private fun pickOrbSpeed() {
+        val labels = arrayOf(orbSpeedLabel(0), orbSpeedLabel(1), orbSpeedLabel(2))
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_orb_speed)
+            .setItems(labels) { _, which ->
+                save { it.copy(orbSpeed = which) }
+                showOrbSpeed(which)
+                Logger.i("Orb speed set to ${orbSpeedLabel(which)}")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
 
     private fun pickBeatPulse() {
         val labels = arrayOf(beatPulseLabel(0), beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))

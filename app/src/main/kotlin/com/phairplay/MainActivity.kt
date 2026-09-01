@@ -112,6 +112,11 @@ class MainActivity : AppCompatActivity() {
     // True when PhairPlayService auto-opened us for an incoming sender, so we know to hand the
     // screen back when that session ends. A manual launch leaves this false.
     private var openedBySender = false
+    /**
+     * Set when Back ended the session with action=STOP_STREAM, so the stream-end action skips the
+     * exit exactly once. See [onBackPressed].
+     */
+    private var stopRequestedByUser = false
 
     /** Cached from settings — the session-end path is synchronous and cannot await DataStore. */
     private var streamEndAction = com.phairplay.settings.StreamEndAction.STAY_IN_APP
@@ -454,6 +459,21 @@ class MainActivity : AppCompatActivity() {
                     // user is deliberately here and stopping the stream — so leaving anyway a few
                     // seconds later read as the app quitting on its own.
                     openedBySender = false
+                    // AND SUPPRESS THE STREAM-END ACTION FOR THIS ONE STOP.
+                    //
+                    // Two different settings were fighting. Back=STOP_STREAM ends the session, and
+                    // ending a session runs the stream-end handler, which leaves the app when
+                    // "when the stream ends" is set to Exit — so Back stopped the stream and then
+                    // quit anyway, which is precisely what STOP_STREAM exists not to do. Setting
+                    // openedBySender was supposed to cover this, but the leaving decision stopped
+                    // consulting it when STAY_IN_APP became a real setting, so that line had been
+                    // doing nothing.
+                    //
+                    // The two questions are genuinely different: "what should happen when the
+                    // SENDER finishes" versus "what should happen when I press Back". Someone
+                    // pressing Back is standing in front of the TV and has just said where they
+                    // want to be, so the sender-finished rule does not get to override them.
+                    stopRequestedByUser = true
                     service?.endCurrentSession()
                 }
             }
@@ -955,6 +975,7 @@ class MainActivity : AppCompatActivity() {
                 pipEnabled = settings.pipEnabled
                 refreshPipParams()
                 nowPlayingScreen.setBeatPulse(settings.beatPulse)
+                nowPlayingScreen.setOrbSpeed(settings.orbSpeed)
                 nowPlayingScreen.setBackdropTheme(settings.backdropTheme)
                 // Cached for the same reason as backAction: the session-end path is synchronous.
                 streamEndAction = settings.streamEndAction
@@ -1239,12 +1260,25 @@ class MainActivity : AppCompatActivity() {
     private fun trackSessionEnd(sessionActive: Boolean) {
         if (sessionActive) {
             hadActiveSession = true
+            // A new session clears the flag: it belongs to the stop the user just asked for, not to
+            // whatever the next sender does.
+            stopRequestedByUser = false
             // A session started (or restarted) — cancel any pending exit.
             sessionEndHandler.removeCallbacks(returnToPreviousApp)
             return
         }
         if (!hadActiveSession) return
         hadActiveSession = false
+
+        // The user ended this one themselves with Back, having chosen "stop the stream" — so they
+        // asked to stay. The stream-end action answers a different question (what to do when the
+        // SENDER finishes) and must not override an explicit instruction. See [onBackPressed].
+        if (stopRequestedByUser) {
+            stopRequestedByUser = false
+            Timber.d("Stream ended by user request — staying put, ignoring streamEndAction")
+            sessionEndHandler.removeCallbacks(returnToPreviousApp)
+            return
+        }
 
         // Leaving used to require openedBySender, so a manual launch sat on the waiting screen
         // forever after the stream ended. That is now the STAY_IN_APP setting rather than an

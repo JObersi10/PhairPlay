@@ -203,6 +203,15 @@ data class AppSettings(
     val beatPulse: Int = 0,
 
     /**
+     * How fast the projector orbs drift around each other: 0 = Slow, 1 = Normal, 2 = Fast.
+     *
+     * Separate from [beatPulse], which is how hard they react to the music. One is the tempo of the
+     * composition and the other is its amplitude, and wanting big lazy orbs (or small frantic ones)
+     * is a perfectly ordinary preference that a single dial cannot express.
+     */
+    val orbSpeed: Int = 1,
+
+    /**
      * Name of the output currently playing, or blank before the first detection.
      *
      * Runtime state in a persisted store, which is a fair objection — but Settings has to be able to

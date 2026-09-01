@@ -1128,6 +1128,9 @@ class NowPlayingScreen @JvmOverloads constructor(
         dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
     }
 
+    /** Orb drift speed from Settings: 0 Slow, 1 Normal, 2 Fast. */
+    fun setOrbSpeed(level: Int) { dynamicBg.setOrbSpeed(level) }
+
     /** What fills the screen behind the card — see [DynamicBackground.setTheme]. */
     fun setBackdropTheme(theme: BackdropTheme) {
         if (backdropTheme == theme) return

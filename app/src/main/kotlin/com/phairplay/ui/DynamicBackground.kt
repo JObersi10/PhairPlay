@@ -47,9 +47,9 @@ class DynamicBackground @JvmOverloads constructor(
     private var energyTarget = 0f
 
     // 3 prime-period animators 0→1 REVERSE
-    private val t1 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 20_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
-    private val t2 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 27_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
-    private val t3 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 34_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t1 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[0]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t2 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[1]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t3 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[2]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
 
     private val colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 1500
@@ -487,6 +487,39 @@ class DynamicBackground @JvmOverloads constructor(
 
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
     fun setBeatMultiplier(m: Float) { beatMultiplier = m }
+
+    /**
+     * How fast the orbs travel their ellipses: 0 = Slow, 1 = Normal, 2 = Fast.
+     *
+     * Applied by rescaling the three orbit animators' durations rather than by multiplying their
+     * output, because their PERIODS are deliberately co-prime (20/27/34s) — that is what stops the
+     * composition repeating. Scaling all three by the same factor keeps them co-prime; scaling the
+     * values instead would have wrapped them against each other and produced a visible cycle.
+     *
+     * The current position is preserved across the change so the orbs do not jump when the setting
+     * is touched mid-track.
+     */
+    fun setOrbSpeed(level: Int) {
+        val factor = when (level) {
+            0 -> 0.6f
+            2 -> 1.7f
+            else -> 1f
+        }
+        if (factor == orbSpeedFactor) return
+        orbSpeedFactor = factor
+        listOf(t1 to ORBIT_MS[0], t2 to ORBIT_MS[1], t3 to ORBIT_MS[2]).forEach { (anim, base) ->
+            val wasRunning = anim.isStarted
+            val at = anim.animatedFraction
+            anim.cancel()
+            anim.duration = (base / factor).toLong().coerceAtLeast(1_000L)
+            if (wasRunning) {
+                anim.start()
+                anim.currentPlayTime = (anim.duration * at).toLong()
+            }
+        }
+    }
+
+    @Volatile private var orbSpeedFactor = 1f
 
 
     /**
@@ -991,7 +1024,12 @@ class DynamicBackground @JvmOverloads constructor(
         // every peak and simply stopped growing -- a big orb that never changed size, which is
         // exactly the "bass and vocals are maxed, only treble moves" report. The clamp is a safety
         // net for odd window shapes; when it is doing the work on a 16:9 TV, the radii are wrong.
-        private val ORB_BASE_RADIUS = floatArrayOf(0.20f, 0.165f, 0.13f)
+        // Trimmed again when the orbits were widened to 0.08 vertically. The clamp rule is
+        // anchor - orbit - radius >= margin, so every unit of extra travel has to come out of the
+        // radius: at 0.20 the bass orb's fully-swollen 0.324 of the short side would have exceeded
+        // the 0.29 of room left at the top of its new orbit and started clamping on peaks again --
+        // the same "big orb that never changes size" this line was written to fix.
+        private val ORB_BASE_RADIUS = floatArrayOf(0.17f, 0.145f, 0.115f)
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -1006,15 +1044,32 @@ class DynamicBackground @JvmOverloads constructor(
          * still clears the [ORB_EDGE_MARGIN] on every side without the clamp ever engaging. Vertical
          * is the binding axis on a wide screen, which is why ORB_Y is the tighter of the two.
          */
-        // Left orb pulled in from 0.34: at 16:9 that anchor plus its orbit put it noticeably closer
-        // to the left edge than the right orb was to the right one, so the trio sat off-centre. 0.42
-        // makes the group symmetric about the middle.
-        private val ORB_X = floatArrayOf(0.42f, 0.54f, 0.66f)
-        private val ORB_Y = floatArrayOf(0.46f, 0.54f, 0.48f)
+        // MOVED RIGHT, AND OFF ONE LINE.
+        //
+        // Two problems with the old 0.42/0.54/0.66 on 0.46/0.54/0.48. First, the album art occupies
+        // roughly the left 43% of the screen, and the first orb's anchor of 0.42 put its CENTRE
+        // behind the tile — the brightest part of the orb was the part you could not see. Second,
+        // three anchors within 0.08 of each other vertically is effectively a straight horizontal
+        // line, so the orbs could only ever pass side-to-side through one another and spent much of
+        // the cycle piled up in the middle.
+        //
+        // Now every centre sits clear of the artwork's right edge, and the three are spread over
+        // 0.20 of the height so they orbit past each other from genuinely different directions.
+        // Halos still bleed left across the tile, which is wanted — light spilling behind the cover
+        // is the effect; a bright core hidden behind it is not.
+        private val ORB_X = floatArrayOf(0.54f, 0.66f, 0.74f)
+        private val ORB_Y = floatArrayOf(0.42f, 0.60f, 0.46f)
 
-        /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */
-        private const val ORB_DRIFT_X = 0.09f
-        private const val ORB_DRIFT_Y = 0.04f
+        /**
+         * Orbit amplitude. Vertical was 0.04 — barely a wobble, and the reason the trio read as
+         * sliding left and right rather than moving around each other.
+         *
+         * The ceiling on this is [ORB_BASE_RADIUS]: anchor + orbit + a fully swollen radius has to
+         * stay inside [ORB_EDGE_MARGIN], and on 16:9 the height is what binds. Giving the orbs more
+         * room to travel therefore meant making them slightly smaller, which is the trade below.
+         */
+        private const val ORB_DRIFT_X = 0.08f
+        private const val ORB_DRIFT_Y = 0.08f
 
         /**
          * How far an orb's colour travels toward its neighbour's over one animator cycle. Enough to
@@ -1039,6 +1094,13 @@ class DynamicBackground @JvmOverloads constructor(
          * loop. Keeping the constants in those units means the tuning survives the move to vsync;
          * [decay] converts them to whatever this frame actually cost.
          */
+        /**
+         * Orbit periods at Normal speed. Co-prime on purpose: 20/27/34 seconds do not line up
+         * again for long enough that the composition never visibly repeats. [setOrbSpeed] scales
+         * all three by one factor, which preserves that property.
+         */
+        private val ORBIT_MS = longArrayOf(20_000L, 27_000L, 34_000L)
+
         private const val REF_FRAME_MS = 33.33f
         /**
          * Vsyncs per drawn frame. 2 = an exactly even 30fps on a 60Hz panel. See the note in the

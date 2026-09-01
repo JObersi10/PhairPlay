@@ -700,7 +700,12 @@ class AudioStreamServer(
             val base = bandBase[b].coerceAtLeast(BAND_BASE_FLOOR)
             // Headroom matters. Divide by a tight ceiling and ordinary hits clip flat at 1 again,
             // which is the very thing the baseline was introduced to stop.
-            val swell = ((raw[b] / base) - 1.0).coerceIn(0.0, BAND_EXCESS_MAX) / BAND_EXCESS_MAX
+            // PER BAND, not one figure for all three. Bass swings hardest above its own baseline, so
+            // it needs headroom to avoid pinning; treble and vocals move far less and were being
+            // asked to clear the same bar, which left both of them dim on material that plainly had
+            // cymbals and singing in it.
+            val excessMax = BAND_EXCESS_MAX[b]
+            val swell = ((raw[b] / base) - 1.0).coerceIn(0.0, excessMax) / excessMax
             // ASYMMETRIC reference peak: jump straight to a new loudest, fall away very slowly.
             //
             // A symmetric decay makes the AGC fight itself. A transient sets a high reference, the
@@ -1259,13 +1264,30 @@ class AudioStreamServer(
          * is the pinned look this whole scheme exists to avoid; a bit over 1.0 puts normal hits in
          * the middle of the range and leaves the top for the genuinely big ones.
          */
-        private const val BAND_EXCESS_MAX = 1.1
+        private val BAND_EXCESS_MAX = doubleArrayOf(1.15, 0.85, 0.62)
 
-        /** How much of the vocal band's absolute presence counts, before swell is added on top. */
-        private const val BAND_PRESENCE_WEIGHT = 0.40
+        /**
+         * How much of the vocal band's absolute presence counts, before swell is added on top.
+         *
+         * **This was 0.40, and at 0.40 the presence term could not do anything.** The vocal level is
+         * `max(swell, gated * WEIGHT)`, and `swell` reaches a full 1.0 on any hit — so a term capped
+         * at 0.40 loses that comparison every single time the music has a beat, which is always. The
+         * vocal orb was therefore driven by swell alone: it tracked the rhythm and stayed dark
+         * through held notes, which is the opposite of what an orb watching the singer is for.
+         *
+         * At 0.9 a strong, sustained centre vocal can carry the orb on its own, and the beat swell
+         * still wins on the hits, which is the intended "lit while singing, brighter on the beat".
+         */
+        private const val BAND_PRESENCE_WEIGHT = 0.90
 
-        /** How loud centre content has to be, against the band's own peak, before it counts at all. */
-        private const val BAND_PRESENCE_GATE = 0.55
+        /**
+         * How loud centre content has to be, against the band's own peak, before it counts at all.
+         *
+         * 0.55 asked the voice to reach 55% of its own recent peak before the orb registered
+         * anything, which most of a sung phrase never does — only the belted notes cleared it. The
+         * gate is meant to reject room tone and bleed, not ordinary singing.
+         */
+        private const val BAND_PRESENCE_GATE = 0.35
 
         /**
          * Vocal band-pass corners.

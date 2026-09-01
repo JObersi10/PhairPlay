@@ -141,6 +141,11 @@
     <string name="setting_beat_pulse_normal">Normal</string>
     <string name="setting_beat_pulse_strong">Strong</string>
     <string name="setting_beat_pulse_insane">Insane</string>
+    <string name="setting_orb_speed">Orb speed</string>
+    <string name="setting_orb_speed_subtitle">How fast the projector orbs drift around each other</string>
+    <string name="setting_orb_speed_slow">Slow</string>
+    <string name="setting_orb_speed_normal">Normal</string>
+    <string name="setting_orb_speed_fast">Fast</string>
     <string name="setting_audio_delay">Audio delay</string>
     <string name="setting_audio_delay_none">None</string>
     <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>

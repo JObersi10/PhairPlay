@@ -159,9 +159,33 @@ class MirrorControls @JvmOverloads constructor(
         val wasHidden = visibility != VISIBLE
         visibility = VISIBLE
         bringToFront()
-        // GONE views have no layout, so a requestFocus in the same frame as the reveal is
-        // dropped — which is what left the bar visible with nothing highlighted.
-        if (wasHidden) post { stopButton.requestFocus() }
+        // SLIDE UP FROM THE BOTTOM EDGE rather than appearing all at once.
+        //
+        // The bar lives at the bottom of the screen, so that is the direction it should arrive
+        // from — a panel that snaps into existence gives no sense of where it came from, and the
+        // matching exit in [hideBar] is what makes it read as one object going away and coming
+        // back rather than two unrelated events. Enter and exit share the path deliberately.
+        //
+        // A GONE view has no height yet on the frame it is revealed, so the travel distance is
+        // measured after layout; falling back to the resting position means a first reveal that
+        // races the measure is merely un-animated, never invisible.
+        if (wasHidden) {
+            animate().cancel()
+            alpha = 0f
+            post {
+                translationY = (height.takeIf { it > 0 } ?: 0).toFloat()
+                animate()
+                    .translationY(0f).alpha(1f)
+                    .setDuration(REVEAL_MS)
+                    // Critically damped: the bar is arriving because a key was pressed, not because
+                    // it was thrown, so there is no momentum for an overshoot to express.
+                    .setInterpolator(SETTLE)
+                    .start()
+                // GONE views have no layout, so a requestFocus in the same frame as the reveal is
+                // dropped — which is what left the bar visible with nothing highlighted.
+                stopButton.requestFocus()
+            }
+        }
         scheduleAutoHide()
         return wasHidden
     }
@@ -173,7 +197,21 @@ class MirrorControls @JvmOverloads constructor(
     fun hideBar(): Boolean {
         cancelAutoHide()
         if (visibility != VISIBLE) return false
-        visibility = GONE
+        // Back out the way it came in. GONE is set at the END, not now: setting it here would kill
+        // the animation before its first frame and the bar would vanish exactly as abruptly as it
+        // used to appear.
+        animate().cancel()
+        animate()
+            .translationY((height.takeIf { it > 0 } ?: 0).toFloat()).alpha(0f)
+            .setDuration(HIDE_MS)
+            .setInterpolator(SETTLE)
+            .withEndAction {
+                visibility = GONE
+                // Reset for the next reveal, which starts by reading these.
+                translationY = 0f
+                alpha = 1f
+            }
+            .start()
         return true
     }
 
@@ -205,6 +243,17 @@ class MirrorControls @JvmOverloads constructor(
 
         /** Focused buttons grow slightly — the standard Android TV affordance. */
         const val FOCUS_SCALE = 1.08f
+
+        /** Slide-in / slide-out durations for the bar. Out is quicker: leaving needs no ceremony. */
+        const val REVEAL_MS = 260L
+        const val HIDE_MS = 180L
+
+        /**
+         * Critically damped settle — decelerates into place with no overshoot. The bar is arriving
+         * because a key was pressed, not because it was flicked, so there is no momentum for a
+         * bounce to represent.
+         */
+        val SETTLE = androidx.core.view.animation.PathInterpolatorCompat.create(0.2f, 0f, 0f, 1f)
         const val FOCUS_ANIM_MS = 120L
     }
 }
