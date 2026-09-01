@@ -64,7 +64,7 @@ permanent, not a workaround to remove later.
 
 ## Device
 
-- Fire TV at `192.168.0.11:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
+- Fire TV at `192.168.1.246:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**, 1920x1080 at density 320 — so the layout canvas is **960x540dp**, which is far less room than most TV layouts assume
 - App ID `com.phairplay.firetv`
 - The SABRENT drive must be mounted first
 - Install with `adb install -r`. **Do not** `am start` afterwards — that is what
@@ -74,11 +74,48 @@ permanent, not a workaround to remove later.
 
 ## Diagnostics
 
-`curl -s http://192.168.0.11:8001/` — full dump. `:8002` — streaming tail.
+`curl -s http://192.168.1.246:8001/` — full dump. `:8002` — streaming tail. The dump now leads with the build SHA and the current audio route, re-derived per request (`DiagnosticServer.statusProvider`), because both used to scroll out of the ring buffer before anyone read it.
 
 The buffer only holds events since the app last started, and it is small. To
 capture something, reproduce **first**, then curl. An empty `grep` usually means
 the event never happened, not that the server is broken.
+
+## Licensing — the repo is GPL-3.0
+
+`app/src/main/cpp/playfair/` is EstebanKubata's PlayFair, obtained via RPiPlay, and it is
+**GPL-3.0**. It is compiled into `libplayfair.so` and distributed, so the whole work is
+GPL-3.0-or-later. The `LICENSE` file used to be Apache-2.0 (inherited byte-for-byte from the
+mazer666/PhairPlay upstream, which ships the same sources) and that was not a license the bundled
+code permits. Apache-2.0 is one-way compatible *into* GPLv3, so Apple's ALAC decoder keeps its own
+Apache-2.0 headers inside the GPLv3 work.
+
+Attribution lives in `THIRD_PARTY_NOTICES.md`. The PlayFair sources carry no upstream copyright
+header, so a provenance notice was added to each — do not strip them.
+
+## UI
+
+Views are plain `View`/`FrameLayout`, not Compose. There is a real design system now; use it rather
+than inventing numbers:
+
+- `values/dimens.xml` — the spacing and type scale. Everything picks from it.
+- `drawable/row_focus_selector.xml` — full-width list rows. `card_focus_selector.xml` — tiles.
+- `ui/FocusMotion.kt` — the focus lift. **`attach` scales, `attachFlat` does not.** Use `attachFlat`
+  for anything full-width: scaling a full-width row pushes its edges past the scroller, which clips
+  them, and the focused row then looks like the one that is cut off. `attach` unclips the whole
+  ancestor chain for the same reason.
+- `ui/ReceiverFieldView.kt` — the receiver motif on Home. Cached paints, one handler tick, stops on
+  detach. It reports **no intrinsic size**: as a `match_parent` child of a `wrap_content` parent the
+  default measurement claimed the entire screen and pushed everything else off the bottom.
+- `ui/ProtocolCardAnimator.kt` — animates card state transitions instead of swapping text.
+- `ui/Motion.kt` — reduced motion. Android has no `prefers-reduced-motion`; the signal is
+  `ANIMATOR_DURATION_SCALE`. ObjectAnimator/ViewPropertyAnimator honour it automatically, but a
+  hand-driven Handler loop does not, so check `Motion.animationsEnabled` in any custom loop.
+
+**Settings is one continuous scroller**; the left column jumps to a section, it does not swap panes.
+Every row keeps the id it had when the screen was a flat ScrollView, so `SettingsFragment`'s binding
+survives a re-layout. `docs/SETTINGS.md` documents every setting.
+
+The permanent Home/Settings nav panel is gone — Settings is a button on Home, Back returns.
 
 ## Architecture
 
@@ -353,4 +390,13 @@ behaviour that demonstrably broke iOS, and were rewritten.
   surprising. The exFAT zeroing and the volume permission both needed it
 - Installing to the device is expected. Verify on-device rather than asking the
   user to check, and say plainly when something is still unverified
-- Never `am start` after install; never `pm clear` without saying so first
+- Never `am start` *as part of an install*. The user has since granted standing permission to drive
+  the Fire TV — launching (`monkey -p ... -c android.intent.category.LEANBACK_LAUNCHER 1`), key
+  injection and `exec-out screencap` are all fine for verifying a change. Say when you do it.
+- Never `pm clear` without saying so first
+- The SABRENT drive is often **attached but not mounted** after a reconnect: `diskutil list external`
+  shows it, `/Volumes` does not. `diskutil mount disk4s2` fixes it. Without it the wrapper fails with
+  "JAVA_HOME is set to an invalid directory", which reads like a config error and is not one.
+- `~/.gradle/caches` accumulates whole Gradle versions from *other* projects on this machine (Apple
+  Music TV). It reached 12 GB with 8.5 GB of it a version this project cannot use. Only `8.7` and the
+  matching wrapper dist are needed here.
