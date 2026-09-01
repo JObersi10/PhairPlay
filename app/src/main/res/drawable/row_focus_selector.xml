@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    row_focus_selector.xml — background for a settings/list row.
+
+    Why this exists alongside focus_ring_selector: that one gives every row a raised card
+    background whether or not it is focused, so a screen of thirty rows reads as thirty separate
+    boxes and the focused one has to compete with all of them. Here an unfocused row is
+    transparent, and focus is the only thing that draws a surface. The eye goes straight to it.
+
+    Focus is signalled three ways on purpose, because a TV may be viewed in a bright room, at an
+    angle, or by someone who cannot easily separate blue from grey:
+      1. a filled surface appears,
+      2. an accent ring is drawn around it,
+      3. the row lifts (elevation, set on the view).
+    Colour alone is never the only cue.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <solid android:color="@color/row_focused" />
+                    <corners android:radius="@dimen/row_corner_radius" />
+                </shape>
+            </item>
+            <item android:inset="@dimen/focus_ring_inset">
+                <shape android:shape="rectangle">
+                    <stroke
+                        android:width="@dimen/focus_ring_width"
+                        android:color="@color/focus_ring" />
+                    <corners android:radius="@dimen/row_corner_radius" />
+                    <solid android:color="@android:color/transparent" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+
+    <!-- Pressed but not focused: happens on a touch device (tablets get a launcher icon too). -->
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/row_pressed" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+    <!-- A row that is selected but has lost focus to another pane: keep a quiet marker so the
+         user can still see where they were when focus moves to the category list. -->
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/row_selected_unfocused" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+</selector>

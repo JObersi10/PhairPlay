@@ -46,14 +46,6 @@ class SettingsFragment : Fragment() {
     private lateinit var settingsRepository: SettingsRepository
 
     // Section header TextViews — set via include layout tag IDs
-    private lateinit var headerDisplay: TextView
-    private lateinit var headerProtocols: TextView
-    private lateinit var headerAirPlay: TextView
-    private lateinit var headerNowPlaying: TextView
-    private lateinit var headerService: TextView
-    private lateinit var headerDeveloper: TextView
-    private lateinit var headerAbout: TextView
-    private lateinit var headerPermissions: TextView
 
     // Settings rows
     private lateinit var rowDisplayName: LinearLayout
@@ -111,25 +103,17 @@ class SettingsFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         settingsRepository = SettingsRepository(requireContext())
         bindViews(view)
-        setSectionTitles()
         setRowLabels()
         loadAndPopulate()
     }
 
+    private lateinit var paneTitle: TextView
+    private lateinit var categories: List<Category>
+
     // ─── View Binding ────────────────────────────────────────────────────────
 
     private fun bindViews(view: View) {
-        // Each header is an <include> of settings_section_header.xml (a bare
-        // TextView). The include's android:id IS the TextView's id, so look it up
-        // directly — no nested lookup.
-        headerDisplay   = view.findViewById(R.id.header_display)
-        headerProtocols = view.findViewById(R.id.header_protocols)
-        headerPermissions = view.findViewById(R.id.header_permissions)
-        headerAirPlay   = view.findViewById(R.id.header_airplay)
-        headerNowPlaying = view.findViewById(R.id.header_now_playing)
-        headerService   = view.findViewById(R.id.header_service)
-        headerDeveloper = view.findViewById(R.id.header_developer)
-        headerAbout     = view.findViewById(R.id.header_about)
+        bindCategories(view)
 
         rowDisplayName      = view.findViewById(R.id.row_display_name)
         textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
@@ -180,17 +164,44 @@ class SettingsFragment : Fragment() {
         rowQuit             = view.findViewById(R.id.row_quit)
     }
 
-    /** Sets all section header titles from string resources. */
-    private fun setSectionTitles() {
-        headerDisplay.setText(R.string.settings_section_display)
-        headerProtocols.setText(R.string.settings_section_protocols)
-        headerAirPlay.setText(R.string.settings_section_airplay)
-        headerNowPlaying.setText(R.string.settings_section_now_playing)
-        headerService.setText(R.string.settings_section_service)
-        headerDeveloper.setText(R.string.settings_section_developer)
-        headerAbout.setText(R.string.settings_section_about)
-        headerPermissions.setText(R.string.settings_section_permissions)
+    /**
+     * Wires the left-hand category list to the right-hand panes.
+     *
+     * Focus, not clicks, drives the selection: on a remote you arrive at a category by moving onto
+     * it, and requiring a second press of OK to see what is inside it is a press that buys nothing.
+     * Moving RIGHT then enters the rows, and LEFT comes back.
+     */
+    private fun bindCategories(view: View) {
+        paneTitle = view.findViewById(R.id.settings_pane_title)
+        categories = CATEGORY_IDS.map { (navId, paneId, titleRes) ->
+            Category(view.findViewById(navId), view.findViewById(paneId), titleRes)
+        }
+        categories.forEach { category ->
+            category.nav.setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) select(category)
+            }
+            // OK on a category moves into its rows rather than doing nothing.
+            category.nav.setOnClickListener {
+                select(category)
+                category.pane.getChildAt(0)?.requestFocus()
+            }
+        }
+        categories.firstOrNull()?.let { select(it); it.nav.requestFocus() }
     }
+
+    private fun select(category: Category) {
+        categories.forEach {
+            val chosen = it === category
+            it.pane.visibility = if (chosen) View.VISIBLE else View.GONE
+            // Keeps a marker on the category you came from once focus moves into the rows, so the
+            // screen never shows nothing as current.
+            it.nav.isSelected = chosen
+        }
+        paneTitle.setText(category.titleRes)
+    }
+
+    private data class Category(val nav: View, val pane: ViewGroup, val titleRes: Int)
+
 
     /** Sets all row labels and subtitles from string resources. */
     private fun setRowLabels() {
@@ -839,6 +850,17 @@ class SettingsFragment : Fragment() {
     }
 
     private companion object {
+        /** Left-hand list order: nav item, the pane it reveals, and the pane's title. */
+        val CATEGORY_IDS = listOf(
+            Triple(R.id.cat_general,     R.id.pane_general,     R.string.settings_cat_general),
+            Triple(R.id.cat_protocols,   R.id.pane_protocols,   R.string.settings_cat_protocols),
+            Triple(R.id.cat_av,          R.id.pane_av,          R.string.settings_cat_av),
+            Triple(R.id.cat_nowplaying,  R.id.pane_nowplaying,  R.string.settings_cat_nowplaying),
+            Triple(R.id.cat_pairing,     R.id.pane_pairing,     R.string.settings_cat_pairing),
+            Triple(R.id.cat_permissions, R.id.pane_permissions, R.string.settings_cat_permissions),
+            Triple(R.id.cat_about,       R.id.pane_about,       R.string.settings_cat_about),
+        )
+
         val SCREENSAVER_TIMEOUT_CHOICES = listOf(1, 2, 5, 10, 15, 30, 60)
 
         /** A/V sync trim options, in milliseconds added to the sender's requested latency. */

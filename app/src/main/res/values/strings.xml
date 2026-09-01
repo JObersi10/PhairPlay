@@ -319,4 +319,14 @@
     <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nEven once granted, expect the remote to be unresponsive or to skip around on the Fire TV home screen and in apps like Netflix. Fire TV blocks the way apps normally move the selection, so PhairPlay has to fake it with a drawn highlight and synthetic swipes. Inside PhairPlay the remote works properly. A rooted Fire TV can inject real button presses and is the only way to get this working everywhere.</string>
     <string name="setting_perm_sleep_explanation">Lets PhairPlay blank the display when you turn it off from the Home app. Nothing else uses this.</string>
     <string name="setting_perm_no_screen">This Fire TV has no screen for that permission. Grant it from a computer instead:\n\n%1$s</string>
+
+    <!-- Settings categories (left pane). These replaced the old settings_section_* headers:
+         the category name now labels the pane, so a separate in-pane header repeated it. -->
+    <string name="settings_cat_general">General</string>
+    <string name="settings_cat_protocols">Protocols</string>
+    <string name="settings_cat_av">Audio &amp; video</string>
+    <string name="settings_cat_nowplaying">Now Playing</string>
+    <string name="settings_cat_pairing">Pairing &amp; security</string>
+    <string name="settings_cat_permissions">Permissions</string>
+    <string name="settings_cat_about">About</string>
 </resources>
