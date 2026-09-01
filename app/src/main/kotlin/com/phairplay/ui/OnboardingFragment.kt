@@ -118,7 +118,9 @@ class OnboardingFragment : Fragment() {
 
     private fun buildRoot(ctx: Context): View {
         val scroll = ScrollView(ctx).apply {
-            setBackgroundColor(ContextCompat.getColor(ctx, R.color.background_dark))
+            // Same page as the rest of the app rather than a flat fill, so first-run does not
+            // look like a different product from the screen it hands off to.
+            setBackgroundResource(R.drawable.app_background)
             isFillViewport = true
         }
         val root = LinearLayout(ctx).apply {

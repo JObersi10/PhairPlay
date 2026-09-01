@@ -866,6 +866,7 @@ class SettingsFragment : Fragment() {
             R.id.cat_nowplaying   to R.id.section_nowplaying,
             R.id.cat_remote       to R.id.section_remote,
             R.id.cat_system       to R.id.section_system,
+            R.id.cat_permissions  to R.id.section_permissions,
             R.id.cat_about        to R.id.section_about,
         )
 

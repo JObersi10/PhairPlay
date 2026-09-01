@@ -133,3 +133,28 @@ Note the interaction with the `srcvers` change above: `350.0` is what buys DACP 
 it is deliberately an older-generation version. Whether iOS will offer multi-room grouping to a
 receiver advertising that is unknown and should be checked early — it may force a choice between
 remote control and multi-room.
+
+---
+
+## Deferred: Now Playing redesign (2026-08-31)
+
+Home, Settings, onboarding and the waiting screen were redesigned. **Now Playing was deliberately
+left alone** — it is the largest UI file (`NowPlayingScreen.kt`, ~1,560 lines) and deserves its own
+pass rather than being bolted onto a diff that was already large.
+
+When picking it up, the plan agreed was:
+
+- **Do not touch `DynamicBackground`.** It is audio-driven (`setEnergy`/`setBands` from decoded PCM)
+  and the band analysis is correct. Nothing about the visual pass needs it changed.
+- Apply the shared scale (`dimens.xml`) and the gradient page so it matches the rest of the app.
+- Carry the receiver motif into the *arrival* moment only: `ReceiverFieldView` resolves as a sender
+  connects, then hands off to the backdrop. It should not run underneath playback.
+- Consistent focus treatment on the MENU info panel (`FocusMotion.attachFlat` for full-width rows).
+- Animate track changes rather than hard-swapping text (`ProtocolCardAnimator` is the pattern).
+- Leave the position/progress logic alone — it is derived from the audio clock and is correct.
+
+## Not built: multi-screen mirroring
+
+Planned only, in `docs/MULTI_SCREEN.md`. **Gated on one measurement that has not been taken:** how
+many concurrent hardware H.264 decoders this Fire TV will actually grant. If the answer is one, the
+feature is dead. That probe is step 1 and is a single throwaway commit.

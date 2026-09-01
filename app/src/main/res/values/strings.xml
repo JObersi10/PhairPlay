@@ -330,8 +330,14 @@
     <string name="settings_cat_nowplaying">Now Playing</string>
     <string name="settings_cat_remote">Remote &amp; buttons</string>
     <string name="settings_cat_system">System</string>
+    <string name="settings_cat_permissions">Permissions</string>
     <string name="settings_cat_about">About</string>
 
     <!-- Home hero: labels the device name as the thing to choose on the phone. -->
     <string name="home_pick_this">Select this on your device</string>
+
+    <!-- Home: last device that connected. Framed as reassurance ("this worked before") rather than
+         as a log line. -->
+    <string name="home_last_connected">Last connected · %1$s · %2$s</string>
+    <string name="home_ready">Ready to receive</string>
 </resources>

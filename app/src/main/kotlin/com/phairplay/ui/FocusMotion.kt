@@ -2,7 +2,7 @@ package com.phairplay.ui
 
 import android.view.View
 import android.view.ViewGroup
-import android.view.animation.DecelerateInterpolator
+import android.view.animation.PathInterpolator
 
 /**
  * The app's focus motion, in one place.
@@ -28,8 +28,17 @@ import android.view.animation.DecelerateInterpolator
  */
 object FocusMotion {
 
-    private const val FOCUSED_SCALE = 1.03f
+    private const val FOCUSED_SCALE = 1.02f
     private const val DURATION_MS = 140L
+
+    /**
+     * Critically damped: reaches the target and stops, with no overshoot.
+     *
+     * Focus is not a momentum interaction -- nothing was thrown, the user pressed a direction --
+     * so a bouncing card would be inventing physics that did not happen. Bounce is reserved for
+     * motion that follows an actual flick.
+     */
+    private val SETTLE = PathInterpolator(0.2f, 0f, 0f, 1f)
     private const val FOCUSED_ELEVATION_DP = 8f
 
     /**
@@ -50,10 +59,7 @@ object FocusMotion {
     fun attachFlat(view: View) = attach(view, scale = false)
 
     private fun attach(view: View, scale: Boolean) {
-        (view.parent as? ViewGroup)?.let {
-            it.clipChildren = false
-            it.clipToPadding = false
-        }
+        if (scale) unclipAncestors(view)
         val existing = view.onFocusChangeListener
         view.setOnFocusChangeListener { v, hasFocus ->
             existing?.onFocusChange(v, hasFocus)
@@ -73,6 +79,23 @@ object FocusMotion {
         }
     }
 
+    /**
+     * Turns off clipping on every ancestor up to the content root.
+     *
+     * Setting it on the immediate parent only is not enough: a card grows past the parent's bounds
+     * and is then clipped by the *scroller* above it instead, so the focused card appears with its
+     * edges sliced off. Clipping has to be off all the way up to whoever actually bounds the view.
+     */
+    private fun unclipAncestors(view: View) {
+        var p = view.parent
+        while (p is ViewGroup) {
+            p.clipChildren = false
+            p.clipToPadding = false
+            if (p.id == android.R.id.content) break
+            p = p.parent
+        }
+    }
+
     private fun lift(view: View, focused: Boolean, withScale: Boolean) {
         val scale = if (focused && withScale) FOCUSED_SCALE else 1f
         val elevation = if (focused) FOCUSED_ELEVATION_DP * view.resources.displayMetrics.density else 0f
@@ -81,7 +104,7 @@ object FocusMotion {
             .scaleX(scale)
             .scaleY(scale)
             .setDuration(DURATION_MS)
-            .setInterpolator(DecelerateInterpolator())
+            .setInterpolator(SETTLE)
             .withStartAction { if (focused) view.elevation = elevation }
             .withEndAction { if (!focused) view.elevation = 0f }
             .start()
