@@ -60,114 +60,136 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="vertical">
-                <TextView
+                                <TextView
                     android:id="@+id/cat_connection"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_connection"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
-                    android:id="@+id/cat_pairing"
+                    android:id="@+id/cat_homekit"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
-                    android:text="@string/settings_cat_pairing"
-                    android:textColor="@color/text_primary"
+                    android:text="@string/settings_cat_homekit"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/cat_security"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="@dimen/space_md"
+                    android:text="@string/settings_cat_security"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/text_body"
+                    android:background="@drawable/row_focus_selector"
+                    android:focusable="true" />
+
+                <TextView
+                    android:id="@+id/cat_mirroring"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="@dimen/space_md"
+                    android:text="@string/settings_cat_mirroring"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/text_body"
+                    android:background="@drawable/row_focus_selector"
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_audio"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_audio"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
-                <TextView
-                    android:id="@+id/cat_video"
-                    android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
-                    android:gravity="center_vertical"
-                    android:paddingHorizontal="@dimen/space_md"
-                    android:text="@string/settings_cat_video"
-                    android:textColor="@color/text_primary"
-                    android:textSize="@dimen/text_body"
-                    android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_nowplaying"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_nowplaying"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_remote"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_remote"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_system"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_system"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_permissions"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_permissions"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
                 <TextView
                     android:id="@+id/cat_about"
                     android:layout_width="match_parent"
-                    android:layout_height="@dimen/nav_item_height"
+                    android:layout_height="wrap_content"
+                    android:minHeight="@dimen/nav_item_height"
                     android:gravity="center_vertical"
                     android:paddingHorizontal="@dimen/space_md"
                     android:text="@string/settings_cat_about"
-                    android:textColor="@color/text_primary"
+                    android:textColor="@color/text_secondary"
                     android:textSize="@dimen/text_body"
                     android:background="@drawable/row_focus_selector"
-                    android:focusable="true"
-                    android:nextFocusRight="@id/settings_pane_scroll" />
+                    android:focusable="true" />
+
             </LinearLayout>
         </ScrollView>
     </LinearLayout>
@@ -209,8 +231,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_display_name"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -249,52 +270,31 @@
                 android:src="@drawable/ic_chevron_right"
                 android:importantForAccessibility="no" />
         </LinearLayout>
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_airplay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_miracast"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_dlna"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_homekit"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
-
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_homekit_reset"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
                 </LinearLayout>
+
                 <TextView
-                    android:id="@+id/section_pairing"
+                    android:id="@+id/section_homekit"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="@string/settings_cat_pairing"
+                    android:text="@string/settings_cat_homekit"
                     android:textColor="@color/accent"
                     android:textSize="@dimen/text_section"
                     android:textAllCaps="true"
@@ -305,29 +305,96 @@
                     android:layout_marginBottom="@dimen/space_xs" />
 
                 <LinearLayout
-                    android:id="@+id/pane_pairing"
+                    android:id="@+id/pane_homekit"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_homekit"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_remote_enabled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+<LinearLayout
+            android:id="@+id/row_perm_remote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="@dimen/row_padding_horizontal"
+            android:background="@drawable/row_focus_selector"
+            android:focusable="true">
 
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/setting_perm_remote"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/text_body" />
 
-        <include layout="@layout/settings_toggle_row"
+            <TextView
+                android:id="@+id/text_perm_remote_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="16sp" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_chevron_right"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_homekit_reset"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/section_security"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_cat_security"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/text_section"
+                    android:textAllCaps="true"
+                    android:letterSpacing="0.1"
+                    android:fontFamily="sans-serif-medium"
+                    android:paddingHorizontal="@dimen/row_padding_horizontal"
+                    android:layout_marginTop="@dimen/space_lg"
+                    android:layout_marginBottom="@dimen/space_xs" />
+
+                <LinearLayout
+                    android:id="@+id/pane_security"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_pin_auth"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_remember_pin"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_forget_pairings"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -354,6 +421,42 @@
                 android:importantForAccessibility="no" />
         </LinearLayout>
                 </LinearLayout>
+
+                <TextView
+                    android:id="@+id/section_mirroring"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/settings_cat_mirroring"
+                    android:textColor="@color/accent"
+                    android:textSize="@dimen/text_section"
+                    android:textAllCaps="true"
+                    android:letterSpacing="0.1"
+                    android:fontFamily="sans-serif-medium"
+                    android:paddingHorizontal="@dimen/row_padding_horizontal"
+                    android:layout_marginTop="@dimen/space_lg"
+                    android:layout_marginBottom="@dimen/space_xs" />
+
+                <LinearLayout
+                    android:id="@+id/pane_mirroring"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_multi_screen"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_force_high_res" />
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_pip"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+                </LinearLayout>
+
                 <TextView
                     android:id="@+id/section_audio"
                     android:layout_width="match_parent"
@@ -373,31 +476,13 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_mirror_audio"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_beta_updates"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_multi_screen"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_audio_buffer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -444,9 +529,7 @@
                 android:src="@drawable/ic_chevron_right"
                 android:importantForAccessibility="no" />
         </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_audio_delay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -487,8 +570,7 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_sender_volume"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -528,37 +610,7 @@
                 android:importantForAccessibility="no" />
         </LinearLayout>
                 </LinearLayout>
-                <TextView
-                    android:id="@+id/section_video"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="@string/settings_cat_video"
-                    android:textColor="@color/accent"
-                    android:textSize="@dimen/text_section"
-                    android:textAllCaps="true"
-                    android:letterSpacing="0.1"
-                    android:fontFamily="sans-serif-medium"
-                    android:paddingHorizontal="@dimen/row_padding_horizontal"
-                    android:layout_marginTop="@dimen/space_lg"
-                    android:layout_marginBottom="@dimen/space_xs" />
 
-                <LinearLayout
-                    android:id="@+id/pane_video"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical">
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_force_high_res" />
-
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_pip"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
-                </LinearLayout>
                 <TextView
                     android:id="@+id/section_nowplaying"
                     android:layout_width="match_parent"
@@ -578,8 +630,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_backdrop_theme"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -619,9 +670,7 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_beat_pulse"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -661,9 +710,7 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_orb_speed"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -703,17 +750,13 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_screensaver"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_screensaver_timeout"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -752,14 +795,14 @@
                 android:src="@drawable/ic_chevron_right"
                 android:importantForAccessibility="no" />
         </LinearLayout>
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_artwork_lookup"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
                 </LinearLayout>
+
                 <TextView
                     android:id="@+id/section_remote"
                     android:layout_width="match_parent"
@@ -779,52 +822,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-        <include layout="@layout/settings_toggle_row"
-            android:id="@+id/row_remote_enabled"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm" />
-
-
-        <LinearLayout
-            android:id="@+id/row_perm_remote"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:minHeight="@dimen/row_height"
-            android:paddingVertical="@dimen/space_sm"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:paddingHorizontal="@dimen/row_padding_horizontal"
-            android:background="@drawable/row_focus_selector"
-            android:focusable="true">
-
-            <TextView
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="@string/setting_perm_remote"
-                android:textColor="@color/text_primary"
-                android:textSize="@dimen/text_body" />
-
-            <TextView
-                android:id="@+id/text_perm_remote_value"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginEnd="8dp"
-                android:textColor="@color/text_secondary"
-                android:textSize="16sp" />
-
-            <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_chevron_right"
-                android:importantForAccessibility="no" />
-        </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_back_action"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -864,14 +862,14 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_stream_end_action"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
                 </LinearLayout>
+
                 <TextView
                     android:id="@+id/section_system"
                     android:layout_width="match_parent"
@@ -891,17 +889,13 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_start_on_boot"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_input_apps"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -936,6 +930,7 @@
                 android:importantForAccessibility="no" />
         </LinearLayout>
                 </LinearLayout>
+
                 <TextView
                     android:id="@+id/section_permissions"
                     android:layout_width="match_parent"
@@ -955,9 +950,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_perm_overlay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -991,9 +984,7 @@
                 android:src="@drawable/ic_chevron_right"
                 android:importantForAccessibility="no" />
         </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_perm_sleep"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -1028,6 +1019,7 @@
                 android:importantForAccessibility="no" />
         </LinearLayout>
                 </LinearLayout>
+
                 <TextView
                     android:id="@+id/section_about"
                     android:layout_width="match_parent"
@@ -1047,9 +1039,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical">
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_version"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -1076,9 +1066,7 @@
                 android:textColor="@color/text_secondary"
                 android:textSize="16sp" />
         </LinearLayout>
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_update"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -1112,17 +1100,19 @@
                 android:src="@drawable/ic_chevron_right"
                 android:importantForAccessibility="no" />
         </LinearLayout>
-
-
-        <include layout="@layout/settings_toggle_row"
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_beta_updates"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
+<include layout="@layout/settings_toggle_row"
             android:id="@+id/row_debug_overlay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
-
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_reset"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -1141,8 +1131,7 @@
                 android:textColor="@color/status_stopped"
                 android:textSize="@dimen/text_body" />
         </LinearLayout>
-
-        <LinearLayout
+<LinearLayout
             android:id="@+id/row_quit"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -1171,10 +1160,6 @@
         </LinearLayout>
                 </LinearLayout>
 
-            <!-- Tail space so the last row can scroll clear of the bottom edge. -->
-            <Space
-                android:layout_width="match_parent"
-                android:layout_height="@dimen/space_3xl" />
         </LinearLayout>
     </ScrollView>
 

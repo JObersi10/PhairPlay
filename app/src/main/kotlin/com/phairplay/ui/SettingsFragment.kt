@@ -908,9 +908,10 @@ class SettingsFragment : Fragment() {
         /** Shortcut list order: the nav item and the section heading it scrolls to. */
         val CATEGORY_IDS = listOf(
             R.id.cat_connection   to R.id.section_connection,
-            R.id.cat_pairing      to R.id.section_pairing,
+            R.id.cat_homekit      to R.id.section_homekit,
+            R.id.cat_security     to R.id.section_security,
+            R.id.cat_mirroring    to R.id.section_mirroring,
             R.id.cat_audio        to R.id.section_audio,
-            R.id.cat_video        to R.id.section_video,
             R.id.cat_nowplaying   to R.id.section_nowplaying,
             R.id.cat_remote       to R.id.section_remote,
             R.id.cat_system       to R.id.section_system,

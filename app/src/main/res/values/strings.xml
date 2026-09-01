@@ -332,15 +332,18 @@
          the category name now labels the pane, so a separate in-pane header repeated it. -->
     <!-- Settings sections, ordered the way someone actually arrives at them: how the TV is found,
          how it lets senders in, then how a stream sounds, looks, and is controlled. -->
+    <string name="settings_cat_homekit">HomeKit</string>
+    <string name="settings_cat_security">Security</string>
+    <string name="settings_cat_mirroring">Mirroring</string>
     <string name="settings_cat_connection">Connection</string>
     <string name="settings_cat_pairing">Pairing &amp; security</string>
     <string name="settings_cat_audio">Audio</string>
     <string name="settings_cat_video">Mirroring &amp; video</string>
     <string name="settings_cat_nowplaying">Now Playing</string>
-    <string name="settings_cat_remote">Remote &amp; buttons</string>
+    <string name="settings_cat_remote">Remote</string>
     <string name="settings_cat_system">System</string>
     <string name="settings_cat_permissions">Permissions</string>
-    <string name="settings_cat_about">About</string>
+    <string name="settings_cat_about">About &amp; Updates</string>
 
     <!-- Home hero: labels the device name as the thing to choose on the phone. -->
     <string name="home_pick_this">Select this on your device</string>

@@ -215,10 +215,16 @@ class AirPlayReceiver(
      */
     private fun giveAudioTo(slot: Int, deliberate: Boolean, why: String) {
         if (slot !in audioServers.indices || audioServers[slot] == null) return
-        if (audioOwnerSlot == slot) return
+        val changed = audioOwnerSlot != slot
         audioOwnerSlot = slot
+        // IDEMPOTENT, not early-returning on "already the owner". Servers are created silent and
+        // this call is what unmutes them, so skipping the work when the slot already held ownership
+        // would leave a RECONNECTING sender's brand-new server muted with nothing left to turn it
+        // on. The owner had not changed; the server behind it had.
         audioServers.forEachIndexed { i, server -> server?.outputEnabled = (i == slot) }
-        Logger.i("Audio → tile $slot (${if (deliberate) "volume changed on that device" else why})")
+        if (changed) {
+            Logger.i("Audio → tile $slot (${if (deliberate) "volume changed on that device" else why})")
+        }
         // The beat visuals follow the sound; anything else animates one device's music to another's.
         audioServers[slot]?.setBeatDelayMs(beatDelayMs.toLong())
     }
@@ -1164,6 +1170,15 @@ class AirPlayReceiver(
                 lastVolumeGain?.let { g -> it.setVolume(g) }
                 it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it)
             }
+        // AND CLAIM THE OUTPUT UNLESS SOMEONE ELSE IS LIVE ON IT. Missing this is what made every
+        // stream silent: servers are created muted, so without a claim here the only thing that
+        // could ever unmute one was an incoming volume change. A lone sender got no sound at all.
+        val owner = audioOwnerSlot
+        if (owner == null || owner == slot || audioServers.getOrNull(owner) == null) {
+            giveAudioTo(slot, deliberate = false, why = "nothing else owned the output")
+        } else {
+            Logger.i("Tile $slot decoding audio silently — tile $owner owns the output")
+        }
         audioPlaying = true
         emitNowPlaying()
         Logger.i("Mirror audio server started: dataPort=${server.dataPort} controlPort=${server.controlPort}")
