@@ -33,6 +33,7 @@ import com.phairplay.media.DeviceVolumeController
 import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
+import com.phairplay.BuildConfig
 import com.phairplay.settings.AudioRoute
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.diagnostic.DiagnosticServer
@@ -251,6 +252,7 @@ class PhairPlayService : Service() {
         // launches used to report, so switching apps with the physical remote left the Home app
         // showing whatever it last selected.
         PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
+        DiagnosticServer.statusProvider = ::diagnosticStatus
         DiagnosticServer.start(serviceScope)
         startAudioRouteWatcher()
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
@@ -664,6 +666,7 @@ class PhairPlayService : Service() {
         Logger.i("PhairPlayService destroying")
         unregisterNetworkWatcher()
         unregisterDisplayWatcher()
+        DiagnosticServer.statusProvider = null
         audioRouteMonitor?.stop()
         audioRouteMonitor = null
         PhairPlayAccessibilityService.onForegroundApp = null
@@ -728,6 +731,24 @@ class PhairPlayService : Service() {
      * when the app launched, would be never.
      */
     @Volatile private var routeCompensationMs: Int = 0
+
+    /**
+     * The two facts worth having at the top of a dump: which build this is, and where the sound is
+     * actually going. Both otherwise scroll out of the ring buffer long before anyone reads it.
+     */
+    private fun diagnosticStatus(): String {
+        val route = audioRouteMonitor?.route?.value
+        val where = when {
+            route == null || route.key == AudioRoute.UNKNOWN.key -> "not yet detected"
+            routeCompensationMs > 0 -> "${route.label} (${route.key}) — compensating ${routeCompensationMs}ms"
+            else -> "${route.label} (${route.key}) — no compensation"
+        }
+        return buildString {
+            appendLine("---- PHAIRPLAY ----")
+            appendLine("build:  ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA} (${BuildConfig.BUILD_TYPE})")
+            append("output: $where")
+        }
+    }
 
     // ─── Service Control ─────────────────────────────────────────────────────
 

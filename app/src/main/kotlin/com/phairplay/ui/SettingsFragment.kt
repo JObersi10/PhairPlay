@@ -1020,7 +1020,11 @@ class SettingsFragment : Fragment() {
             rowUpdate.isEnabled = true
             when (result) {
                 is com.phairplay.util.UpdateChecker.Result.UpToDate ->
-                    textUpdateValue.text = getString(R.string.setting_update_uptodate, result.tag)
+                    // With the build SHA, not just the tag. The version name does not move between
+                    // dev builds, so "Up to date (1.0.0)" is true of every build ever made and tells
+                    // you nothing about which one is on the television.
+                    textUpdateValue.text =
+                        getString(R.string.setting_update_uptodate, result.tag, BuildConfig.GIT_SHA)
 
                 is com.phairplay.util.UpdateChecker.Result.Failed -> {
                     // Shown, not swallowed -- "Check failed" with no reason is what makes people
@@ -1034,10 +1038,11 @@ class SettingsFragment : Fragment() {
                 }
 
                 is com.phairplay.util.UpdateChecker.Result.Available -> {
-                    textUpdateValue.text = getString(R.string.setting_update_available, result.tag)
+                    textUpdateValue.text =
+                        getString(R.string.setting_update_available, result.tag, BuildConfig.GIT_SHA)
                     val asset = result.assetUrl
                     val dialog = AlertDialog.Builder(ctx)
-                        .setTitle(getString(R.string.setting_update_available, result.tag))
+                        .setTitle(getString(R.string.setting_update_available, result.tag, BuildConfig.GIT_SHA))
                         .setMessage(
                             if (asset == null) getString(R.string.setting_update_no_asset, result.tag)
                             else result.notes,

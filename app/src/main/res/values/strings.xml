@@ -170,8 +170,8 @@
     <string name="setting_version_value">%1$s \u00b7 %2$s</string>
     <string name="setting_update">Check for updates</string>
     <string name="setting_update_checking">Checking…</string>
-    <string name="setting_update_uptodate">Up to date (%1$s)</string>
-    <string name="setting_update_available">%1$s available</string>
+    <string name="setting_update_uptodate">Up to date — %1$s · %2$s</string>
+    <string name="setting_update_available">%1$s available — you have %2$s</string>
     <string name="setting_update_failed">Check failed</string>
     <string name="setting_update_no_asset">Release %1$s has no APK attached, so there is nothing to install from here.</string>
     <string name="setting_update_download_failed">Download failed. Nothing was installed.</string>

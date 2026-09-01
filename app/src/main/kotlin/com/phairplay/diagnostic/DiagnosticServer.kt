@@ -13,6 +13,17 @@ object DiagnosticServer {
     private var dumpSocket: ServerSocket? = null
     private var tailSocket: ServerSocket? = null
 
+    /**
+     * Current state to print above the log, set by the service.
+     *
+     * The ring buffer only holds events since the app started and it is small, so anything
+     * established once at startup -- the build, the output being played to -- has usually scrolled
+     * away by the time there is a problem worth dumping. Those are exactly the two facts you want
+     * first when reading someone else's dump, so they are re-derived on every request instead of
+     * being left to survive in the buffer.
+     */
+    @Volatile var statusProvider: (() -> String)? = null
+
     fun stop() {
         started = false
         dumpSocket?.runCatching { close() }; dumpSocket = null
@@ -32,7 +43,9 @@ object DiagnosticServer {
                     launch(Dispatchers.IO) {
                         runCatching {
                             val out = client.getOutputStream()
-                            val body = LogBuffer.dump().toByteArray()
+                            val status = runCatching { statusProvider?.invoke() }.getOrNull()
+                            val body = (status?.let { "$it\n\n" }.orEmpty() + LogBuffer.dump())
+                                .toByteArray()
                             out.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
                             out.write(body)
                             out.flush()
