@@ -74,8 +74,13 @@ class AirPlayReceiver(
      * Not a user setting; derived from where the audio is going.
      */
     private val beatDelayMs: Int = 0,
+    /**
+     * How many senders may be served at once. Forwarded to [RtspHandler]; 1 reproduces the original
+     * one-sender-at-a-time policy exactly. See `docs/MULTI_SCREEN.md`.
+     */
+    private val maxSessions: Int = 1,
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
-    private val videoSurfaceProvider: () -> Surface?,
+    private val videoSurfaceProvider: (slot: Int) -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
     /**
      * A sender just opened the control socket. Used to bring the Activity up early so its Surface
@@ -151,7 +156,33 @@ class AirPlayReceiver(
     @Volatile private var audioSocket: DatagramSocket? = null
 
     // AirPlay 2 mirroring: data stream server + event channel + keys (set during SETUP).
-    @Volatile private var mirrorServer: MirrorStreamServer? = null
+    /**
+     * One mirror server per tile.
+     *
+     * A single field here was the second half of the one-sender-at-a-time limit (the first being
+     * RtspHandler's shared connection state): a second sender's SETUP overwrote this reference, and
+     * the first sender's server then kept running with nothing pointing at it — still decoding,
+     * still holding a decoder instance, impossible to stop. The slot comes from SessionRegistry and
+     * is stable for the life of the connection.
+     *
+     * MAX_SLOTS is the array size, NOT the policy; how many senders are actually admitted is
+     * SessionRegistry.capacity. Sizing the array to the hardware maximum means raising the capacity
+     * never has to touch this file.
+     */
+    private val mirrorServers = arrayOfNulls<MirrorStreamServer>(MAX_SLOTS)
+
+    private val _activeMirrorSlots = kotlinx.coroutines.flow.MutableStateFlow<Set<Int>>(emptySet())
+
+    /** Which tiles currently have a mirror on them, so the UI can lay out that many. */
+    val activeMirrorSlots: kotlinx.coroutines.flow.StateFlow<Set<Int>> = _activeMirrorSlots
+
+    private fun publishMirrorSlots() {
+        _activeMirrorSlots.value =
+            mirrorServers.indices.filter { mirrorServers[it] != null }.toSet()
+    }
+
+    /** Whichever mirror is on the primary tile — for the single-session paths that predate slots. */
+    private val mirrorServer: MirrorStreamServer? get() = mirrorServers.firstOrNull { it != null }
     @Volatile private var audioServer: AudioStreamServer? = null
 
     /**
@@ -177,7 +208,8 @@ class AirPlayReceiver(
      */
     fun setVideoDelayMs(ms: Int) {
         routeVideoDelayMs = ms.toLong()
-        mirrorServer?.setVideoDelayMs(routeVideoDelayMs)
+        // Every live mirror, not just the first: they all play against the same speakers.
+        mirrorServers.forEach { it?.setVideoDelayMs(routeVideoDelayMs) }
     }
 
     @Volatile private var routeVideoDelayMs: Long = 0L
@@ -508,19 +540,20 @@ class AirPlayReceiver(
             displayWidth = mirrorWidth,
             displayHeight = mirrorHeight,
             audioEnabled = audioEnabled,
-            videoSurfaceProvider = videoSurfaceProvider,
+            videoSurfaceProvider = { videoSurfaceProvider(PRIMARY_SLOT) },
+            maxSessions = maxSessions,
             onStreamingStarted = { session -> onStreamingStarted(session) },
             onStreamingStopped = { onStreamingStopped() },
             onPhotoReceived = { bytes, imageType -> onPhotoReceived(bytes, imageType) },
             onPhotoCleared = { onPhotoCleared() },
             onSupportedRemoteCommands = { supportedRemoteCommands = it },
-            onMirrorSetupKeys = { aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
+            onMirrorSetupKeys = { _, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort ->
                 startMirrorKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             },
-            onMirrorStreamStart = { streamConnectionId -> startMirrorStream(streamConnectionId) },
+            onMirrorStreamStart = { slot, streamConnectionId -> startMirrorStream(slot, streamConnectionId) },
             onMirrorAudioStart = { sampleRate, channels, ct, spf, latency -> startMirrorAudio(sampleRate, channels, ct, spf, latency) },
             onMirrorAudioStop = { stopMirrorAudio() },
-            onMirrorVideoStop = { stopMirrorVideo() },
+            onMirrorVideoStop = { slot -> stopMirrorVideo(slot) },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
             onVolume = { v ->
@@ -686,7 +719,7 @@ class AirPlayReceiver(
      * flow directly into [VideoDecoder.decodeNalUnit].
      */
     private fun startVideoDecoder(session: SessionDescription) {
-        val surface = videoSurfaceProvider() ?: run {
+        val surface = videoSurfaceProvider(PRIMARY_SLOT) ?: run {
             Logger.w("VideoDecoder: no surface available — skipping video pipeline")
             return
         }
@@ -893,21 +926,26 @@ class AirPlayReceiver(
      * Mirror SETUP msg 2: start the data-stream server for the requested stream.
      * @return the data server's TCP port (macOS connects here to send H.264).
      */
-    private fun startMirrorStream(streamConnectionId: Long): Int {
+    private fun startMirrorStream(slot: Int, streamConnectionId: Long): Int {
         // A stream is back: whatever close we were waiting out was a renegotiation, not an ending.
         pendingVideoStop?.let { it.cancel(); Logger.i("Video stream renegotiated — cancelling pending stop") }
         pendingVideoStop = null
         val aesKey = mirrorAesKey ?: run { Logger.e("mirror stream start before keys set"); return 0 }
         val ecdhSecret = mirrorEcdhSecret ?: return 0
         return MirrorStreamServer(
-            aesKey, ecdhSecret, streamConnectionId, videoSurfaceProvider, mirrorWidth, mirrorHeight,
+            aesKey, ecdhSecret, streamConnectionId,
+            // Each tile draws into its own Surface. With one shared provider two senders decoded
+            // into the same SurfaceView and the second simply painted over the first.
+            surfaceProvider = { videoSurfaceProvider(slot) },
+            width = mirrorWidth, height = mirrorHeight,
             // A sender that goes quiet without a TEARDOWN (phone screen off, or an app taking over
             // with its own fullscreen player) used to leave the session "live" with its last frame
             // frozen on the TV. Tear it down ourselves.
-            onConnectionEnded = { scheduleMirrorVideoStop() },
+            onConnectionEnded = { scheduleMirrorVideoStop(slot) },
         )
             .also {
-                mirrorServer = it
+                mirrorServers[slot] = it
+                publishMirrorSlots()
                 it.setVideoDelayMs(routeVideoDelayMs)
                 it.start(scope)
                 videoPlaying = true
@@ -990,24 +1028,27 @@ class AirPlayReceiver(
      * both into a quit, which is worse than the frozen frame it replaced. Any new mirror stream
      * within the grace window cancels this.
      */
-    private fun scheduleMirrorVideoStop() {
+    private fun scheduleMirrorVideoStop(slot: Int) {
         pendingVideoStop?.cancel()
         pendingVideoStop = scope.launch {
             delay(MIRROR_RESUME_GRACE_MS)
             Logger.i("No video stream returned within ${MIRROR_RESUME_GRACE_MS}ms — ending video")
-            stopMirrorVideo()
+            stopMirrorVideo(slot)
         }
     }
 
-    private fun stopMirrorVideo() {
+    private fun stopMirrorVideo(slot: Int) {
         pendingVideoStop?.cancel()
         pendingVideoStop = null
         // Both a TEARDOWN and the connection ending can land here for one session; the second call
         // has nothing to do and must not re-emit state.
-        if (!videoPlaying && mirrorServer == null) return
-        mirrorServer?.stop()
-        mirrorServer = null
-        videoPlaying = false
+        if (!videoPlaying && mirrorServers[slot] == null) return
+        mirrorServers[slot]?.stop()
+        mirrorServers[slot] = null
+        publishMirrorSlots()
+        // Video is only "over" once the LAST tile has gone. Clearing this on the first teardown
+        // would drop the overlay while another sender was still mirroring into it.
+        if (mirrorServers.all { it == null }) videoPlaying = false
         emitNowPlaying()   // audio may still be playing → now-playing card can take over
         // Nothing left playing: drop back to advertising so the overlay actually leaves the screen.
         // emitNowPlaying alone does not do it — with no metadata it emits null, and the service
@@ -1034,7 +1075,7 @@ class AirPlayReceiver(
         emitState(ProtocolState.CONNECTED)   // shows StreamingScreen → Surface becomes available
         val player = urlVideoPlayer ?: AirPlayVideoPlayer(
             context = context,
-            surfaceProvider = videoSurfaceProvider,
+            surfaceProvider = { videoSurfaceProvider(PRIMARY_SLOT) },
             onEnded = { stopUrlVideo() }
         ).also { urlVideoPlayer = it }
         player.play(url, startFraction)
@@ -1076,8 +1117,8 @@ class AirPlayReceiver(
         // Deliberately NOT closing audioSocket here. It belongs to the receiver, not the session --
         // closing it between sessions reopens the very race that made Music unusable. The player it
         // feeds is still released below, so packets arriving between sessions are simply dropped.
-        mirrorServer?.stop()
-        mirrorServer = null
+        mirrorServers.indices.forEach { mirrorServers[it]?.stop(); mirrorServers[it] = null }
+        publishMirrorSlots()
         positionTicker?.cancel(); positionTicker = null
         anchorStartTs = -1L
         audioServer?.stop()
@@ -1209,6 +1250,22 @@ class AirPlayReceiver(
     }
 
     companion object {
+        /**
+         * Upper bound on simultaneous mirror tiles. Sized to the hardware: the Fire TV's AVC
+         * decoder declares five concurrent instances and one is kept back for DLNA / AirPlay URL
+         * playback, which build their own decoder through ExoPlayer.
+         *
+         * This is the ARRAY size, not the policy. How many senders are admitted is
+         * SessionRegistry.capacity, which is driven by the user's setting.
+         */
+        const val MAX_SLOTS = 4
+
+        /**
+         * The tile everything single-stream uses: AirPlay URL video, DLNA playback, the audio
+         * session. Only screen mirroring can be in more than one place at once.
+         */
+        const val PRIMARY_SLOT = 0
+
         /**
          * How long the receiver stays off the network after the user ends a session by hand.
          *

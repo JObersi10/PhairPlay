@@ -128,6 +128,7 @@ class SettingsRepository(private val context: Context) {
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
         orbSpeed           = this[Keys.ORB_SPEED]                ?: 1,
+        multiScreen        = this[Keys.MULTI_SCREEN]             ?: false,
         currentAudioRoute  = this[Keys.CURRENT_AUDIO_ROUTE]      ?: "",
         currentRouteCompensationMs = this[Keys.CURRENT_ROUTE_COMPENSATION] ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
@@ -174,6 +175,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
         this[Keys.ORB_SPEED]            = settings.orbSpeed
+        this[Keys.MULTI_SCREEN]         = settings.multiScreen
         this[Keys.CURRENT_AUDIO_ROUTE]  = settings.currentAudioRoute
         this[Keys.CURRENT_ROUTE_COMPENSATION] = settings.currentRouteCompensationMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
@@ -222,6 +224,7 @@ class SettingsRepository(private val context: Context) {
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
         val ORB_SPEED           = intPreferencesKey("orb_speed")
+        val MULTI_SCREEN        = booleanPreferencesKey("multi_screen")
         // beat_delay_ms and av_trim_profiles were briefly settings and are now neither read nor
         // written: the Bluetooth compensation is a property of the transport, not a preference, so
         // it is derived from the route every time rather than stored. Any leftover values sit

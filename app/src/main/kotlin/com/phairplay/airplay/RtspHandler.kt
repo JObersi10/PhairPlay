@@ -42,18 +42,23 @@ open class RtspHandler(
      * AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret + the sender's
      * address and timing port (so the receiver can start NTP). Returns (eventPort, timingPort).
      */
+    /**
+     * [slot] is the tile this sender owns, from [SessionRegistry]. Everything downstream that can
+     * exist more than once — the mirror server, its decoder, the Surface it draws into — is
+     * addressed by it. It is stable for the life of the connection.
+     */
     private val onMirrorSetupKeys: (
-        aesKey: ByteArray, ecdhSecret: ByteArray, aesIv: ByteArray,
+        slot: Int, aesKey: ByteArray, ecdhSecret: ByteArray, aesIv: ByteArray,
         remoteAddress: java.net.InetAddress, senderTimingPort: Int
-    ) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
+    ) -> Pair<Int, Int> = { _, _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
-    private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
+    private val onMirrorStreamStart: (slot: Int, streamConnectionId: Long) -> Int = { _, _ -> 0 },
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
     private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
     private val onMirrorAudioStop: () -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
-    private val onMirrorVideoStop: () -> Unit = {},
+    private val onMirrorVideoStop: (slot: Int) -> Unit = {},
     /** AirPlay 2 buffered audio-only SETUP (type 103, Apple Music → TV); returns the TCP data port. */
     private val onBufferedAudioStart: () -> Int = { 0 },
     /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
@@ -106,7 +111,16 @@ open class RtspHandler(
      * sender's next one — seconds of black screen, which is why the first connect "didn't grab"
      * and a reconnect (warm Activity) did.
      */
-    private val onSenderApproaching: () -> Unit = {}
+    private val onSenderApproaching: () -> Unit = {},
+    /**
+     * How many senders may be served at once.
+     *
+     * 1 is the shipped default and reproduces the original policy exactly. Anything higher requires
+     * the caller to have checked the hardware can decode that many streams — see `DecoderCapacity`
+     * — because admitting a sender the decoder cannot serve gives it a session that never shows a
+     * picture, which is worse than the immediate refusal it would otherwise have got.
+     */
+    private val maxSessions: Int = 1,
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -130,7 +144,7 @@ open class RtspHandler(
      * first one's handshake. Raising [SessionRegistry.capacity] is safe only after those become
      * per-connection; `docs/MULTI_SCREEN.md` tracks that work.
      */
-    private val sessions = SessionRegistry(capacity = 1)
+    private val sessions = SessionRegistry(capacity = maxSessions)
 
     // ─── Per-connection state ────────────────────────────────────────────────
     /**
@@ -164,6 +178,13 @@ open class RtspHandler(
         var lastLoggedNpTitle: String? = null
         var lastLoggedNpArtist: String? = null
         var connectStartMs = 0L
+
+        /**
+         * The tile this connection owns. Set once, from the registry, when the connection is
+         * accepted; 0 whenever only one sender is possible, which keeps every single-sender path
+         * addressing exactly the same slot it always has.
+         */
+        var slot = 0
     }
 
     /**
@@ -401,6 +422,7 @@ open class RtspHandler(
         // connection on this same pooled thread left behind before we do.
         clientState.remove()
         connectStartMs = acceptedAtMs
+        client.slot = sessions.slotOf(socket).coerceAtLeast(0)
         // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
         fairPlay = FairPlay()
@@ -1106,7 +1128,8 @@ open class RtspHandler(
             val aesIv = (req["eiv"] as? ByteArray) ?: ByteArray(16)
             val senderTimingPort = (req["timingPort"] as? Long)?.toInt() ?: 0
             val remoteAddr = currentRemoteAddress ?: error("mirror SETUP without remote address")
-            val (eventPort, timingPort) = onMirrorSetupKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
+            val (eventPort, timingPort) =
+                onMirrorSetupKeys(client.slot, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             response["eventPort"] = eventPort.toLong()
             response["timingPort"] = timingPort.toLong()
             Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$timingPort (sender timing $senderTimingPort)")
@@ -1119,7 +1142,7 @@ open class RtspHandler(
                 when ((stream["type"] as? Long)?.toInt()) {
                     110 -> {
                         val scid = (stream["streamConnectionID"] as? Long) ?: 0L
-                        val dataPort = onMirrorStreamStart(scid)
+                        val dataPort = onMirrorStreamStart(client.slot, scid)
                         activeStreamTypes.add(110)
                         Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())
@@ -1381,7 +1404,7 @@ open class RtspHandler(
             // When the sender really is finished it closes the socket, and that path already does
             // the full cleanup.
             if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
-            if (streamTypes.contains(110)) { onMirrorVideoStop(); activeStreamTypes.remove(110) }
+            if (streamTypes.contains(110)) { onMirrorVideoStop(client.slot); activeStreamTypes.remove(110) }
             if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
             Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
             return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())

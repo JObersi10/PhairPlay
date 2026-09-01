@@ -141,6 +141,8 @@
     <string name="setting_beat_pulse_normal">Normal</string>
     <string name="setting_beat_pulse_strong">Strong</string>
     <string name="setting_beat_pulse_insane">Insane</string>
+    <string name="setting_multi_screen">Multi-screen</string>
+    <string name="setting_multi_screen_subtitle">Show more than one sender at once, side by side</string>
     <string name="setting_orb_speed">Orb speed</string>
     <string name="setting_orb_speed_subtitle">How fast the projector orbs drift around each other</string>
     <string name="setting_orb_speed_slow">Slow</string>

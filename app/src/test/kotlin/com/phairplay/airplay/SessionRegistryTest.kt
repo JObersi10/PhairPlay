@@ -129,4 +129,48 @@ class SessionRegistryTest {
         assertTrue(registry.isEmpty())
         assertNull(registry.primary())
     }
+
+    @Test
+    fun `each admitted sender gets its own slot`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket(); val c = FakeSocket()
+        registry.admit(a); registry.admit(b); registry.admit(c)
+
+        val assigned = listOf(registry.slotOf(a), registry.slotOf(b), registry.slotOf(c))
+        assertEquals("slots must be distinct", 3, assigned.toSet().size)
+        assertTrue(assigned.all { it in 0..2 })
+    }
+
+    @Test
+    fun `a slot survives another sender leaving`() {
+        // The slot addresses a tile, a decoder and a Surface. Renumbering on someone else's
+        // disconnect would move a live mirror onto a different tile mid-stream.
+        val registry = SessionRegistry(capacity = 3)
+        val first = FakeSocket(); val second = FakeSocket()
+        registry.admit(first); registry.admit(second)
+        val secondSlot = registry.slotOf(second)
+
+        registry.release(first)
+
+        assertEquals(secondSlot, registry.slotOf(second))
+    }
+
+    @Test
+    fun `a freed slot is reused by the next sender`() {
+        val registry = SessionRegistry(capacity = 2)
+        val first = FakeSocket(); val second = FakeSocket()
+        registry.admit(first); registry.admit(second)
+        val freed = registry.slotOf(first)
+        registry.release(first)
+
+        val third = FakeSocket()
+        assertTrue(registry.admit(third))
+        assertEquals(freed, registry.slotOf(third))
+    }
+
+    @Test
+    fun `a socket holding no slot reports -1`() {
+        val registry = SessionRegistry(capacity = 2)
+        assertEquals(-1, registry.slotOf(FakeSocket()))
+    }
 }

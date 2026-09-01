@@ -56,6 +56,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowHomeKit: View
     private lateinit var rowHomeKitReset: View
     private lateinit var rowMirrorAudio: View
+    private lateinit var rowMultiScreen: View
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
@@ -125,6 +126,7 @@ class SettingsFragment : Fragment() {
         rowHomeKit          = view.findViewById(R.id.row_homekit)
         rowHomeKitReset     = view.findViewById(R.id.row_homekit_reset)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
+        rowMultiScreen      = view.findViewById(R.id.row_multi_screen)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
@@ -231,6 +233,7 @@ class SettingsFragment : Fragment() {
         // has two independent on/off states.
         rowHomeKitReset.findViewById<SwitchCompat>(R.id.switch_setting)?.visibility = View.GONE
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
+        configureToggleRow(rowMultiScreen,  R.string.setting_multi_screen,       R.string.setting_multi_screen_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
         configureToggleRow(rowRemoteEnabled, R.string.setting_remote,             R.string.setting_remote_subtitle)
@@ -308,6 +311,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowHomeKit,      settings.homeKitEnabled)
         renderHomeKitStatus(settings.homeKitEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
+        setToggle(rowMultiScreen,  settings.multiScreen)
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
@@ -396,6 +400,8 @@ class SettingsFragment : Fragment() {
         }
         rowHomeKitReset.setOnClickListener { confirmResetHomeKit() }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
+        // Restart required: the session capacity is fixed when the RTSP handler is constructed.
+        setToggleListener(rowMultiScreen)  { enabled -> saveAndRestart { it.copy(multiScreen = enabled) } }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }

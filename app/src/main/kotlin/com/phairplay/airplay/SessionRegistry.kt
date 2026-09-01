@@ -27,6 +27,17 @@ class SessionRegistry(capacity: Int = 1) {
     private val active = LinkedHashSet<Socket>()
 
     /**
+     * Which tile each admitted sender owns, for as long as it is connected.
+     *
+     * A STABLE slot, not a position in [active]. Everything downstream — the mirror server, its
+     * decoder, the SurfaceView it draws into — is addressed by this number, so it must not shift
+     * when some other sender disconnects: renumbering would move a live mirror to a different tile
+     * mid-stream and hand it a Surface belonging to someone else. The slot is chosen as the lowest
+     * free index on admit and released only when that socket goes.
+     */
+    private val slots = HashMap<Socket, Int>()
+
+    /**
      * How many senders may be served at once. Clamped to at least 1 — a capacity of 0 would
      * advertise the receiver over mDNS and then refuse every sender that answered.
      */
@@ -62,10 +73,15 @@ class SessionRegistry(capacity: Int = 1) {
         // A sender that dropped without a TEARDOWN leaves a closed socket behind. Reclaiming those
         // here — rather than only on the disconnect path — is what lets its own retry get in.
         active.removeAll { it.isClosed }
+        slots.keys.removeAll { it.isClosed }
         if (active.size >= capacity) return@synchronized false
         active.add(socket)
+        slots[socket] = (0 until capacity).first { it !in slots.values }
         true
     }
+
+    /** The tile this sender owns, or -1 if it holds no slot. */
+    fun slotOf(socket: Socket): Int = synchronized(lock) { slots[socket] ?: -1 }
 
     /**
      * Gives up [socket]'s slot, but only if it still holds one.
@@ -74,13 +90,17 @@ class SessionRegistry(capacity: Int = 1) {
      * one socket erroring and its cleanup running. Releasing unconditionally would hand that
      * newcomer's slot away and let an extra connection in behind it.
      */
-    fun release(socket: Socket): Boolean = synchronized(lock) { active.remove(socket) }
+    fun release(socket: Socket): Boolean = synchronized(lock) {
+        slots.remove(socket)
+        active.remove(socket)
+    }
 
     /** Closes and forgets every session. Used by teardown and by the user's "disconnect" action. */
     fun closeAll() {
         val doomed = synchronized(lock) {
             val copy = active.toList()
             active.clear()
+            slots.clear()
             copy
         }
         doomed.forEach { runCatching { it.close() } }

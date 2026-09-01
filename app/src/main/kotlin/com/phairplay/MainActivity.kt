@@ -37,6 +37,7 @@ import com.phairplay.settings.StreamEndAction
 import com.phairplay.util.Logger
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.MirrorControls
+import com.phairplay.ui.MultiScreenLayout
 import com.phairplay.ui.HomeKitSetupFragment
 import com.phairplay.ui.OnboardingFragment
 import com.phairplay.ui.NowPlayingScreen
@@ -76,6 +77,7 @@ class MainActivity : AppCompatActivity() {
 
     // The SurfaceView for full-screen video output
     private lateinit var streamingScreen: StreamingScreen
+    private lateinit var multiScreen: MultiScreenLayout
     private lateinit var photoScreen: PhotoScreen
     private lateinit var nowPlayingScreen: NowPlayingScreen
     private lateinit var pinScreen: PinScreen
@@ -131,7 +133,7 @@ class MainActivity : AppCompatActivity() {
             Timber.d("MainActivity: bound to PhairPlayService")
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
-            service?.setVideoSurfaceProvider { getVideoSurface() }
+            service?.setVideoSurfaceProvider { slot -> getVideoSurface(slot) }
             // Put the SurfaceView on screen as soon as a sender opens the socket, before we know
             // what kind of session it is. A SurfaceView has no Surface until it is visible, and by
             // the time CONNECTED arrives the sender has already sent its opening IDR.
@@ -139,6 +141,7 @@ class MainActivity : AppCompatActivity() {
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
+            observeMirrorTiles()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -508,7 +511,12 @@ class MainActivity : AppCompatActivity() {
      * streaming_container. Created eagerly so the Surface is ready before streaming starts.
      */
     private fun setupOverlayScreens() {
-        streamingScreen = StreamingScreen(this)
+        // Tile 0 IS the StreamingScreen every single-sender path already used. Taking it from the
+        // layout rather than constructing a second one means the ordinary one-sender case runs on
+        // exactly the code that works today; the extra tiles sit hidden beside it, laid out so
+        // their Surfaces exist before anyone needs them.
+        multiScreen = MultiScreenLayout(this)
+        streamingScreen = multiScreen.primary
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this).also {
             it.onPlayPauseClick = { nowPlayingScreen.togglePause() }
@@ -523,7 +531,7 @@ class MainActivity : AppCompatActivity() {
             }
             it.onPipClick = { enterPip("mirror controls button") }
         }
-        streamingContainer.addView(streamingScreen)
+        streamingContainer.addView(multiScreen)
         streamingContainer.addView(photoScreen)
         streamingContainer.addView(nowPlayingScreen)
         streamingContainer.addView(pinScreen)
@@ -725,7 +733,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Returns the SurfaceView Surface for the VideoDecoder. */
-    fun getVideoSurface() = streamingScreen.getSurface()
+    /**
+     * The Surface for a mirroring [slot]. Slot 0 is the primary tile and is what every
+     * single-stream path asks for, so its behaviour is unchanged.
+     */
+    fun getVideoSurface(slot: Int = 0) = multiScreen.surfaceFor(slot)
 
     /**
      * Routes TV-remote media keys to the AirPlay sender (DACP reverse control) while audio-only or a
@@ -1112,6 +1124,24 @@ class MainActivity : AppCompatActivity() {
      * [repeatOnLifecycle] suspends the collection at STOP and restarts it at START, which is what
      * the old doc comment on this method already claimed was happening.
      */
+    /**
+     * Lays out one tile per mirroring sender.
+     *
+     * Only the COUNT is driven from here. Which Surface each session decodes into is settled far
+     * earlier, by the slot the SessionRegistry hands out — so a tile appearing is a consequence of a
+     * session existing, never the thing that grants it one.
+     */
+    private fun observeMirrorTiles() {
+        val svc = service ?: return
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                svc.activeMirrorSlots.collect { slots ->
+                    multiScreen.showTiles(slots)
+                }
+            }
+        }
+    }
+
     private fun observeOverlayState() {
         val svc = service ?: return
         // CANCEL THE PREVIOUS SET FIRST. onStart() binds every time, so onServiceConnected fires

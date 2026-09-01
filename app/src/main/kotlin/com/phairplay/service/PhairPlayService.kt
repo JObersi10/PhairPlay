@@ -89,6 +89,17 @@ class PhairPlayService : Service() {
     private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
     val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
 
+    /**
+     * Which mirroring tiles currently have a sender on them, so the Activity can lay out that many.
+     *
+     * Empty whenever nothing is mirroring. Read straight from the receiver rather than mirrored
+     * into another field here: two copies of "who is streaming" is how the overlay and the session
+     * disagree.
+     */
+    val activeMirrorSlots: StateFlow<Set<Int>>
+        get() = airPlayReceiver?.activeMirrorSlots
+            ?: MutableStateFlow<Set<Int>>(emptySet()).asStateFlow()
+
     private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
     val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
 
@@ -208,7 +219,7 @@ class PhairPlayService : Service() {
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
-    @Volatile private var videoSurfaceProvider: (() -> Surface?)? = null
+    @Volatile private var videoSurfaceProvider: ((Int) -> Surface?)? = null
 
     // Receiver instances — null when not running
     private var airPlayReceiver: AirPlayReceiver? = null
@@ -309,7 +320,7 @@ class PhairPlayService : Service() {
      *
      * @param provider Lambda that returns the current [Surface], or null if unavailable.
      */
-    fun setVideoSurfaceProvider(provider: () -> Surface?) {
+    fun setVideoSurfaceProvider(provider: (Int) -> Surface?) {
         videoSurfaceProvider = provider
     }
 
@@ -995,7 +1006,7 @@ class PhairPlayService : Service() {
             pinAuthEnabled = settings.airPlayPinAuthEnabled,
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
-            videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            videoSurfaceProvider = { slot -> videoSurfaceProvider?.invoke(slot) },
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
@@ -1056,6 +1067,14 @@ class PhairPlayService : Service() {
             audioDelayMs = settings.audioDelayMs,
             audioBufferMs = settings.audioBufferMs,
             beatDelayMs = routeCompensationMs,
+            // The FLAG opts in; the HARDWARE decides how far. Asking for more streams than the
+            // device can decode would hand a sender a session that negotiates cleanly and then
+            // never shows a picture — strictly worse than the immediate refusal it replaces.
+            maxSessions = if (settings.multiScreen) {
+                minOf(DecoderCapacity.maxConcurrentMirrors(), AirPlayReceiver.MAX_SLOTS)
+            } else {
+                1
+            },
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state

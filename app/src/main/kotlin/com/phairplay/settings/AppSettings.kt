@@ -203,6 +203,16 @@ data class AppSettings(
     val beatPulse: Int = 0,
 
     /**
+     * Serve more than one sender at a time, showing each on its own tile.
+     *
+     * Off by default, and deliberately so. At capacity 1 the receiver behaves exactly as it always
+     * has — one sender served, everyone else refused immediately — so turning this on is the only
+     * way to reach the multi-session paths. The ceiling is the hardware's concurrent H.264 decoder
+     * count, not this flag; see `DecoderCapacity` and `docs/MULTI_SCREEN.md`.
+     */
+    val multiScreen: Boolean = false,
+
+    /**
      * How fast the projector orbs drift around each other: 0 = Slow, 1 = Normal, 2 = Fast.
      *
      * Separate from [beatPulse], which is how hard they react to the music. One is the tempo of the

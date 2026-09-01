@@ -338,7 +338,7 @@ class RtspHandlerTest {
         },
         onPhotoCleared = { photoCleared = true },
         onMirrorAudioStop = { audioStopped = true },
-        onMirrorVideoStop = { videoStopped = true }
+        onMirrorVideoStop = { _ -> videoStopped = true }
     )
 
     /** Binary-plist TEARDOWN body naming the given stream types, e.g. `{streams:[{type:96}]}`. */
@@ -392,7 +392,7 @@ class TestableRtspHandler(
     onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
     onPhotoCleared: () -> Unit = {},
     onMirrorAudioStop: () -> Unit = {},
-    onMirrorVideoStop: () -> Unit = {}
+    onMirrorVideoStop: (Int) -> Unit = {}
 ) : RtspHandler(
     context = io.mockk.mockk(relaxed = true),
     videoSurfaceProvider = { null },
