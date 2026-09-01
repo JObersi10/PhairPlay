@@ -79,6 +79,8 @@ class AirPlayReceiver(
      * one-sender-at-a-time policy exactly. See `docs/MULTI_SCREEN.md`.
      */
     private val maxSessions: Int = 1,
+    /** Fired whenever the set of tiles with a live mirror changes, so the UI can lay that many out. */
+    private val onMirrorSlotsChanged: (Set<Int>) -> Unit = {},
     /** Lazy Surface provider — called only for video streams when RECORD arrives. */
     private val videoSurfaceProvider: (slot: Int) -> Surface?,
     private val onStateChanged: (ProtocolState) -> Unit,
@@ -177,8 +179,10 @@ class AirPlayReceiver(
     val activeMirrorSlots: kotlinx.coroutines.flow.StateFlow<Set<Int>> = _activeMirrorSlots
 
     private fun publishMirrorSlots() {
-        _activeMirrorSlots.value =
-            mirrorServers.indices.filter { mirrorServers[it] != null }.toSet()
+        val slots = mirrorServers.indices.filter { mirrorServers[it] != null }.toSet()
+        _activeMirrorSlots.value = slots
+        Logger.i("Mirror tiles now: ${if (slots.isEmpty()) "none" else slots.sorted().joinToString()}")
+        runCatching { onMirrorSlotsChanged(slots) }
     }
 
     /** Whichever mirror is on the primary tile — for the single-session paths that predate slots. */

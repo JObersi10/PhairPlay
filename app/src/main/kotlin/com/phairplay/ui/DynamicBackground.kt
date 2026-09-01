@@ -1163,8 +1163,18 @@ class DynamicBackground @JvmOverloads constructor(
         private const val ENERGY_RATE = 0.36f
 
         /**
-         * Orb spring. Stiffness sets how quickly a swell is chased (omega = sqrt(k) = 20 rad/s,
-         * about 3Hz — fast enough to land on the beat, slow enough not to copy the staircase).
+         * Orb spring. Stiffness sets how quickly a swell is chased: omega = sqrt(k) = 34 rad/s.
+         *
+         * RAISED from 400 (omega 20) because the spring was arriving visibly late on the beat. A
+         * spring's lag is not a matter of taste, it is arithmetic: time to first peak is
+         * pi / (omega * sqrt(1 - zeta^2)), which at omega 20 and zeta 0.6 is ~196ms. That is a
+         * fifth of a second behind the kick, on top of the output latency the route compensation is
+         * already accounting for, and it is why the orbs read as smooth but behind. At omega 34 the
+         * same figure is ~115ms, which is close enough to the transient to look struck by it while
+         * keeping the momentum that made a staircase input come out as one curve.
+         *
+         * Damping is held at zeta ~0.6 (2 * 0.6 * 34 = 41, rounded to 42) so the overshoot that
+         * gives a hit its flare survives the change.
          *
          * CRITICALLY DAMPED on purpose (zeta = 1, so damping = 2*sqrt(k)). A springier orb would
          * overshoot, and the render clamps the level to 0..1 — so the overshoot would not read as a
@@ -1173,8 +1183,8 @@ class DynamicBackground @JvmOverloads constructor(
          * and fade slow already lives in the DSP (BAND_ATTACK / BAND_RELEASE in AudioStreamServer),
          * which is the right place for it: shape the signal, then follow it smoothly.
          */
-        private const val ORB_STIFFNESS = 400f
-        private const val ORB_DAMPING = 24f
+        private const val ORB_STIFFNESS = 1200f
+        private const val ORB_DAMPING = 42f
 
         /** Integration sub-step. Well inside the 2/omega = 100ms explicit-Euler stability bound. */
         private const val SPRING_MAX_STEP_S = 0.008f

@@ -89,16 +89,20 @@ class PhairPlayService : Service() {
     private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
     val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
 
+    private val _activeMirrorSlots = MutableStateFlow<Set<Int>>(emptySet())
+
     /**
      * Which mirroring tiles currently have a sender on them, so the Activity can lay out that many.
      *
-     * Empty whenever nothing is mirroring. Read straight from the receiver rather than mirrored
-     * into another field here: two copies of "who is streaming" is how the overlay and the session
-     * disagree.
+     * A flow OWNED BY THE SERVICE, whose identity never changes.
+     *
+     * The first version delegated straight to the receiver's own flow. A `StateFlow` getter is
+     * evaluated once, when the collector starts — and the Activity binds before the receiver has
+     * been built, so it read the null branch, subscribed to a throwaway empty flow and listened to
+     * that forever. Every later slot change went to a different object. The tiles simply never
+     * appeared: the second sender connected, decoded, and drew into a Surface nobody had laid out.
      */
-    val activeMirrorSlots: StateFlow<Set<Int>>
-        get() = airPlayReceiver?.activeMirrorSlots
-            ?: MutableStateFlow<Set<Int>>(emptySet()).asStateFlow()
+    val activeMirrorSlots: StateFlow<Set<Int>> = _activeMirrorSlots.asStateFlow()
 
     private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
     val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
@@ -1070,6 +1074,7 @@ class PhairPlayService : Service() {
             // The FLAG opts in; the HARDWARE decides how far. Asking for more streams than the
             // device can decode would hand a sender a session that negotiates cleanly and then
             // never shows a picture — strictly worse than the immediate refusal it replaces.
+            onMirrorSlotsChanged = { slots -> _activeMirrorSlots.value = slots },
             maxSessions = if (settings.multiScreen) {
                 minOf(DecoderCapacity.maxConcurrentMirrors(), AirPlayReceiver.MAX_SLOTS)
             } else {
