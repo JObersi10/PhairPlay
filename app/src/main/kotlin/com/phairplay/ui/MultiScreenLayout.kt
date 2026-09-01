@@ -52,6 +52,11 @@ class MultiScreenLayout @JvmOverloads constructor(
     private var order: List<Int> = listOf(AirPlayReceiver.PRIMARY_SLOT)
 
     init {
+        // OPAQUE. A grid of three tiles leaves a fourth cell with nothing in it, and without a
+        // background of its own this ViewGroup is transparent — so the Home screen behind the
+        // streaming overlay showed through the empty quadrant. Tiles cover their own area; this is
+        // for the gaps between them.
+        setBackgroundColor(android.graphics.Color.BLACK)
         val first = StreamingScreen(context)
         tiles[AirPlayReceiver.PRIMARY_SLOT] = first
         addView(first, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))

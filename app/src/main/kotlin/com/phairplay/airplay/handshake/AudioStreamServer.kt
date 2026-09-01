@@ -498,7 +498,7 @@ class AudioStreamServer(
     private fun playAlacFrame(frame: ByteArray) {
         val pcm = alac?.decode(frame) ?: return
         if (firstPcm) { Logger.i("Audio: first decoded ALAC PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
-        audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+        if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
         emitEnergy(pcm)
     }
 
@@ -536,7 +536,7 @@ class AudioStreamServer(
             if (firstPcm) { Logger.i("Audio: first decoded PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
             // Blocking write paces playback to the audio clock and drops no PCM. Safe here because
             // this runs on the dedicated playback thread, not the socket-receive thread.
-            audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+            if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
             emitEnergy(pcm)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
@@ -1065,6 +1065,27 @@ class AudioStreamServer(
     }
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
+    /**
+     * Whether this sender's PCM reaches the speakers.
+     *
+     * Several senders can have a live audio stream at once, and there is one AudioTrack. A passive
+     * server still receives, decrypts, decodes and reports whether it is playing — which is exactly
+     * what the ownership rules need in order to notice that the sender you are listening to has
+     * stopped and this one has not. It simply does not write, and never allocates an AudioTrack.
+     *
+     * Deliberately NOT "stop the other server". A stopped server loses its ports, and the sender
+     * connected to those ports will not come back for new ones — which is why ownership decided at
+     * SETUP could never be handed back.
+     */
+    @Volatile
+    var outputEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value) runCatching { audioTrack?.pause(); audioTrack?.flush() }
+            else runCatching { audioTrack?.play() }
+        }
+
     fun setVolume(airplayVolume: Float) {
         // dB -> AMPLITUDE, not a straight line through the dB range.
         //

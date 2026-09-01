@@ -189,7 +189,54 @@ class AirPlayReceiver(
 
     /** Whichever mirror is on the primary tile — for the single-session paths that predate slots. */
     private val mirrorServer: MirrorStreamServer? get() = mirrorServers.firstOrNull { it != null }
-    @Volatile private var audioServer: AudioStreamServer? = null
+    /**
+     * One audio server per sender. Only the owner's reaches the speakers.
+     *
+     * Every live sender keeps its own server — its own ports, keys and decoder — because a stopped
+     * server loses its ports and the sender bound to them never asks for new ones. That is exactly
+     * why ownership decided at SETUP could not be handed back: once the iPhone's stream existed
+     * there was no event left for it to win with, so resuming playback on it did nothing at all.
+     */
+    private val audioServers = arrayOfNulls<AudioStreamServer>(MAX_SLOTS)
+
+    /** The server currently feeding the speakers, if any. */
+    private val audioServer: AudioStreamServer?
+        get() = audioOwnerSlot?.let { audioServers.getOrNull(it) }
+
+    /** Which senders are producing sound, as opposed to merely being connected. */
+    private val audioActive = BooleanArray(MAX_SLOTS)
+
+    /**
+     * Moves the speakers to [slot].
+     *
+     * [deliberate] marks a user action on the sending device — changing its volume. That beats
+     * every automatic rule: anything else here is the receiver guessing from who is playing, and a
+     * guess must never override someone reaching for the volume on the device they want to hear.
+     */
+    private fun giveAudioTo(slot: Int, deliberate: Boolean, why: String) {
+        if (slot !in audioServers.indices || audioServers[slot] == null) return
+        if (audioOwnerSlot == slot) return
+        audioOwnerSlot = slot
+        audioServers.forEachIndexed { i, server -> server?.outputEnabled = (i == slot) }
+        Logger.i("Audio → tile $slot (${if (deliberate) "volume changed on that device" else why})")
+        // The beat visuals follow the sound; anything else animates one device's music to another's.
+        audioServers[slot]?.setBeatDelayMs(beatDelayMs.toLong())
+    }
+
+    /**
+     * Hands the speakers on when the owner goes quiet and someone else has not.
+     *
+     * Deliberately does NOT move audio while the owner is still playing. Two devices competing for
+     * one output should be settled by the volume rule, not by whichever packet arrived last.
+     */
+    private fun rebalanceAudio() {
+        val owner = audioOwnerSlot
+        if (owner != null && audioActive.getOrElse(owner) { false }) return
+        val next = audioServers.indices.firstOrNull {
+            it != owner && audioServers[it] != null && audioActive[it]
+        } ?: return
+        giveAudioTo(next, deliberate = false, why = "tile $owner went quiet")
+    }
 
     /**
      * Retargets the beat visuals without touching the audio, for when the output changes mid-stream.
@@ -577,7 +624,14 @@ class AirPlayReceiver(
             onMirrorVideoStop = { slot -> stopMirrorVideo(slot) },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
-            onVolume = { v ->
+            onVolume = { slot, v ->
+                // THE VOLUME KEY IS THE OVERRIDE. Someone reaching for the volume on a device is
+                // saying which one they want to hear, and that beats every automatic rule — it is
+                // the only unambiguous signal a sender gives us. Claimed even if that device is
+                // currently silent: turning it up is exactly what you do before starting it.
+                if (audioServers.getOrNull(slot) != null) {
+                    giveAudioTo(slot, deliberate = true, why = "volume")
+                }
                 // 0f is 0 dB, i.e. unity gain — the right software setting when the hardware is
                 // doing the attenuation for us.
                 val gain = if (onVolumeRequest(v)) 0f else v
@@ -588,7 +642,8 @@ class AirPlayReceiver(
                 // every later session start at default too, because each one builds a fresh server:
                 // that is the volume "resetting". Hold the last value and apply it on creation.
                 lastVolumeGain = gain
-                audioServer?.setVolume(gain)
+                // The gain belongs to the sender that sent it, not to whoever owns the output.
+                audioServers.getOrNull(slot)?.setVolume(gain) ?: audioServer?.setVolume(gain)
             },
             onNowPlayingMetadata = { title, artist, album, genre, composer, year, durationMs ->
                 val changed = title != npTitle || artist != npArtist || album != npAlbum
@@ -700,12 +755,15 @@ class AirPlayReceiver(
         if (remainingSessions > 0) {
             Logger.i("Tile $slot ended; $remainingSessions sender(s) still connected — keeping the rest")
             stopMirrorVideo(slot)
+            // Only this sender's audio goes. A survivor's server keeps its ports and can simply be
+            // handed the output — it does not have to negotiate again, which it would never do.
+            audioServers.getOrNull(slot)?.stop()
+            if (slot in audioServers.indices) { audioServers[slot] = null; audioActive[slot] = false }
             if (audioOwnerSlot == slot) {
-                // Hand the speakers back so a surviving sender can claim them on its next SETUP.
-                audioServer?.stop()
-                audioServer = null
                 audioOwnerSlot = null
                 forgetVolume()
+                val survivor = audioServers.indices.firstOrNull { audioServers[it] != null }
+                if (survivor != null) giveAudioTo(survivor, deliberate = false, why = "tile $slot left")
             }
             return
         }
@@ -1049,9 +1107,12 @@ class AirPlayReceiver(
         // there, so a sender renegotiating its audio — which is what pausing and resuming does —
         // left the previous server running and un-referenced, with two of them writing into one
         // AudioTrack. That is audible as the stutter that survives the renegotiation.
-        audioServer?.let {
+        // Replace THIS TILE'S server only. Another sender's stays up — stopping it would take its
+        // ports with it, and it would never come back for new ones.
+        audioServers.getOrNull(slot)?.let {
             Logger.i("Replacing the audio server for tile $slot")
             it.stop()
+            audioServers[slot] = null
         }
         val server = AudioStreamServer(aesKey, ecdhSecret, aesIv, sampleRate, channels, codecType, framesPerPacket,
             latencyMinSamples = latencyMinSamples + (audioDelayMs * sampleRate / 1000),
@@ -1063,9 +1124,17 @@ class AirPlayReceiver(
             // Apple Music never sends RTSP PAUSE, and FLUSH fires at stream start too, so it
             // can't mean "paused". The stream itself is the signal: this sender stops sending
             // RTP entirely while paused and resumes the instant playback does.
-            onAudioIdle = { idle -> npPaused = idle; emitNowPlaying() })
+            onAudioIdle = { idle ->
+                if (slot in audioActive.indices) audioActive[slot] = !idle
+                // Only the tile you are actually listening to may drive the card's pause state.
+                if (audioOwnerSlot == slot) { npPaused = idle; emitNowPlaying() }
+                rebalanceAudio()
+            })
             .also {
-                audioServer = it
+                audioServers[slot] = it
+                // Silent until something gives it the output. If nothing owns the speakers it takes
+                // them; otherwise it decodes quietly until a rule hands them over.
+                it.outputEnabled = false
                 // Apply whatever the sender asked for before this server existed.
                 lastVolumeGain?.let { g -> it.setVolume(g) }
                 it.start(scope); startPositionTicker(); startAudioSilenceWatchdog(it)
@@ -1102,8 +1171,7 @@ class AirPlayReceiver(
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
     private fun stopMirrorAudio() {
-        audioServer?.stop()
-        audioServer = null
+        audioServers.indices.forEach { audioServers[it]?.stop(); audioServers[it] = null; audioActive[it] = false }
         audioOwnerSlot = null
         forgetVolume()
         audioPlaying = false
@@ -1230,8 +1298,7 @@ class AirPlayReceiver(
         publishMirrorSlots()
         positionTicker?.cancel(); positionTicker = null
         anchorStartTs = -1L
-        audioServer?.stop()
-        audioServer = null
+        audioServers.indices.forEach { audioServers[it]?.stop(); audioServers[it] = null; audioActive[it] = false }
         audioOwnerSlot = null
         forgetVolume()
         bufferedAudioServer?.stop()

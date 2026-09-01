@@ -68,7 +68,11 @@ open class RtspHandler(
     /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
     private val onBufferedAudioStop: () -> Unit = {},
     /** Sender volume change (AirPlay dB: −30…0, or ≤ −144 = mute) via SET_PARAMETER. */
-    private val onVolume: (Float) -> Unit = {},
+    /**
+     * The sender set its volume. [slot] matters: reaching for the volume on a device is the
+     * clearest statement a user can make about which one they want to hear.
+     */
+    private val onVolume: (slot: Int, volume: Float) -> Unit = { _, _ -> },
     /** Now-playing track metadata (DMAP) from SET_PARAMETER — any field may be null. */
     private val onNowPlayingMetadata: (title: String?, artist: String?, album: String?, genre: String?, composer: String?, year: Int?, durationMs: Long?) -> Unit = { _, _, _, _, _, _, _ -> },
     /** Album artwork (JPEG/PNG bytes) from SET_PARAMETER; empty bytes = artwork cleared. */
@@ -1455,7 +1459,7 @@ open class RtspHandler(
             body.startsWith("volume") -> {
                 body.substringAfter(":").trim().toFloatOrNull()?.let { v ->
                     currentVolume = v
-                    onVolume(v)
+                    onVolume(client.slot, v)
                     Logger.i("SET_PARAMETER volume=$v")
                 }
             }

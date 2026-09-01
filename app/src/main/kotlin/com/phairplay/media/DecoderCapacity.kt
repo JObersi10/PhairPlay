@@ -25,6 +25,11 @@ object DecoderCapacity {
     /** Fallback when the query fails outright. One decoder is the only number always safe. */
     private const val UNKNOWN = 1
 
+    /** The stream size and rate a mirror is budgeted at. One tile is assumed to cost this much. */
+    private const val REFERENCE_WIDTH = 1920
+    private const val REFERENCE_HEIGHT = 1080
+    private const val REFERENCE_FPS = 60.0
+
     @Volatile
     private var cached: Int? = null
 
@@ -99,5 +104,47 @@ object DecoderCapacity {
      * through ExoPlayer, and a mirror session that consumed the last instance would make the next
      * video play fail with no obvious cause.
      */
-    fun maxConcurrentMirrors(): Int = (maxConcurrentAvcDecoders() - 1).coerceAtLeast(1)
+    fun maxConcurrentMirrors(): Int {
+        val byInstances = (maxConcurrentAvcDecoders() - 1).coerceAtLeast(1)
+        val byThroughput = mirrorsWithinFrameBudget()
+        val answer = minOf(byInstances, byThroughput)
+        Logger.i("Mirror capacity: $byInstances by decoder count, $byThroughput by frame budget — using $answer")
+        return answer
+    }
+
+    /**
+     * How many 1080p60 mirrors fit in the decoder's advertised throughput.
+     *
+     * **This, not the instance count, is what actually binds.** The Fire TV reports five concurrent
+     * AVC instances and a `performance-point-1920x1080` of 120 — two 1080p60 streams and the budget
+     * is spent. Sizing by instances alone admitted a third sender, which then negotiated cleanly,
+     * decoded nothing, and sat on a frozen frame: strictly worse than the immediate refusal it
+     * replaced, because the sender believes it is mirroring.
+     *
+     * Measured with the codec's own numbers rather than assumed, because a different device will
+     * have a different answer and this is exactly the sort of constant that would go stale silently.
+     */
+    private fun mirrorsWithinFrameBudget(): Int {
+        val fps = runCatching { advertisedFrameRate(REFERENCE_WIDTH, REFERENCE_HEIGHT) }.getOrNull()
+            ?: return UNKNOWN
+        if (fps <= 0.0) return UNKNOWN
+        return (fps / REFERENCE_FPS).toInt().coerceAtLeast(UNKNOWN)
+    }
+
+    /** The hardware decoder's advertised frame rate for one stream of the given size. */
+    private fun advertisedFrameRate(width: Int, height: Int): Double? {
+        for (info in MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos) {
+            if (info.isEncoder || info.name.endsWith(".secure")) continue
+            if (MediaFormat.MIMETYPE_VIDEO_AVC !in info.supportedTypes) continue
+            if (!isHardware(info)) continue
+            val video = runCatching {
+                info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+            }.getOrNull() ?: continue
+            val rate = runCatching {
+                video.getSupportedFrameRatesFor(width, height).upper
+            }.getOrNull() ?: continue
+            return rate
+        }
+        return null
+    }
 }
