@@ -127,7 +127,16 @@ class StreamingScreen @JvmOverloads constructor(
      *
      * @return The rendering Surface, or null if not yet available.
      */
-    fun getSurface(): Surface? = surface
+    /**
+     * The Surface to decode into, or null when there isn't a usable one.
+     *
+     * The validity check is not paranoia. A SurfaceView's Surface is destroyed whenever the view
+     * stops being VISIBLE, and the object we hold stays non-null afterwards — so returning it
+     * blind hands MediaCodec a Surface with no native window behind it. That is not an exception
+     * you can catch: it surfaces as "Could not find corresponding native window for surface" and
+     * takes the process down. A null here makes the caller wait for a real one instead.
+     */
+    fun getSurface(): Surface? = surface?.takeIf { it.isValid }
 
 
 

@@ -411,6 +411,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Deprecated("Deprecated in Java")
+    /**
+     * Never delegates to `super.onBackPressed()`, and the lint suppression says so on purpose.
+     *
+     * The default implementation finishes the Activity. That is exactly the behaviour this method
+     * exists to replace: what Back does here is a user setting, and only EXIT_APP is allowed to
+     * quit. Every other branch either handles the press or backgrounds the task, so there is no
+     * path where the platform default is the right answer.
+     */
+    @android.annotation.SuppressLint("MissingSuperCall")
     override fun onBackPressed() {
         // Back dismisses the pairing code first. The PIN overlay sits on top of everything and only
         // cleared when the sender finished, failed, or hit the lockout — so a sender that gave up
@@ -482,16 +491,31 @@ class MainActivity : AppCompatActivity() {
             }
             return
         }
-        // No stream on screen. Only EXIT_APP has anything left to do — the other two have already
-        // happened by the time you are back on the waiting screen.
+        // No stream on screen.
         if (backAction == BackAction.EXIT_APP) {
             Timber.d("Back with action=EXIT_APP — stopping service and finishing task")
             ServiceController.stop(this)
             finishAndRemoveTask()
             return
         }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
+
+        // ONLY EXIT_APP MAY QUIT. This used to fall through to super.onBackPressed(), which finishes
+        // the Activity — so Back ended the stream as asked, and then the very next press quit the
+        // app anyway. That is the "I chose 'just end the stream' and it still kicks me out" report,
+        // and it survived the first fix because that one only stopped the stream-END action from
+        // leaving; nothing stopped Back itself from finishing the task a moment later.
+        //
+        // Go to Home if we are anywhere else, and background the task if we are already there.
+        // moveTaskToBack rather than finish(): the receiver keeps running and the Activity stays
+        // alive, so a sender connecting brings the same instance straight back with its Surface
+        // already made — finishing would destroy it and reintroduce the cold-start black screen.
+        if (selectedNavIndex != 0) {
+            Timber.d("Back with no stream — returning to Home")
+            navigateTo(HomeFragment())
+            return
+        }
+        Timber.d("Back on Home, action=$backAction — backgrounding, receiver stays up")
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {

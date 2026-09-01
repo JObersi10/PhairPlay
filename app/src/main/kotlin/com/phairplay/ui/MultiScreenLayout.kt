@@ -11,118 +11,139 @@ import com.phairplay.util.Logger
 /**
  * MultiScreenLayout — holds one [StreamingScreen] per mirroring session and arranges them as tiles.
  *
- * WHY: the receiver can serve several senders at once (see `docs/MULTI_SCREEN.md`), but a
- * `SurfaceView` cannot be shared — two decoders pointed at one Surface simply paint over each
- * other. Each session therefore needs its own view, and something has to decide where they go.
+ * WHY: a `SurfaceView` cannot be shared. Two decoders pointed at one Surface simply paint over each
+ * other, so each simultaneous sender needs its own view and something has to place them.
  *
- * **Every tile is created up front and keeps its Surface for the whole life of the layout.** That
- * is the important property, and it is why tiles are hidden rather than added and removed: a
- * `SurfaceView` has no Surface until it is visible and laid out, so creating one at the moment a
- * sender connects reproduces the cold-first-connect race — the sender's opening IDR arrives before
- * the Surface exists, and the tile stays black until the next keyframe, which macOS is in no hurry
- * to send. Building them ahead of time means a Surface is always waiting.
+ * ## A SurfaceView only has a Surface while it is really on screen
  *
- * HOW: [setTileCount] switches between full-bleed, side-by-side and a 2x2 grid. With one active
- * tile the layout is exactly what a single session had before this class existed — the tile fills
- * the container — so nothing about the ordinary one-sender case changes.
+ * The first version of this class kept every tile built up front and parked the spares as
+ * `INVISIBLE`, on the theory that a Surface created early avoids the cold-connect race. **That was
+ * wrong, and it crashed the app.** `surfaceDestroyed` fires as soon as a SurfaceView stops being
+ * VISIBLE, while the `Surface` object we hold stays non-null — so a spare tile handed back a dead
+ * Surface, `MediaCodec.configure` got one with no native window behind it, and the process went
+ * down with `Could not find corresponding native window for surface`. It is not a catchable
+ * exception.
+ *
+ * The same is true of a tile laid out with no area, and of one positioned outside its parent: a
+ * SurfaceView is a separate window punched through the view hierarchy, so "hidden" states that work
+ * for an ordinary View do not give you a live Surface here.
+ *
+ * So tiles are created and attached ONLY while a session is using them, and the primary tile — the
+ * one every single-sender path uses — is created once and never removed. That keeps the ordinary
+ * case on exactly the code that worked before this class existed, and confines the cost of a
+ * late-created Surface to the second and subsequent senders, where a beat of black while the
+ * decoder waits is a fair price and the alternative is a crash.
  */
 class MultiScreenLayout @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
 ) : FrameLayout(context, attrs, defStyleAttr) {
 
-    private val tiles = ArrayList<StreamingScreen>(AirPlayReceiver.MAX_SLOTS)
+    /** Index 0 is created eagerly and permanent; the rest exist only while a session holds them. */
+    private val tiles = arrayOfNulls<StreamingScreen>(AirPlayReceiver.MAX_SLOTS)
 
-    /** How many tiles are currently laid out. Always at least one. */
-    var tileCount: Int = 1
-        private set
+    private var tileCount: Int = 1
 
     init {
-        repeat(AirPlayReceiver.MAX_SLOTS) { slot ->
-            val tile = StreamingScreen(context)
-            // Only the primary starts visible. The rest are INVISIBLE rather than GONE: a GONE view
-            // is never laid out, so its SurfaceView would never create a Surface and the tile would
-            // be black for the first seconds of the session it is eventually given.
-            tile.visibility = if (slot == 0) View.VISIBLE else View.INVISIBLE
-            tiles += tile
-            addView(tile, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
-        }
+        val first = StreamingScreen(context)
+        tiles[AirPlayReceiver.PRIMARY_SLOT] = first
+        addView(first, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
     }
 
     /** The primary tile, which every single-stream path (URL video, DLNA, audio) draws into. */
-    val primary: StreamingScreen get() = tiles[AirPlayReceiver.PRIMARY_SLOT]
-
-    /** The Surface for [slot], or null if it has not been created yet. */
-    fun surfaceFor(slot: Int): Surface? =
-        tiles.getOrNull(slot)?.getSurface()
-
-    fun tileAt(slot: Int): StreamingScreen? = tiles.getOrNull(slot)
+    val primary: StreamingScreen get() = tiles[AirPlayReceiver.PRIMARY_SLOT]!!
 
     /**
-     * Re-arranges for [count] simultaneous senders.
+     * The Surface for [slot], creating the tile if a session has just claimed it.
      *
-     * 1 fills the frame; 2 splits it left/right; 3 and 4 use a 2x2 grid, with the third tile taking
-     * the bottom-left and the bottom-right left dark until a fourth arrives. Splitting horizontally
-     * rather than vertically for two is deliberate: mirrored content is 16:9, so side-by-side tiles
-     * stay wider than they are tall and letterbox far less than stacked ones would.
+     * Returns null until the SurfaceView has actually been laid out and its Surface created, which
+     * is the honest answer and what the mirror server already knows how to wait for. Returning a
+     * placeholder would be the crash again.
      */
-    fun setTileCount(count: Int) {
-        val next = count.coerceIn(1, AirPlayReceiver.MAX_SLOTS)
-        if (next == tileCount && width > 0) return
-        tileCount = next
-        Logger.i("MultiScreenLayout: $next tile(s)")
-        requestLayout()
+    fun surfaceFor(slot: Int): Surface? {
+        if (slot !in tiles.indices) return null
+        ensureTile(slot)
+        return tiles[slot]?.getSurface()
     }
 
-    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
-        val w = right - left
-        val h = bottom - top
-        if (w <= 0 || h <= 0) return
+    private fun ensureTile(slot: Int): StreamingScreen? {
+        if (slot !in tiles.indices) return null
+        tiles[slot]?.let { return it }
+        val tile = StreamingScreen(context)
+        tiles[slot] = tile
+        addView(tile, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
+        Logger.i("MultiScreenLayout: created tile $slot")
+        relayoutTiles()
+        return tile
+    }
 
-        val cols = if (tileCount <= 1) 1 else 2
-        val rows = if (tileCount <= 2) 1 else 2
-        val tw = w / cols
-        val th = h / rows
+    private fun removeTile(slot: Int) {
+        if (slot == AirPlayReceiver.PRIMARY_SLOT) return   // permanent; see the class note
+        val tile = tiles[slot] ?: return
+        tiles[slot] = null
+        removeView(tile)
+        Logger.i("MultiScreenLayout: removed tile $slot")
+    }
 
-        tiles.forEachIndexed { slot, tile ->
-            if (slot >= tileCount) {
-                // Parked off to one side at full size rather than resized to nothing. A zero-sized
-                // SurfaceView destroys its Surface, which is exactly what this class exists to
-                // avoid; keeping it laid out means it is ready the instant a sender takes the slot.
-                tile.layout(w, 0, w + tw.coerceAtLeast(1), th.coerceAtLeast(1))
-                return@forEachIndexed
-            }
-            val col = slot % cols
-            val row = slot / cols
-            tile.layout(col * tw, row * th, col * tw + tw, row * th + th)
+    /**
+     * Brings the layout in line with the sessions that actually exist.
+     *
+     * Creating and destroying real views rather than toggling visibility is the whole point — see
+     * the class note. The primary tile is never removed, so a session ending leaves the layout
+     * exactly as it was before any of this ran.
+     */
+    fun showTiles(activeSlots: Set<Int>) {
+        for (slot in tiles.indices) {
+            if (slot in activeSlots) ensureTile(slot) else removeTile(slot)
         }
+        val highest = (activeSlots.maxOrNull() ?: 0) + 1
+        if (highest != tileCount) {
+            tileCount = highest.coerceIn(1, AirPlayReceiver.MAX_SLOTS)
+            Logger.i("MultiScreenLayout: $tileCount tile(s)")
+        }
+        relayoutTiles()
     }
+
+    private fun relayoutTiles() {
+        requestLayout()
+        // Each tile letterboxes its video inside whatever box it has been given. Resizing the box
+        // without re-running that leaves the previous fit stretched across the new one, which is
+        // what a mirror looked like when a second sender halved its width mid-stream.
+        tiles.forEach { it?.invalidateAspectFit() }
+    }
+
+    private fun columns() = if (tileCount <= 1) 1 else 2
+    private fun rows() = if (tileCount <= 2) 1 else 2
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
         super.onMeasure(widthMeasureSpec, heightMeasureSpec)
         val w = measuredWidth
         val h = measuredHeight
         if (w <= 0 || h <= 0) return
-        val cols = if (tileCount <= 1) 1 else 2
-        val rows = if (tileCount <= 2) 1 else 2
-        val tw = MeasureSpec.makeMeasureSpec(w / cols, MeasureSpec.EXACTLY)
-        val th = MeasureSpec.makeMeasureSpec(h / rows, MeasureSpec.EXACTLY)
-        tiles.forEach { it.measure(tw, th) }
+        val tw = MeasureSpec.makeMeasureSpec(w / columns(), MeasureSpec.EXACTLY)
+        val th = MeasureSpec.makeMeasureSpec(h / rows(), MeasureSpec.EXACTLY)
+        tiles.forEach { it?.measure(tw, th) }
     }
 
     /**
-     * Shows the tiles that have a session and hides the rest.
+     * One tile fills the frame; two split it left and right; three or four use a 2x2 grid.
      *
-     * INVISIBLE, never GONE — see the note in `init`. A hidden tile keeps its Surface so the next
-     * sender to land on it starts with somewhere to decode into.
+     * Side by side rather than stacked for two, because mirrored content is 16:9 — half the width
+     * still leaves a wider-than-tall box, where half the height would letterbox savagely.
      */
-    fun showTiles(activeSlots: Set<Int>) {
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        val w = right - left
+        val h = bottom - top
+        if (w <= 0 || h <= 0) return
+
+        val cols = columns()
+        val tw = w / cols
+        val th = h / rows()
+
         tiles.forEachIndexed { slot, tile ->
-            tile.visibility = if (slot in activeSlots || slot == AirPlayReceiver.PRIMARY_SLOT) {
-                View.VISIBLE
-            } else {
-                View.INVISIBLE
-            }
+            tile ?: return@forEachIndexed
+            val col = slot % cols
+            val row = slot / cols
+            tile.layout(col * tw, row * th, col * tw + tw, row * th + th)
         }
-        setTileCount(if (activeSlots.isEmpty()) 1 else (activeSlots.maxOrNull() ?: 0) + 1)
     }
 }
