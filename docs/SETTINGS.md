@@ -35,7 +35,7 @@ Each can be turned off independently; turning one off frees its port and stops i
 |---|---|---|
 | **Mirror audio** | On | Plays the audio that accompanies a screen mirror. Off mirrors silently. |
 | **High resolution** | Off | Requests 2560×1440 instead of 1920×1080 for mirroring. More detail, more bandwidth, more decode load. |
-| **Audio buffer** | 100 ms | How much audio is held before playing. Lower is more responsive and more likely to stutter on a weak network; higher is the reverse. 40–300 ms. |
+| **Audio buffer** | 100 ms | How much audio is held before playing. Lower is more responsive and more likely to stutter on a weak network; higher is the reverse. 40–300 ms. **Raised to a floor of 250 ms whenever the output is Bluetooth** — A2DP delivery is bursty and shares an antenna with the Wi-Fi carrying the stream, and 250 ms is what senders themselves advertise as their minimum (`latencyMin=11025` at 44100 Hz). The setting is not overwritten, only floored, so it means what it says again the moment the speaker goes away. Applied when the AudioTrack is created, so a speaker connecting mid-session does not resize it. |
 | **Audio delay** | 0 ms | Holds audio back to meet the sender's timeline. Yours to set; the beat visuals follow it automatically. **A Bluetooth speaker gets 350 ms of extra *visual* delay on top of this, automatically** — it is a property of the transport rather than a preference, so it is applied rather than asked about, and it disappears when the speaker does. See [FEATURES.md](FEATURES.md). |
 | **Volume control** | Software only | Whether the sender's volume slider moves the real device volume. Defaults to software gain because Fire OS accepts a volume change and silently drops it — `setStreamVolume` returns success and nothing gets quieter. |
 
@@ -49,6 +49,7 @@ Each can be turned off independently; turning one off frees its port and stops i
 | **Screensaver timeout** | 15 min | Minutes of no remote input or track change before it starts. |
 | **Online cover art** | Off | Looks up missing artwork by title via MusicBrainz and the Cover Art Archive. **Sends track names to those services while on**, which is why it is off by default. Needs no API key. |
 | **Identify unknown tracks** | Off | When a sender streams audio without naming it, captures twelve seconds and asks Shazam what it is. Never runs when the sender supplies metadata, and the sender's own data always wins. **Sends an audio fingerprint — not audio — to Shazam while on**, hence off by default. See [TRACK_IDENTIFICATION.md](TRACK_IDENTIFICATION.md). |
+| **Re-check what is playing** | Every 30s | How often to look the track up again while nameless audio plays. 12s ("continuously"), 15s, 30s, 60s. Nameless audio gives no track-change signal, so this is the only thing that keeps the name up with the music — worst case staleness is the interval plus the twelve-second capture. Floored at 30s while the device is in power-save mode. Takes effect immediately; no restart. |
 
 ## Pairing & security
 

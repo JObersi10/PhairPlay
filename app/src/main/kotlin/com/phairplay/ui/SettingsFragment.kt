@@ -67,6 +67,8 @@ class SettingsFragment : Fragment() {
     private lateinit var textBackdropThemeValue: TextView
     private lateinit var rowArtworkLookup: View
     private lateinit var rowIdentifyTracks: View
+    private lateinit var rowIdentifyInterval: LinearLayout
+    private lateinit var textIdentifyIntervalValue: TextView
     private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
@@ -139,6 +141,8 @@ class SettingsFragment : Fragment() {
         textBackdropThemeValue = view.findViewById(R.id.text_backdrop_theme_value)
         rowArtworkLookup    = view.findViewById(R.id.row_artwork_lookup)
         rowIdentifyTracks   = view.findViewById(R.id.row_identify_tracks)
+        rowIdentifyInterval = view.findViewById(R.id.row_identify_interval)
+        textIdentifyIntervalValue = view.findViewById(R.id.text_identify_interval_value)
         rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
@@ -330,6 +334,7 @@ class SettingsFragment : Fragment() {
         showBackdropTheme(settings.backdropTheme)
         setToggle(rowArtworkLookup, settings.artworkLookup)
         setToggle(rowIdentifyTracks, settings.identifyTracks)
+        showIdentifyInterval(settings.identifyIntervalSec)
         setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
@@ -433,6 +438,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowAudioBuffer.setOnClickListener { pickAudioBuffer() }
+        rowIdentifyInterval.setOnClickListener { pickIdentifyInterval() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
         rowOrbSpeed.setOnClickListener { pickOrbSpeed() }
         // Restart, not a plain save: the resolution is baked into the /info response and the mirror
@@ -703,6 +709,36 @@ class SettingsFragment : Fragment() {
      * the sender, the codec and the output path — Bluetooth in particular adds its own delay that
      * no amount of protocol correctness can predict. A dial beats a guessed constant.
      */
+    private fun showIdentifyInterval(sec: Int) {
+        textIdentifyIntervalValue.text = identifyIntervalLabel(sec)
+    }
+
+    private fun identifyIntervalLabel(sec: Int): String =
+        if (sec <= AppSettings.IDENTIFY_INTERVAL_CHOICES.first())
+            getString(R.string.setting_identify_interval_continuous)
+        else getString(R.string.setting_identify_interval_seconds, "${sec}s")
+
+    /**
+     * How often the fingerprinter looks the track up again.
+     *
+     * No receiver restart, unlike the audio buffer: the interval is read live by the identifier, so
+     * a change takes effect at the next re-check rather than needing the session torn down.
+     */
+    private fun pickIdentifyInterval() {
+        val choices = AppSettings.IDENTIFY_INTERVAL_CHOICES
+        val labels = choices.map { identifyIntervalLabel(it) }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_identify_interval)
+            .setItems(labels) { _, which ->
+                val sec = choices[which]
+                save { it.copy(identifyIntervalSec = sec) }
+                showIdentifyInterval(sec)
+                Logger.i("Shazam re-check interval set to ${sec}s")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun showAudioBuffer(ms: Int) {
         textAudioBufferValue.text =
             if (ms == AppSettings.DEFAULT_AUDIO_BUFFER_MS) getString(R.string.setting_audio_buffer_default, ms)

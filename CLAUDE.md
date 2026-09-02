@@ -146,7 +146,13 @@ The permanent Home/Settings nav panel is gone — Settings is a button on Home, 
   because it is software and nothing in it is a fixed resource, so the naive max reported 32 on a
   device that has 5. Measured on this Fire TV: **5 instances, `performance-point-1920x1080` = 120**,
   so two 1080p60 mirrors fit. Shown in the `:8001` header as `decode:`
-- `DiagnosticServer` — `:8001` dump, `:8002` tail
+- `DiagnosticServer` — `:8001` dump, `:8001/tail` stream. **The dump is byte-capped and prints from
+  the START of the session**, so once a session has run a while it shows the handshake and cuts off
+  before anything recent. For current events use `/tail`, not `/`
+- `media/shazam/` — names a track the sender streamed without naming. `ShazamSignature` is a port of
+  `shazamio-core`'s fingerprinting module **from its sources**; `PcmCapture` resamples to the mono
+  16kHz it is defined over; `ShazamClient` posts it. `docs/TRACK_IDENTIFICATION.md` has the rest, and
+  should be read before touching any constant in the port
 
 `docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app
 GitHub-Releases updater — read it before touching that code, and before publishing a release:
@@ -169,6 +175,26 @@ Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it
 | DLNA/UPnP MediaRenderer | 8200 | Working, including GENA eventing |
 
 ## Open bugs
+
+### One RTSP session at a time, regardless of type
+
+`SessionRegistry.admit()` runs at `accept()`, **before the SETUP plist says whether the connection is
+audio or mirroring**, so a policy of "audio = 1, mirror = many" cannot be expressed where the limit
+currently lives. Connecting a second sender before the first disconnects is refused, which is what
+the "iPad glitches while the Mac is still connected" report is.
+
+Enforcing it properly means admitting generously and applying the policy at SETUP once the type is
+known, which needs a session-type registry and a teardown path for an already-admitted session.
+Treat that area carefully — see the stream-level TEARDOWN note below, which killed sessions half a
+second after audio started.
+
+### Orbs look like they flash (projector mode)
+
+Reported repeatedly. Attributed to exponential easing, then to springs; both were changed and it is
+still reported. **Do not guess a third time — measure.** Untested suspect: the fingerprinter
+allocates ~2MB per re-check (`Array(256){FloatArray(1025)}` twice, plus the capture buffer), and a GC
+pause on this hardware looks exactly like orbs flashing. The ten-second test is to switch
+"Identify unknown tracks" off and watch; if it stops, pool those buffers.
 
 ### Cold first connect shows nothing (mirroring)
 
@@ -318,6 +344,27 @@ macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
   EXIT_APP) replaced `backQuitsApp` + `backGoesHome`, which could both be on and described two
   different questions. `SettingsRepository` migrates the old keys on first read.
 
+- **`hasMetadata` cannot tell OUR title from the sender's.** It only means "has a title", so once an
+  identification is applied the value in `_nowPlaying` carries our own — and `withIdentification`
+  read that as the sender naming the track, cleared the result and cancelled the identifier. Only the
+  first song of a session was ever identified; **every match after it destroyed itself on arrival**.
+  `NowPlayingInfo.identified` is what distinguishes them, and the `&& !info.identified` guard is not
+  optional.
+- **An identified track has a name but no POSITION.** Fingerprinting joins a song partway through and
+  nothing says how far in, so the durationless clock-start in `NowPlayingScreen` must be skipped for
+  it — otherwise a counter runs from 0:00, wrong by however much already played, and reads as a
+  broken timer rather than an unknown one.
+- **`startReceivers()` samples settings ONCE** (`settingsFlow.first()`). That is right for anything
+  consulted only while BUILDING a receiver, and silently wrong for anything toggled during a session:
+  the switch shows as on, nothing happens, and nothing says why. `TrackIdentifier.enabled` had that
+  bug and now has its own collector. **`artworkLookup` still has the same shape** — if online cover
+  art ever "only works after a restart", that is the reason.
+- **A Bluetooth sink needs a bigger AudioTrack buffer than HDMI.** A2DP delivery is bursty and shares
+  an antenna with the Wi-Fi carrying the stream, so the 100ms default drains on any hiccup and
+  stutters. Floored at `AudioRoute.BLUETOOTH_MIN_BUFFER_MS` (250), which is what senders themselves
+  advertise (`latencyMin=11025` at 44100Hz). A floor, not an override. AudioTrack is sized once at
+  construction, so a speaker connecting mid-session does NOT resize it — unlike the visual
+  compensation, which is live.
 - **Sender name.** At `CONNECTED` the only name available is the RTSP User-Agent
   fallback ("AirPlay"). The real name arrives ~40 ms later in the now-playing
   plist, so `rememberSender` is called again from `onNowPlayingChanged`, and a

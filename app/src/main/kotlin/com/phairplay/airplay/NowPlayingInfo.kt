@@ -21,6 +21,14 @@ data class NowPlayingInfo(
     val positionSec: Double = 0.0,
     val durationSec: Double = 0.0,
     val paused: Boolean = false,
+    /**
+     * True when [title] and [artist] came from fingerprinting rather than from the sender.
+     *
+     * The UI needs to know, because an identified track has a NAME but no POSITION: we joined
+     * partway through and the sender never told us where. Anything that would imply a position --
+     * an elapsed counter, a progress bar -- has to stay hidden, or it invents one starting at zero.
+     */
+    val identified: Boolean = false,
 ) {
     /** True when the sender supplied at least a track title (vs. a bare "audio is playing" state). */
     val hasMetadata: Boolean get() = !title.isNullOrBlank()
@@ -42,7 +50,8 @@ data class NowPlayingInfo(
             durationSec == other.durationSec &&
             // Must be compared: StateFlow drops a value equal to the current one, so leaving this
             // out meant a pause never reached the UI and the progress bar kept counting.
-            paused == other.paused
+            paused == other.paused &&
+            identified == other.identified
     }
 
     override fun hashCode(): Int {

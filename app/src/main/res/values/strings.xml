@@ -309,6 +309,10 @@
     <string name="setting_artwork_lookup_subtitle">Look up missing cover art online. Sends track names to MusicBrainz.</string>
     <string name="setting_identify_tracks">Identify unknown tracks</string>
     <string name="setting_identify_tracks_subtitle">When a sender streams audio without naming it, listen for 12 seconds and ask Shazam what it is. Sends an audio fingerprint, not the audio.</string>
+    <string name="setting_identify_interval">Re-check what is playing</string>
+    <string name="setting_identify_interval_subtitle">How often to look the track up again. A stream with no metadata gives no track-change signal, so this is the only way the name keeps up with the music.</string>
+    <string name="setting_identify_interval_continuous">Continuously (12s)</string>
+    <string name="setting_identify_interval_seconds">Every %1$s</string>
     <string name="setting_backdrop">Backdrop</string>
     <string name="setting_backdrop_subtitle">What fills the screen behind the Now Playing card.</string>
     <string name="backdrop_dynamic">Dynamic</string>

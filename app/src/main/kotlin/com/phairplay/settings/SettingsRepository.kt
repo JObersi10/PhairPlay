@@ -158,6 +158,7 @@ class SettingsRepository(private val context: Context) {
                else BackdropTheme.DYNAMIC,
         artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
         identifyTracks     = this[Keys.IDENTIFY_TRACKS]         ?: false,
+        identifyIntervalSec = this[Keys.IDENTIFY_INTERVAL]      ?: AppSettings.DEFAULT_IDENTIFY_INTERVAL_SEC,
         streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
@@ -201,6 +202,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.BACKDROP_THEME]       = settings.backdropTheme.name
         this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
         this[Keys.IDENTIFY_TRACKS]      = settings.identifyTracks
+        this[Keys.IDENTIFY_INTERVAL]    = settings.identifyIntervalSec
         this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
@@ -227,6 +229,7 @@ class SettingsRepository(private val context: Context) {
         val BACKDROP_THEME      = stringPreferencesKey("backdrop_theme")
         val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
         val IDENTIFY_TRACKS     = booleanPreferencesKey("identify_tracks")
+        val IDENTIFY_INTERVAL   = intPreferencesKey("identify_interval_sec")
         val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")

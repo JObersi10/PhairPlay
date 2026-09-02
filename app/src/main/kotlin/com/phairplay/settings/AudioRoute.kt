@@ -59,5 +59,21 @@ data class AudioRoute(
          * different number. Nudge it here; every consumer reads this one constant.
          */
         const val BLUETOOTH_COMPENSATION_MS = 350
+
+        /**
+         * Smallest AudioTrack buffer worth using on a Bluetooth sink, in ms.
+         *
+         * A2DP does not deliver on a steady schedule -- it batches, it retransmits, and it shares an
+         * antenna with the Wi-Fi carrying the stream. The default 100ms buffer is comfortable on
+         * HDMI and thin here: any scheduling hiccup drains it and the result is the stutter that
+         * gets reported as "it cuts out sometimes".
+         *
+         * 250ms is not arbitrary -- it is what the senders themselves ask for. A Mac advertises
+         * `latencyMin=11025` samples at 44100Hz, which IS 250ms, so this only raises the floor to
+         * the minimum the other end already said it expects.
+         *
+         * A FLOOR, NOT AN OVERRIDE: a user who has deliberately set a larger buffer keeps it.
+         */
+        const val BLUETOOTH_MIN_BUFFER_MS = 250
     }
 }

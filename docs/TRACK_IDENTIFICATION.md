@@ -60,6 +60,60 @@ AudioStreamServer (decoded PCM, 44.1kHz stereo)
   → PhairPlayService.withIdentification()
 ```
 
+Cover art comes back as a URL and is fetched on the identifier's own worker thread, bounded — the
+URL is a third party's and its size is not ours to trust. Shazam serves `coverarthq` at 400x400,
+which is soft on a 1080p card, so the mzstatic size segment is rewritten to ask for 800x800 with the
+original URL kept as a fallback for when that rewrite does not resolve.
+
+### It re-checks on a timer, and why it has to
+
+Nameless audio carries no track identity, so there is **no track-change event** to hang a
+re-identification on — a browser tab moving to the next song in a playlist looks exactly like the
+same song continuing. Keying the answer to the SENDER instead gave one identification per session:
+the first song's title stayed on screen through every song after it.
+
+So it re-identifies on an interval — **Now Playing → Re-check what is playing** (12 / 15 / 30 / 60
+seconds, default 30). The floor is one capture window: a period under twelve seconds cannot be
+honoured, because that is how long a fingerprint takes to gather, and the timer would simply always
+be due. "Continuously" is offered but is not the default — five lookups a minute at an endpoint with
+no contract is the fastest way to get a client refused.
+
+Worst-case staleness is the interval plus the window, and a capture that straddles a song change
+matches the OLD song, pushing it to roughly twice that. At 30 s that is ~42 s, occasionally ~72 s.
+
+While the device is in power-save mode the interval is floored at
+`AppSettings.LOW_POWER_IDENTIFY_INTERVAL_SEC`. The stored setting is not overwritten, only clamped,
+so leaving power-save restores whatever was chosen.
+
+### A miss does not clear the name; silence does
+
+Lookups fail for ordinary reasons — an intro, a quiet passage, someone talking over the music — and
+blanking a correct title because one twelve-second window happened to be unrecognisable is worse
+than leaving it. The only thing that clears an identification is the audio going quiet for
+`QUIET_CLEAR_MS` (15 s), which is the one signal that genuinely means "whatever this was, it is
+over".
+
+Silence is detected from the peak sample of each packet, examined with a stride — the question is
+only "is anything happening", which the loudest sample answers as well as an average and far more
+cheaply on a thread that is decoding audio in real time.
+
+### An identified track has a name but no POSITION
+
+`NowPlayingInfo.identified` marks a title as ours rather than the sender's, and it exists for two
+reasons.
+
+**The UI needs it.** Fingerprinting joins a song partway through and nothing says how far in, so an
+elapsed counter would start at 0:00 and be wrong by however much already played. `NowPlayingScreen`
+skips the durationless clock-start for identified tracks; an unknown position shown as nothing beats
+a fabricated one shown as a number.
+
+**The service needs it more.** `withIdentification` decides "did the sender name this?" from
+`hasMetadata`, which only means "has a title". Once an identification has been applied, the value in
+`_nowPlaying` carries OUR title — so re-applying it read as the sender naming the track, called
+`clearIdentification()`, and wiped the result while cancelling the identifier. That is why only the
+FIRST song was ever identified: **every match after it destroyed itself on arrival.** The
+`&& !info.identified` guard is what stops that, and it is not optional.
+
 ### It only runs when the sender named nothing
 
 `withIdentification` is the single decision point. If `NowPlayingInfo.hasMetadata` is true it

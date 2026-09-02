@@ -936,7 +936,13 @@ class NowPlayingScreen @JvmOverloads constructor(
                 positionBaseEpoch = SystemClock.elapsedRealtime()
                 seekMultiplier = 1f
             }
-        } else if (!info.title.isNullOrBlank() && positionBaseEpoch == 0L && !isPaused) {
+        } else if (!info.title.isNullOrBlank() && !info.identified &&
+            positionBaseEpoch == 0L && !isPaused
+        ) {
+            // NOT for an identified track. Fingerprinting gives a name, never a position -- we
+            // joined the song partway through and nothing told us how far. Starting the clock here
+            // would show a counter from 0:00 that is wrong by however much of the track already
+            // played, which reads as a broken timer rather than as an unknown one.
             positionBaseMs = 0L; positionBaseEpoch = SystemClock.elapsedRealtime()
         }
 

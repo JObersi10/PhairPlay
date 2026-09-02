@@ -198,6 +198,8 @@ data class AppSettings(
     /** Identify the track by fingerprinting the audio when the sender names none. Off by default:
      *  it sends a fingerprint of what is playing to Shazam, which is the user's call, not ours. */
     val identifyTracks: Boolean = false,
+    /** Seconds between re-identifications while nameless audio plays. See [IDENTIFY_INTERVAL_CHOICES]. */
+    val identifyIntervalSec: Int = DEFAULT_IDENTIFY_INTERVAL_SEC,
 
     /** What to do when a stream ends. */
     val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,
@@ -319,6 +321,28 @@ data class AppSettings(
     companion object {
         /** The default settings instance used on first launch. */
         val DEFAULT = AppSettings()
+
+        /**
+         * How often the fingerprinter re-checks what is playing.
+         *
+         * 12 is "continuously": one capture is twelve seconds, so at that setting the next one
+         * starts as the last finishes. It is offered because a stream that changes song often is
+         * otherwise wrong for up to a minute -- but it is five lookups a minute at an endpoint with
+         * no contract, which is the fastest way to get a client refused, so it is not the default.
+         */
+        val IDENTIFY_INTERVAL_CHOICES = listOf(12, 15, 30, 60)
+
+        const val DEFAULT_IDENTIFY_INTERVAL_SEC = 30
+
+        /**
+         * The floor used while the device is in power-save mode.
+         *
+         * Fingerprinting is a burst of FFTs plus a network round trip; doing it every twelve or
+         * fifteen seconds is exactly the kind of background work power-save exists to stop. The
+         * setting is not overwritten -- it is only clamped while saving -- so turning power-save off
+         * restores whatever was chosen.
+         */
+        const val LOW_POWER_IDENTIFY_INTERVAL_SEC = 30
 
         /** Default AudioTrack buffer, in ms — see [audioBufferMs]. */
         const val DEFAULT_AUDIO_BUFFER_MS = 100

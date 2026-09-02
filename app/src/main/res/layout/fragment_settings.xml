@@ -781,6 +781,54 @@
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
+
+        <LinearLayout
+            android:id="@+id/row_identify_interval"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="@dimen/row_padding_horizontal"
+            android:background="@drawable/row_focus_selector"
+            android:focusable="true">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_identify_interval"
+                    android:textColor="@color/text_primary"
+                    android:textSize="@dimen/text_body" />
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/setting_identify_interval_subtitle"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="@dimen/text_secondary" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/text_identify_interval_value"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:textColor="@color/text_secondary"
+                android:textSize="16sp" />
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_chevron_right"
+                android:importantForAccessibility="no" />
+        </LinearLayout>
                 </LinearLayout>
 
                 <TextView

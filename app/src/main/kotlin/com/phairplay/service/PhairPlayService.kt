@@ -156,6 +156,167 @@ class PhairPlayService : Service() {
     @Volatile private var identifiedFor: String? = null
 
     /**
+     * Cover art for the identified track, as BYTES rather than the URL Shazam returned.
+     *
+     * [NowPlayingInfo.artwork] is a ByteArray: every other path fills it from what the sender
+     * pushed, and the Now Playing card and the notification both read it directly. Handing either
+     * of them a URL instead would mean teaching both to fetch, on the main thread, for one case.
+     */
+    @Volatile private var identifiedArtwork: ByteArray? = null
+
+    /**
+     * Keeps the fingerprinter's switch in step with the setting, for as long as the service lives.
+     *
+     * A COLLECTOR, NOT A READ IN startReceivers(). Everything else in this service samples the
+     * settings once, with `settingsFlow.first()`, at the moment the receivers start -- which is
+     * correct for the things that are only consulted while BUILDING a receiver, and silently wrong
+     * for anything toggled during a session. Identification is exactly that: the switch is on the
+     * Now Playing settings page, so the natural moment to reach for it is while nameless audio is
+     * already playing, and a one-shot read means it does nothing until the receivers next restart.
+     * That failure is invisible -- the setting shows as on, and nothing happens, with nothing in the
+     * log to say why.
+     */
+    private fun watchIdentifySetting() {
+        serviceScope.launch {
+            settingsRepository.settingsFlow.collect { settings ->
+                val was = com.phairplay.media.shazam.TrackIdentifier.enabled
+                com.phairplay.media.shazam.TrackIdentifier.enabled = settings.identifyTracks
+                com.phairplay.media.shazam.TrackIdentifier.intervalSec = identifyInterval(settings)
+                if (was == settings.identifyTracks) return@collect
+                Logger.i("Shazam: identification ${if (settings.identifyTracks) "enabled" else "disabled"}")
+                if (!settings.identifyTracks) {
+                    clearIdentification()
+                } else {
+                    // Switched on mid-session: the sender will not re-announce its lack of metadata,
+                    // so ask now rather than waiting for a track change that may never come.
+                    _nowPlaying.value?.let { if (!it.hasMetadata) com.phairplay.media.shazam.TrackIdentifier.request() }
+                }
+            }
+        }
+    }
+
+    /**
+     * The re-check interval to actually use, which is the user's choice unless the device is saving
+     * power.
+     *
+     * Fingerprinting is a burst of FFTs plus a network round trip, repeated on a timer -- precisely
+     * the sort of background work power-save mode exists to stop. The stored setting is left alone
+     * and only clamped here, so leaving power-save restores whatever was chosen without the user
+     * having to set it again.
+     */
+    private fun identifyInterval(settings: AppSettings): Int {
+        val chosen = settings.identifyIntervalSec
+        val saving = runCatching {
+            (getSystemService(Context.POWER_SERVICE) as PowerManager).isPowerSaveMode
+        }.getOrDefault(false)
+        if (!saving) return chosen
+        val floored = maxOf(chosen, AppSettings.LOW_POWER_IDENTIFY_INTERVAL_SEC)
+        if (floored != chosen) {
+            Logger.i("Shazam: power save is on — re-checking every ${floored}s instead of ${chosen}s")
+        }
+        return floored
+    }
+
+    /**
+     * The AudioTrack buffer to actually use, raised to a floor when the output is Bluetooth.
+     *
+     * The dial in Settings is calibrated for HDMI, where 100ms is comfortable. On A2DP it is thin --
+     * delivery is bursty, retransmits happen, and the radio is shared with the Wi-Fi carrying the
+     * stream -- so a hiccup drains the buffer and the audio stutters. Raising the floor to what the
+     * sender itself advertises as its minimum (250ms) fixes that without touching the setting, so
+     * the dial keeps meaning what it says the moment the speaker goes away.
+     *
+     * ONLY APPLIED WHEN THE TRACK IS CREATED. AudioTrack is sized once at construction, so a
+     * speaker connecting mid-session does not resize it -- that is the same reason changing the
+     * setting asks for a restart. The visual compensation IS live; this cannot be.
+     */
+    private fun effectiveAudioBufferMs(chosen: Int): Int {
+        if (routeCompensationMs <= 0) return chosen
+        val floored = maxOf(chosen, AudioRoute.BLUETOOTH_MIN_BUFFER_MS)
+        if (floored != chosen) {
+            Logger.i("Audio buffer raised ${chosen}ms → ${floored}ms for the Bluetooth route " +
+                "(the setting is unchanged)")
+        }
+        return floored
+    }
+
+    /** Forgets any identification and stops listening. Called wherever a session is torn down. */
+    private fun clearIdentification() {
+        com.phairplay.media.shazam.TrackIdentifier.cancel()
+        forgetIdentification()
+        identifiedFor = null
+    }
+
+    /** Drops the answer but not the listening state. */
+    private fun forgetIdentification() {
+        identifiedTitle = null
+        identifiedArtist = null
+        identifiedArtwork = null
+    }
+
+    /**
+     * Rewrites a cover URL to ask for a larger rendition.
+     *
+     * Shazam's `coverarthq` is 400x400, which is soft on a 1080p television because the Now Playing
+     * card draws artwork much larger than that. The URLs are Apple's mzstatic image service, where
+     * the size is a path segment (`400x400cc.jpg`) that the server will honour at other values, so
+     * asking for [ARTWORK_PIXELS] costs nothing but the larger download.
+     *
+     * Returns the URL unchanged when it does not match that shape -- Shazam does not promise this
+     * host, and a rewritten URL that 404s is why the caller keeps the original as a fallback rather
+     * than trusting this.
+     */
+    private fun upscaleArtworkUrl(url: String): String =
+        ARTWORK_SIZE_SEGMENT.replace(url) { m ->
+            "/${ARTWORK_PIXELS}x$ARTWORK_PIXELS${m.groupValues[3]}."
+        }
+
+    /**
+     * Downloads cover art for an identified track.
+     *
+     * Bounded read: the URL comes from a third party, so its size is not ours to trust. Shazam's
+     * covers are a few hundred kilobytes, and anything past the cap is abandoned rather than
+     * allowed to run a television out of memory.
+     *
+     * Called on the identifier's own worker thread, which is why it can block: it keeps
+     * [ShazamClient] a lookup rather than making it a downloader too.
+     */
+    private fun fetchArtwork(url: String): ByteArray? {
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                instanceFollowRedirects = true
+                connectTimeout = ARTWORK_TIMEOUT_MS
+                readTimeout = ARTWORK_TIMEOUT_MS
+            }
+            if (conn.responseCode !in 200..299) {
+                Logger.i("Shazam: cover art HTTP ${conn.responseCode}")
+                return null
+            }
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(16 * 1024)
+            conn.inputStream.use { stream ->
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                    if (out.size() > MAX_ARTWORK_BYTES) {
+                        Logger.w("Shazam: cover art over ${MAX_ARTWORK_BYTES / 1024}KB — abandoned")
+                        return null
+                    }
+                }
+            }
+            out.toByteArray().takeIf { it.isNotEmpty() }
+                ?.also { Logger.i("Shazam: cover art ${it.size} bytes") }
+        } catch (e: Exception) {
+            Logger.i("Shazam: cover art failed (${e.javaClass.simpleName}: ${e.message})")
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+    }
+
+    /**
      * Applies the sender's metadata, falling back to whatever the fingerprinter found.
      *
      * The sender ALWAYS wins. A track it names is authoritative and an identification is a guess, so
@@ -163,33 +324,33 @@ class PhairPlayService : Service() {
      * starts naming things, which is what happens when someone switches from a browser tab to Apple
      * Music without ending the session.
      */
-    /** Forgets any identification and stops listening. Called wherever a session is torn down. */
-    private fun clearIdentification() {
-        com.phairplay.media.shazam.TrackIdentifier.cancel()
-        identifiedTitle = null
-        identifiedArtist = null
-        identifiedFor = null
-    }
-
     private fun withIdentification(
         info: com.phairplay.airplay.NowPlayingInfo,
     ): com.phairplay.airplay.NowPlayingInfo {
-        if (info.hasMetadata) {
-            com.phairplay.media.shazam.TrackIdentifier.cancel()
-            identifiedTitle = null
-            identifiedArtist = null
-            identifiedFor = null
+        // `&& !info.identified` is load-bearing. hasMetadata only means "has a title", and once an
+        // identification has been applied the value in _nowPlaying carries OUR title -- so without
+        // this the re-check's own result comes back through here, is mistaken for the sender naming
+        // the track, and clearIdentification() wipes it and cancels the identifier. That is why
+        // only the FIRST song was ever identified: the second match destroyed itself on arrival.
+        if (info.hasMetadata && !info.identified) {
+            clearIdentification()
             return info
         }
         // Nameless audio: ask for an identification, unless one for this sender already landed.
         if (identifiedFor != info.senderName) {
-            identifiedTitle = null
-            identifiedArtist = null
+            forgetIdentification()
             com.phairplay.media.shazam.TrackIdentifier.request()
             return info
         }
         val title = identifiedTitle ?: return info
-        return info.copy(title = title, artist = identifiedArtist)
+        // Artwork only if the sender pushed none. Nameless audio never does today, but "the sender
+        // wins" has to hold for every field, not only the ones where it currently matters.
+        return info.copy(
+            title = title,
+            artist = identifiedArtist,
+            artwork = info.artwork ?: identifiedArtwork,
+            identified = true,
+        )
     }
 
     private fun emitRemoteKey(keyCode: Int) {
@@ -319,6 +480,7 @@ class PhairPlayService : Service() {
         PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
         DiagnosticServer.statusProvider = ::diagnosticStatus
         DiagnosticServer.start(serviceScope)
+        watchIdentifySetting()
         startAudioRouteWatcher()
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
@@ -852,8 +1014,8 @@ class PhairPlayService : Service() {
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
         artworkLookup = settings.artworkLookup
-        com.phairplay.media.shazam.TrackIdentifier.enabled = settings.identifyTracks
-        if (!settings.identifyTracks) com.phairplay.media.shazam.TrackIdentifier.cancel()
+        // `enabled` is NOT set here -- watchIdentifySetting() owns it, so that toggling the switch
+        // during a session takes effect immediately instead of at the next receiver restart.
         com.phairplay.media.shazam.TrackIdentifier.onIdentified = { match ->
             // Recorded against the sender that was playing when the lookup finished. If the session
             // ended in the meantime the name is simply never used -- better than attaching a track
@@ -861,8 +1023,21 @@ class PhairPlayService : Service() {
             identifiedFor = _nowPlaying.value?.senderName
             identifiedTitle = match.title
             identifiedArtist = match.artist
+            identifiedArtwork = match.artworkUrl?.let { url ->
+                // Ask for a bigger rendition first. Shazam hands back a 400px cover, which is soft
+                // on a 1080p television -- the card draws it far larger than that.
+                fetchArtwork(upscaleArtworkUrl(url)) ?: fetchArtwork(url)
+            }
             Logger.i("Shazam: naming this stream \"${match.title}\"" +
                 (match.artist?.let { " — $it" } ?: "") + " for sender ${identifiedFor ?: "(gone)"}")
+            _nowPlaying.value?.let { current -> _nowPlaying.value = withIdentification(current) }
+        }
+        com.phairplay.media.shazam.TrackIdentifier.onCleared = {
+            // The audio went quiet for long enough that whatever was named is over. Drop the name
+            // rather than leave it sitting under silence, and re-render so the card follows.
+            Logger.i("Shazam: dropping the identified name")
+            forgetIdentification()
+            identifiedFor = null
             _nowPlaying.value?.let { current -> _nowPlaying.value = withIdentification(current) }
         }
         // Switching the remote off must also clear what it drew and remembered, not just stop new
@@ -1139,7 +1314,7 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
-            audioBufferMs = settings.audioBufferMs,
+            audioBufferMs = effectiveAudioBufferMs(settings.audioBufferMs),
             beatDelayMs = routeCompensationMs,
             // The FLAG opts in; the HARDWARE decides how far. Asking for more streams than the
             // device can decode would hand a sender a session that negotiates cleanly and then
@@ -1477,6 +1652,16 @@ class PhairPlayService : Service() {
     }
 
     companion object {
+        /** Cap on cover art fetched from Shazam. Its covers are a few hundred KB. */
+        private const val MAX_ARTWORK_BYTES = 4 * 1024 * 1024
+        private const val ARTWORK_TIMEOUT_MS = 8000
+
+        /** Rendition asked for in [upscaleArtworkUrl]. 800 is sharp at the card's drawn size. */
+        private const val ARTWORK_PIXELS = 800
+
+        /** `/400x400cc.` in an mzstatic URL — the size, and any suffix letters before the dot. */
+        private val ARTWORK_SIZE_SEGMENT = Regex("""/(\d{2,4})x(\d{2,4})([a-z-]*)\.""")
+
         const val CHANNEL_ID          = "phairplay_service_channel"
         const val CHANNEL_ID_INCOMING = "phairplay_incoming_channel"
         const val NOTIFICATION_ID          = 1001
