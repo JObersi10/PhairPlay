@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The unread dot on Settings when a background update check found something.
+
+    Deliberately tiny and unlabelled. The check runs on its own and never installs anything, so the
+    only honest claim it can make is "there is something to look at" — a dot says exactly that and
+    nothing more, without a dialog interrupting whatever is on screen.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="oval">
+    <solid android:color="@color/status_stopped" />
+    <size android:width="10dp" android:height="10dp" />
+</shape>

@@ -257,11 +257,10 @@ class SettingsFragment : Fragment() {
 
     private fun showNetworkInfo() {
         val ip = getWifiIp() ?: return
+        // One port now: / is the dump and /tail is the live stream.
         val port = com.phairplay.diagnostic.DiagnosticServer.PORT
-        val tailPort = com.phairplay.diagnostic.DiagnosticServer.TAIL_PORT
         textVersionValue.text =
-            getString(R.string.settings_version_logs,
-                BuildConfig.VERSION_NAME, ip, port.toString(), tailPort.toString())
+            getString(R.string.settings_version_logs, BuildConfig.VERSION_NAME, ip, port.toString())
     }
 
     private fun getWifiIp(): String? {

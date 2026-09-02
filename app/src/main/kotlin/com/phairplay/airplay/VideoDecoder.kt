@@ -40,6 +40,18 @@ class VideoDecoder(
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
 
+    /**
+     * Frames this decoder refused, ever.
+     *
+     * Counted rather than only logged because a rejected frame breaks the reference chain exactly
+     * as a dropped one does — the caller has to know, so it can wait for the next IDR instead of
+     * feeding predicted frames onto a reference that was never accepted. Without this, a stream
+     * reporting `dropped=0` could still be visibly smearing and nothing said why.
+     */
+    @Volatile
+    var decodeErrorCount: Int = 0
+        private set
+
     // Track whether the decoder has been initialized (to prevent double-init)
     @Volatile
     private var isInitialized = false
@@ -190,9 +202,11 @@ class VideoDecoder(
         } catch (e: IllegalStateException) {
             // MediaCodec is now in the error state and cannot recover — flag for recreation.
             Logger.e("VideoDecoder entered error state — will recreate", e)
+            decodeErrorCount++
             isHealthy = false
         } catch (e: Exception) {
             Logger.e("Error decoding NAL unit", e)
+            decodeErrorCount++
         }
     }
 

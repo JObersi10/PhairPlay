@@ -8,7 +8,6 @@ import java.net.ServerSocket
 
 object DiagnosticServer {
     const val PORT = 8001
-    const val TAIL_PORT = 8002
     @Volatile private var started = false
     private var dumpSocket: ServerSocket? = null
     private var tailSocket: ServerSocket? = null
@@ -33,60 +32,74 @@ object DiagnosticServer {
     fun start(scope: CoroutineScope) {
         if (started) return
         started = true
-        // Full dump server
+        // ONE PORT, TWO PATHS. This used to bind 8001 for the dump and 8002 for the live tail, which
+        // is two listening sockets and two things to remember for one feature. They are the same
+        // resource viewed two ways, so they are the same port now and the request path chooses:
+        //   GET /       the full dump, then close
+        //   GET /tail   the same buffer, streamed, held open
         scope.launch(Dispatchers.IO) {
             runCatching {
                 val server = ServerSocket(PORT).also { dumpSocket = it }
-                Logger.i("DiagnosticServer dump on :$PORT  tail on :$TAIL_PORT")
+                Logger.i("DiagnosticServer on :$PORT  (/ = dump, /tail = live)")
                 while (true) {
                     val client = server.accept()
                     launch(Dispatchers.IO) {
                         runCatching {
-                            val out = client.getOutputStream()
-                            val status = runCatching { statusProvider?.invoke() }.getOrNull()
-                            val body = (status?.let { "$it\n\n" }.orEmpty() + LogBuffer.dump())
-                                .toByteArray()
-                            out.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n".toByteArray())
-                            out.write(body)
-                            out.flush()
-                            client.close()
-                        }
+                            // Read only the request line. Nothing here needs headers, and reading to
+                            // the blank line would block on a client that never sends one.
+                            val line = StringBuilder()
+                            val input = client.getInputStream()
+                            while (line.length < 512) {
+                                val c = input.read()
+                                if (c < 0 || c == '\n'.code) break
+                                if (c != '\r'.code) line.append(c.toChar())
+                            }
+                            val path = line.toString().split(' ').getOrNull(1).orEmpty()
+                            if (path.startsWith("/tail")) streamTail(client) else writeDump(client)
+                        }.onFailure { client.runCatching { close() } }
                     }
                 }
             // stop() clears `started` before closing the socket, so a throw while stopped is the
             // expected accept() interruption — logging it at ERROR flooded the ring buffer with
             // stack traces on every clean shutdown.
-            }.onFailure { if (started) Logger.e("DiagnosticServer (dump) error", it) }
+            }.onFailure { if (started) Logger.e("DiagnosticServer error", it) }
         }
-        // Streaming tail server
-        scope.launch(Dispatchers.IO) {
-            runCatching {
-                val server = ServerSocket(TAIL_PORT).also { tailSocket = it }
-                while (true) {
-                    val client = server.accept()
-                    launch(Dispatchers.IO) {
-                        runCatching {
-                            val out = client.getOutputStream()
-                            out.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n".toByteArray())
-                            out.flush()
-                            var cursor = 0
-                            while (true) {
-                                val (lines, newSize) = LogBuffer.dumpFrom(cursor)
-                                if (lines.isNotEmpty()) {
-                                    val text = lines.joinToString("\n") + "\n"
-                                    val bytes = text.toByteArray()
-                                    out.write("${bytes.size.toString(16)}\r\n".toByteArray())
-                                    out.write(bytes)
-                                    out.write("\r\n".toByteArray())
-                                    out.flush()
-                                    cursor = newSize
-                                }
-                                Thread.sleep(100)
-                            }
-                        }.onFailure { client.runCatching { close() } }
-                    }
-                }
-            }.onFailure { if (started) Logger.e("DiagnosticServer (tail) error", it) }
+    }
+
+    /** The whole buffer, led by the status header, then the connection closes. */
+    private fun writeDump(client: java.net.Socket) {
+        val out = client.getOutputStream()
+        val status = runCatching { statusProvider?.invoke() }.getOrNull()
+        val body = (status?.let { "$it\n\n" }.orEmpty() + LogBuffer.dump()).toByteArray()
+        out.write(
+            ("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" +
+             "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n").toByteArray()
+        )
+        out.write(body)
+        out.flush()
+        client.close()
+    }
+
+    /** The same buffer, chunked and held open, so new lines arrive as they are written. */
+    private fun streamTail(client: java.net.Socket) {
+        val out = client.getOutputStream()
+        out.write(
+            ("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n" +
+             "Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n").toByteArray()
+        )
+        out.flush()
+        var cursor = 0
+        while (true) {
+            val (lines, newSize) = LogBuffer.dumpFrom(cursor)
+            if (lines.isNotEmpty()) {
+                val bytes = (lines.joinToString("\n") + "\n").toByteArray()
+                out.write("${bytes.size.toString(16)}\r\n".toByteArray())
+                out.write(bytes)
+                out.write("\r\n".toByteArray())
+                out.flush()
+                cursor = newSize
+            }
+            Thread.sleep(100)
         }
     }
 }

@@ -113,6 +113,24 @@ class MirrorStreamServer(
     // frames until the next keyframe (IDR) so it never decodes a reference-broken, corrupt stream.
     @Volatile private var awaitingKeyframe = false
 
+    // ─── Artifact forensics ──────────────────────────────────────────────────
+    // Smearing that persists until the picture is forced to change is ALWAYS a broken reference
+    // chain: a frame was decoded whose reference never arrived, and every predicted frame after it
+    // inherits the damage until the sender sends another IDR. The question is only ever which of
+    // three things broke the chain, and these three counters separate them:
+    //
+    //   framesDropped  — we discarded a frame, so the fault is ours (queue too small, decoder slow)
+    //   decodeErrors   — the decoder rejected a frame, so the fault is in what we fed it
+    //   keyframe gap   — neither, and the sender simply is not sending IDRs often enough to recover
+    //
+    // Without the last two, "dropped=0" looked like a clean bill of health while the picture was
+    // visibly broken. It only ruled out the first cause.
+    private var decodeErrors = 0
+    private var keyframesSeen = 0
+    private var lastKeyframeMs = 0L
+    private var longestKeyframeGapMs = 0L
+    private var framesSinceKeyframe = 0
+
     /** Caps the verbose unknown-payload dump so a long session doesn't flood the log buffer. */
     private var unknownTypeLogged = 0
 
@@ -248,9 +266,15 @@ class MirrorStreamServer(
             StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
             lastStatMs = now
             StreamStats.videoDropPct = framesDropped * 100 / framesIn
+            // Everything needed to tell the three artifact causes apart, in one line, because the
+            // ring buffer is small and this has to survive being read after the fact.
+            val sinceKeyframe = if (lastKeyframeMs == 0L) -1 else now - lastKeyframeMs
             Logger.i("Video stats: in=$framesIn dropped=$framesDropped " +
                 "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps " +
+                "| decodeErr=$decodeErrors idr=$keyframesSeen last=${sinceKeyframe}ms " +
+                "worstGap=${longestKeyframeGapMs}ms sinceIdr=$framesSinceKeyframe " +
                 "→ ${surfaceLabel(configuredSurface)}")
+            longestKeyframeGapMs = 0L
         }
     }
 
@@ -393,15 +417,38 @@ class MirrorStreamServer(
             d.release(); decoder = null; configuredSurface = null; lastSps = null; lastPps = null
             return
         }
+        val keyframe = isKeyframe(annexB)
+        if (keyframe) {
+            val now = System.currentTimeMillis()
+            if (lastKeyframeMs != 0L) {
+                val gap = now - lastKeyframeMs
+                if (gap > longestKeyframeGapMs) longestKeyframeGapMs = gap
+            }
+            lastKeyframeMs = now
+            keyframesSeen++
+            framesSinceKeyframe = 0
+        } else {
+            framesSinceKeyframe++
+        }
+
         if (awaitingKeyframe) {
             // After a dropped frame the stream is reference-broken; skip until the next IDR so we
             // don't feed the decoder predicted frames with missing references (which smear/blocky).
-            if (!isKeyframe(annexB)) return
+            if (!keyframe) return
             awaitingKeyframe = false
-            Logger.i("Mirror: resynced on keyframe after a dropped frame")
+            Logger.i("Mirror: resynced on keyframe after ${'$'}framesSinceKeyframe skipped frames")
         }
         if (framePtsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
+        val errorsBefore = d.decodeErrorCount
         d.decodeNalUnit(annexB, framePtsUs)
+        if (d.decodeErrorCount != errorsBefore) {
+            decodeErrors++
+            // A rejected frame breaks the chain exactly as a dropped one does, and until now
+            // nothing said so — the stream carried on feeding predicted frames onto a reference
+            // the decoder never accepted.
+            awaitingKeyframe = true
+            Logger.w("Mirror: decoder rejected a frame — waiting for the next IDR to resync")
+        }
         framePtsUs += FRAME_INTERVAL_US
     }
 

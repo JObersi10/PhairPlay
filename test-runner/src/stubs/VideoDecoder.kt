@@ -28,6 +28,7 @@ class VideoDecoder(outputSurface: Any?, onOutputSize: ((Int, Int) -> Unit)? = nu
      */
     fun setOutputSurface(surface: Any?): Boolean = false
 
+    val decodeErrorCount: Int = 0
     fun release() {}
 
     companion object {

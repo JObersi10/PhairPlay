@@ -294,7 +294,7 @@
     <string name="time_remaining_format">-%1$s</string>
     <string name="audio_from_sender">Audio from %1$s</string>
     <string name="onboarding_step">STEP %1$d OF %2$d</string>
-    <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  Tail: http://%2$s:%4$s</string>
+    <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  ·  live: /tail</string>
 
     <!-- Permissions section -->
     <string name="settings_section_permissions">Permissions</string>

@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
 import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.service.PhairPlayService
@@ -90,6 +91,15 @@ class HomeFragment : Fragment() {
     override fun onResume() {
         super.onResume()
         receiverField.resume()
+        // Re-read on every return rather than collecting: the background check writes this at most
+        // once every six hours, and coming back to Home is the moment it can be acted on.
+        viewLifecycleOwner.lifecycleScope.launch {
+            val pending = runCatching {
+                com.phairplay.settings.SettingsRepository(requireContext())
+                    .settingsFlow.first().pendingUpdateTag
+            }.getOrNull().orEmpty()
+            showUpdateBadge(pending.isNotBlank())
+        }
     }
 
     override fun onPause() {
@@ -176,6 +186,22 @@ class HomeFragment : Fragment() {
      * Configures Start / Stop / Restart button click listeners.
      * Calls [ServiceController] which sends Intent actions to [PhairPlayService].
      */
+    /**
+     * Shows an unread dot on Settings when the background check has found an update.
+     *
+     * A compound drawable rather than a badge view: the button already sizes itself to its text, so
+     * a dot on the end travels with it and needs no layout of its own. Cleared when there is nothing
+     * pending, because a badge that outlives the thing it points at teaches people to ignore badges.
+     */
+    private fun showUpdateBadge(pending: Boolean) {
+        val dot = if (pending) R.drawable.update_badge else 0
+        btnSettings.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, dot, 0)
+        btnSettings.compoundDrawablePadding = if (pending) dp(8) else 0
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
     private fun configureButtons() {
         btnSettings.setOnClickListener {
             (activity as? com.phairplay.MainActivity)?.openSettings()
