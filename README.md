@@ -33,6 +33,11 @@ per second and each sender is charged for the resolution it actually negotiated.
 report, so the picture and the visuals are held back to meet it. Connect a speaker and everything
 slides back; disconnect and it snaps forward. There is nothing to tune.
 
+**Identifies what is playing when the sender does not say.** A browser tab or a game streams bare
+audio with no title attached, which normally leaves the screen showing nothing but the device name.
+Switch this on and PhairPlay listens for twelve seconds and asks Shazam. Off by default, and it
+sends a fingerprint rather than the audio.
+
 **Control the sender from your TV remote** — play, pause, skip, and hold left or right to scrub.
 
 **DLNA / UPnP MediaRenderer** for VLC, Plex and BubbleUPnP, and **Miracast** for Android and Windows.
@@ -106,6 +111,7 @@ curl -s http://<tv-ip>:8001/
 | [SETTINGS.md](docs/SETTINGS.md) | Every setting, what it does, and when to change it |
 | [MULTI_SCREEN.md](docs/MULTI_SCREEN.md) | Multi-sender design, and the decoder limits that bound it |
 | [PROJECTOR_MODE.md](docs/PROJECTOR_MODE.md) | The band analysis and orb rendering, as a porting guide |
+| [TRACK_IDENTIFICATION.md](docs/TRACK_IDENTIFICATION.md) | Fingerprinting audio the sender never named |
 | [UPDATE_CHECKER.md](docs/UPDATE_CHECKER.md) | In-app updates — read before touching that code |
 | [PROTOCOL_RESOURCES.md](docs/PROTOCOL_RESOURCES.md) | External references, and which are known dead ends |
 | [PERMISSIONS.md](docs/PERMISSIONS.md) | What each permission is for |

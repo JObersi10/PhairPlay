@@ -30,6 +30,7 @@ The TV remote controls the **sender**, over DACP.
 ## Now Playing card
 
 - Artwork, title, artist, album, composer/year, progress with elapsed and remaining
+- Optional Shazam fingerprinting to name tracks a sender streams without metadata
 - Source pill — "Audio from <device>"
 - **MENU** cycles six layouts: full, small centred, and each of the four corners.
   Resets to full at the end of every session.

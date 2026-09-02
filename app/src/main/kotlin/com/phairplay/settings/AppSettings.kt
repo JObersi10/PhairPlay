@@ -195,6 +195,9 @@ data class AppSettings(
      * sensible default. Uses MusicBrainz + the Cover Art Archive — see CoverArtFinder for why those.
      */
     val artworkLookup: Boolean = false,
+    /** Identify the track by fingerprinting the audio when the sender names none. Off by default:
+     *  it sends a fingerprint of what is playing to Shazam, which is the user's call, not ours. */
+    val identifyTracks: Boolean = false,
 
     /** What to do when a stream ends. */
     val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,

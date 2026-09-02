@@ -66,6 +66,7 @@ class SettingsFragment : Fragment() {
     private lateinit var rowBackdropTheme: View
     private lateinit var textBackdropThemeValue: TextView
     private lateinit var rowArtworkLookup: View
+    private lateinit var rowIdentifyTracks: View
     private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
@@ -137,6 +138,7 @@ class SettingsFragment : Fragment() {
         rowBackdropTheme    = view.findViewById(R.id.row_backdrop_theme)
         textBackdropThemeValue = view.findViewById(R.id.text_backdrop_theme_value)
         rowArtworkLookup    = view.findViewById(R.id.row_artwork_lookup)
+        rowIdentifyTracks   = view.findViewById(R.id.row_identify_tracks)
         rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
@@ -246,6 +248,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowArtworkLookup, R.string.setting_artwork_lookup,    R.string.setting_artwork_lookup_subtitle)
+        configureToggleRow(rowIdentifyTracks, R.string.setting_identify_tracks,  R.string.setting_identify_tracks_subtitle)
         configureToggleRow(rowStreamEndAction, R.string.setting_stream_end,     R.string.setting_stream_end_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
@@ -326,6 +329,7 @@ class SettingsFragment : Fragment() {
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         showBackdropTheme(settings.backdropTheme)
         setToggle(rowArtworkLookup, settings.artworkLookup)
+        setToggle(rowIdentifyTracks, settings.identifyTracks)
         setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
@@ -421,6 +425,7 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         rowBackdropTheme.setOnClickListener { pickBackdropTheme() }
         setToggleListener(rowArtworkLookup) { enabled -> save { it.copy(artworkLookup = enabled) } }
+        setToggleListener(rowIdentifyTracks) { enabled -> save { it.copy(identifyTracks = enabled) } }
         setToggleListener(rowStreamEndAction) { enabled ->
             save { it.copy(streamEndAction = if (enabled) StreamEndAction.EXIT_APP else StreamEndAction.STAY_IN_APP) }
         }

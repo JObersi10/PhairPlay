@@ -157,6 +157,7 @@ class SettingsRepository(private val context: Context) {
             ?: if (this[Keys.PROJECTOR_MODE] == true) BackdropTheme.PROJECTOR
                else BackdropTheme.DYNAMIC,
         artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
+        identifyTracks     = this[Keys.IDENTIFY_TRACKS]         ?: false,
         streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
@@ -199,6 +200,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
         this[Keys.BACKDROP_THEME]       = settings.backdropTheme.name
         this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
+        this[Keys.IDENTIFY_TRACKS]      = settings.identifyTracks
         this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
@@ -224,6 +226,7 @@ class SettingsRepository(private val context: Context) {
         val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
         val BACKDROP_THEME      = stringPreferencesKey("backdrop_theme")
         val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
+        val IDENTIFY_TRACKS     = booleanPreferencesKey("identify_tracks")
         val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")

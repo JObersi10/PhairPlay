@@ -48,6 +48,7 @@ Each can be turned off independently; turning one off frees its port and stops i
 | **Screensaver** | On | Dims to a drifting card on black when nothing changes, and pixel-shifts for burn-in protection. |
 | **Screensaver timeout** | 15 min | Minutes of no remote input or track change before it starts. |
 | **Online cover art** | Off | Looks up missing artwork by title via MusicBrainz and the Cover Art Archive. **Sends track names to those services while on**, which is why it is off by default. Needs no API key. |
+| **Identify unknown tracks** | Off | When a sender streams audio without naming it, captures twelve seconds and asks Shazam what it is. Never runs when the sender supplies metadata, and the sender's own data always wins. **Sends an audio fingerprint — not audio — to Shazam while on**, hence off by default. See [TRACK_IDENTIFICATION.md](TRACK_IDENTIFICATION.md). |
 
 ## Pairing & security
 

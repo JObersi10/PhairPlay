@@ -775,6 +775,12 @@
             android:layout_height="wrap_content"
             android:minHeight="@dimen/row_height"
             android:paddingVertical="@dimen/space_sm" />
+<include layout="@layout/settings_toggle_row"
+            android:id="@+id/row_identify_tracks"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm" />
                 </LinearLayout>
 
                 <TextView

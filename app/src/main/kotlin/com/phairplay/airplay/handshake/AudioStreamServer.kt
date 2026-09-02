@@ -500,6 +500,7 @@ class AudioStreamServer(
         if (firstPcm) { Logger.i("Audio: first decoded ALAC PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
         if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
         emitEnergy(pcm)
+        offerForIdentification(pcm)
     }
 
     /** True if this RTP sequence was already processed (a redundant retransmission). */
@@ -538,6 +539,7 @@ class AudioStreamServer(
             // this runs on the dedicated playback thread, not the socket-receive thread.
             if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
             emitEnergy(pcm)
+            offerForIdentification(pcm)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
         }
@@ -552,6 +554,17 @@ class AudioStreamServer(
      * to keep only bass, measures energy in short windows, and fires when a window jumps well above
      * the recent running mean. The result is a punch that decays, which is what reads as a beat.
      */
+    /**
+     * Feeds the fingerprinter, which is a no-op unless it has been armed.
+     *
+     * Called next to [emitEnergy] from both decoder paths rather than inside it: the two do
+     * unrelated work on the same bytes, and burying a network-bound feature inside the function
+     * named "emit energy" is how it becomes impossible to find later.
+     */
+    private fun offerForIdentification(pcm: ByteArray) {
+        com.phairplay.media.shazam.TrackIdentifier.offer(pcm, sampleRate, channels)
+    }
+
     private fun emitEnergy(pcm: ByteArray) {
         // Window energy, mono, low-passed to ~130Hz with a one-pole filter. The same pass also runs
         // the three-band bank below, so the PCM is walked once rather than four times.

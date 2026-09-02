@@ -143,6 +143,55 @@ class PhairPlayService : Service() {
     /** Mirror of AppSettings.artworkLookup, read from the DLNA artwork thread. */
     @Volatile private var artworkLookup: Boolean = false
 
+    /**
+     * What the fingerprinter last identified, and which sender it was for.
+     *
+     * Held rather than merged straight into the flow because the identification arrives ten to
+     * fifteen seconds after the audio started, on its own thread, and the sender keeps pushing
+     * (still nameless) now-playing updates the whole time. Without somewhere to keep the answer, the
+     * very next push would overwrite it and the title would flash on screen and vanish.
+     */
+    @Volatile private var identifiedTitle: String? = null
+    @Volatile private var identifiedArtist: String? = null
+    @Volatile private var identifiedFor: String? = null
+
+    /**
+     * Applies the sender's metadata, falling back to whatever the fingerprinter found.
+     *
+     * The sender ALWAYS wins. A track it names is authoritative and an identification is a guess, so
+     * the guess is only ever used to fill a hole -- and it is dropped outright as soon as the sender
+     * starts naming things, which is what happens when someone switches from a browser tab to Apple
+     * Music without ending the session.
+     */
+    /** Forgets any identification and stops listening. Called wherever a session is torn down. */
+    private fun clearIdentification() {
+        com.phairplay.media.shazam.TrackIdentifier.cancel()
+        identifiedTitle = null
+        identifiedArtist = null
+        identifiedFor = null
+    }
+
+    private fun withIdentification(
+        info: com.phairplay.airplay.NowPlayingInfo,
+    ): com.phairplay.airplay.NowPlayingInfo {
+        if (info.hasMetadata) {
+            com.phairplay.media.shazam.TrackIdentifier.cancel()
+            identifiedTitle = null
+            identifiedArtist = null
+            identifiedFor = null
+            return info
+        }
+        // Nameless audio: ask for an identification, unless one for this sender already landed.
+        if (identifiedFor != info.senderName) {
+            identifiedTitle = null
+            identifiedArtist = null
+            com.phairplay.media.shazam.TrackIdentifier.request()
+            return info
+        }
+        val title = identifiedTitle ?: return info
+        return info.copy(title = title, artist = identifiedArtist)
+    }
+
     private fun emitRemoteKey(keyCode: Int) {
         if (!remoteEnabled) {
             Logger.i("Remote key $keyCode ignored — the remote is switched off in Settings")
@@ -803,6 +852,19 @@ class PhairPlayService : Service() {
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
         artworkLookup = settings.artworkLookup
+        com.phairplay.media.shazam.TrackIdentifier.enabled = settings.identifyTracks
+        if (!settings.identifyTracks) com.phairplay.media.shazam.TrackIdentifier.cancel()
+        com.phairplay.media.shazam.TrackIdentifier.onIdentified = { match ->
+            // Recorded against the sender that was playing when the lookup finished. If the session
+            // ended in the meantime the name is simply never used -- better than attaching a track
+            // to whoever connected next.
+            identifiedFor = _nowPlaying.value?.senderName
+            identifiedTitle = match.title
+            identifiedArtist = match.artist
+            Logger.i("Shazam: naming this stream \"${match.title}\"" +
+                (match.artist?.let { " — $it" } ?: "") + " for sender ${identifiedFor ?: "(gone)"}")
+            _nowPlaying.value?.let { current -> _nowPlaying.value = withIdentification(current) }
+        }
         // Switching the remote off must also clear what it drew and remembered, not just stop new
         // presses — otherwise a ring stays on screen over an app that never asked for one.
         if (!remoteEnabled) PhairPlayAccessibilityService.resetRemoteState()
@@ -1054,7 +1116,8 @@ class PhairPlayService : Service() {
             },
             // Authoritative, straight from the receiver — see the guesses removed below.
             onVideoPlayingChanged = { playing -> _videoPlaying.value = playing },
-            onNowPlayingChanged = { info ->
+            onNowPlayingChanged = { rawInfo ->
+                val info = rawInfo?.let { withIdentification(it) }
                 _nowPlaying.value = info
                 if (info != null) {
                     val name = info.senderName.takeIf { it.isNotBlank() }
@@ -1146,6 +1209,7 @@ class PhairPlayService : Service() {
                         // switch". Whoever owns the connection owns the right to clear it.
                         if (_activeConnection.value?.protocol != Protocol.DLNA) {
                             _nowPlaying.value = null
+        clearIdentification()
                             _photoFrame.value = null
                             _activeConnection.value = null
                         }
@@ -1239,9 +1303,12 @@ class PhairPlayService : Service() {
                     _activeConnection.value = ActiveConnection("DLNA", Protocol.DLNA)
                 } else {
                     _nowPlaying.value = null
+        clearIdentification()
                     _activeConnection.value = null
                 }
             },
+            // DLNA control points always name what they are playing, so there is nothing here for
+            // the fingerprinter to fill in.
             onNowPlayingChanged = { info -> _nowPlaying.value = info },
             artworkLookupEnabled = { artworkLookup },
         ).also {
@@ -1271,6 +1338,7 @@ class PhairPlayService : Service() {
         _dlnaState.value = ProtocolState.DISABLED
         _photoFrame.value = null
         _nowPlaying.value = null
+        clearIdentification()
         _pairingPin.value = null
         _videoPlaying.value = false
     }
