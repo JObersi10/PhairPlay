@@ -228,6 +228,9 @@ class AudioStreamServer(
      */
     private val bandExcessPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
 
+    /** Short peak hold feeding [bandExcessPeak], so the ceiling averages beats instead of chasing gaps. */
+    private val bandBeatPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
+
     /** Per-interval extremes for the band log — see the note at the log site. */
     private val logMin = FloatArray(3) { Float.MAX_VALUE }
     private val logMax = FloatArray(3)
@@ -832,8 +835,25 @@ class AudioStreamServer(
             //
             // Falling stays slow and multiplicative, as it was: a ceiling that drops quickly during
             // a quiet passage makes the next soft note read as a hit.
-            val ceilRate = if (excessRaw > bandExcessPeak[b]) BAND_CEIL_ATTACK else BAND_CEIL_RELEASE
-            bandExcessPeak[b] += ceilRate * (excessRaw - bandExcessPeak[b])
+            // TWO STAGES, because a one-sided follower on this signal is a RATCHET.
+            //
+            // The previous version rose at 0.06 and fell at 0.010 -- six times faster up than down
+            // -- directly on excessRaw. Over a few minutes that converges on the LOUDEST hit in the
+            // track rather than a typical one, and it never comes back down, which is both reports
+            // at once: the orbs are lively at the start of a track and progressively flatter the
+            // longer it plays ("got stale"), and the weaker half of a backbeat/downbeat pair slides
+            // under BAND_GATE and reads exactly zero ("misses every other beat").
+            //
+            // Making the fall faster does not fix it, and that is the trap: excessRaw sits near
+            // zero BETWEEN beats, so any follower quick enough to come down is dragged toward zero
+            // in the gaps and the next hit saturates. The signal has to be peak-held first.
+            //
+            // So: hold each beat's peak with a ~0.5s decay, then follow THAT symmetrically over
+            // ~2s. The ceiling becomes the mean of recent beat peaks instead of a high-water mark,
+            // which is the quantity that was wanted all along -- a hit of ordinary size lands
+            // mid-range, a bigger one goes above it, and neither redefines the scale.
+            bandBeatPeak[b] = Math.max(excessRaw, bandBeatPeak[b] * BAND_BEAT_PEAK_DECAY)
+            bandExcessPeak[b] += BAND_CEIL_RATE * (bandBeatPeak[b] - bandExcessPeak[b])
             val ceiling = (bandExcessPeak[b] * BAND_EXCESS_HEADROOM)
                 .coerceIn(BAND_EXCESS_FLOOR[b], BAND_EXCESS_MAX[b])
             val excess = (excessRaw / ceiling).coerceIn(0.0, 1.0)
@@ -1478,8 +1498,21 @@ class AudioStreamServer(
          * when the ceiling took the instantaneous maximum. Release is gentler still, because a
          * ceiling that drops through a quiet passage makes the next soft note read as a hit.
          */
-        private const val BAND_CEIL_ATTACK = 0.06
-        private const val BAND_CEIL_RELEASE = 0.010
+        /**
+         * Per-beat peak hold, ~0.5s. Long enough to span the gap between beats down to ~120 BPM so
+         * the hold does not collapse between them, short enough that it follows a change of section
+         * rather than a whole track.
+         */
+        private const val BAND_BEAT_PEAK_DECAY = 0.93
+
+        /**
+         * How fast the ceiling follows those beat peaks, per window. SYMMETRIC — up and down at the
+         * same rate, ~2 seconds.
+         *
+         * Symmetry is the point. An asymmetric rate on a peak-held signal is still a ratchet, just
+         * a slower one, and the ratchet is what made the orbs go stale partway through a track.
+         */
+        private const val BAND_CEIL_RATE = 0.015
 
         /**
          * How much of the vocal band's absolute presence counts, before swell is added on top.
