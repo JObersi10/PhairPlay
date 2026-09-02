@@ -136,7 +136,13 @@ The permanent Home/Settings nav panel is gone — Settings is a button on Home, 
   Bluetooth route silently adds 350ms of **visual** delay (`AudioRoute.BLUETOOTH_COMPENSATION_MS`),
   derived from the route rather than stored, and invisible in Settings — the user's Audio delay is a
   separate dial that still reads 0. Link latency is not measurable: `getTimestamp()` stops at the HAL
-- `SessionRegistry` — the capacity-bounded set of RTSP control connections, replacing the old
+- `SessionRegistry` — the capacity-bounded set of RTSP control connections, plus the audio/mirror
+  policy (`claimType`): **mirroring may be shared, audio may not, and the two do not mix.** That
+  policy is NOT enforced at `admit()`, and cannot be — admission happens at `accept()`, where nothing
+  on the wire yet says which kind the connection will be. It is claimed at stream SETUP instead.
+  **`isMirrorSession` is not the signal**: a Mac sending audio only still uses the mirror handshake
+  and still sets it, so the presence of a type-110 VIDEO stream is what makes a session a mirror.
+  Replacing the old
   single `activeClient` field. **Capacity is 1 and must stay there** until `RtspHandler`'s
   `currentSession` / `pairingSession` / `fairPlay` / `isMirrorSession` become per-connection: a
   second admitted sender would wipe the first one's handshake and both would fail, the first with a
@@ -175,18 +181,6 @@ Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it
 | DLNA/UPnP MediaRenderer | 8200 | Working, including GENA eventing |
 
 ## Open bugs
-
-### One RTSP session at a time, regardless of type
-
-`SessionRegistry.admit()` runs at `accept()`, **before the SETUP plist says whether the connection is
-audio or mirroring**, so a policy of "audio = 1, mirror = many" cannot be expressed where the limit
-currently lives. Connecting a second sender before the first disconnects is refused, which is what
-the "iPad glitches while the Mac is still connected" report is.
-
-Enforcing it properly means admitting generously and applying the policy at SETUP once the type is
-known, which needs a session-type registry and a teardown path for an already-admitted session.
-Treat that area carefully — see the stream-level TEARDOWN note below, which killed sessions half a
-second after audio started.
 
 ### Orbs look like they flash (projector mode)
 
@@ -344,6 +338,12 @@ macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
   EXIT_APP) replaced `backQuitsApp` + `backGoesHome`, which could both be on and described two
   different questions. `SettingsRepository` migrates the old keys on first read.
 
+- **The identification's own result comes back through `withIdentification`.** Both fields it fills
+  had the same bug in different forms: the TITLE, because `hasMetadata` read our own title as the
+  sender's and cleared everything (fixed with `identified`); and the ARTWORK, because
+  `info.artwork ?: identifiedArtwork` preferred our own PREVIOUS cover, which froze the first song's
+  art onto every song after it while the title updated correctly. Anything else merged in there needs
+  the same question asked: *whose value is this on a re-check?*
 - **`hasMetadata` cannot tell OUR title from the sender's.** It only means "has a title", so once an
   identification is applied the value in `_nowPlaying` carries our own — and `withIdentification`
   read that as the sender naming the track, cleared the result and cancelled the identifier. Only the

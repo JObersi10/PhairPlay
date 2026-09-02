@@ -173,4 +173,80 @@ class SessionRegistryTest {
         val registry = SessionRegistry(capacity = 2)
         assertEquals(-1, registry.slotOf(FakeSocket()))
     }
+
+    // ── The audio/mirror policy ────────────────────────────────────────────────────────────────
+    //
+    // The rule is: mirroring may be shared, audio may not, and the two do not mix. It lives here
+    // rather than in admit() because admission happens at accept(), before anything on the wire says
+    // which of the two a connection will become.
+
+    @Test
+    fun `several mirrors may share the receiver`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a); registry.admit(b)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.MIRROR))
+        assertTrue(registry.claimType(b, SessionRegistry.Kind.MIRROR))
+    }
+
+    @Test
+    fun `a second audio session is refused`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a); registry.admit(b)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+        assertFalse(registry.claimType(b, SessionRegistry.Kind.AUDIO))
+    }
+
+    /** A mirror carries its own audio; a separate audio sender would fight it for the speakers. */
+    @Test
+    fun `audio is refused while a mirror is running`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a); registry.admit(b)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.MIRROR))
+        assertFalse(registry.claimType(b, SessionRegistry.Kind.AUDIO))
+    }
+
+    @Test
+    fun `a mirror is refused while audio is playing`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a); registry.admit(b)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+        assertFalse(registry.claimType(b, SessionRegistry.Kind.MIRROR))
+    }
+
+    /** SETUP arrives more than once per session, so re-claiming the same kind must not refuse. */
+    @Test
+    fun `claiming the same kind twice is idempotent`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket()
+        registry.admit(a)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+    }
+
+    /** Releasing a session must free its kind, or the next sender inherits the old policy. */
+    @Test
+    fun `releasing a session frees its kind`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+        registry.release(a)
+        registry.admit(b)
+        assertTrue(registry.claimType(b, SessionRegistry.Kind.AUDIO))
+    }
+
+    @Test
+    fun `a closed session stops blocking a new one`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a)
+        assertTrue(registry.claimType(a, SessionRegistry.Kind.AUDIO))
+        a.close()
+        registry.admit(b)
+        assertTrue(registry.claimType(b, SessionRegistry.Kind.AUDIO))
+    }
 }

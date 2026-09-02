@@ -2,7 +2,29 @@
 
 Receiving **more than one sender at once** and showing them side by side, up to four.
 
-Status: **step 1 measured, step 2 partly built. No second sender has ever been served.**
+Status: **working.** Two senders have been served side by side on the device. Capacity is bounded by
+decoder THROUGHPUT rather than instance count — see `DecoderCapacity` — so 1440p and multi-screen
+cannot both be on: one 1440p60 stream is 221M of the 249M pixels/second this Fire TV has.
+
+## The audio/mirror policy
+
+Mirroring may be shared; **audio may not**, and the two do not mix. One set of speakers means one
+stream through them, and a mirror already carries its own audio — a separate audio sender arriving
+alongside one would fight it for the output.
+
+That policy is **not** enforced at `SessionRegistry.admit()` and cannot be. Admission happens at
+`accept()`, and nothing on the wire at that point says which kind of session the connection will
+become; the answer only arrives in the stream list at SETUP. So it is claimed there instead, via
+`SessionRegistry.claimType()`.
+
+**`isMirrorSession` is not the signal.** A Mac sending audio only still uses the mirror handshake and
+still reports `isMirrorSession`, which is exactly why the naive test fails: what actually makes a
+session a mirror is the presence of a **type-110 video stream**. Audio claims the session only when
+no video stream has claimed it first.
+
+The cost of deciding late is that a refused sender has already completed pair-verify by the time it
+loses. It gets an explicit socket close rather than a SETUP reply with a stream quietly missing — a
+sender handed the latter waits forever for data that never comes.
 
 ## Measured: the decoder ceiling is not the problem
 

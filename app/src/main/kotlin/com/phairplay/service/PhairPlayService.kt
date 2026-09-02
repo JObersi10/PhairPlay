@@ -343,12 +343,15 @@ class PhairPlayService : Service() {
             return info
         }
         val title = identifiedTitle ?: return info
-        // Artwork only if the sender pushed none. Nameless audio never does today, but "the sender
-        // wins" has to hold for every field, not only the ones where it currently matters.
+        // `info.identified` decides whose artwork this is. On a re-check the value coming in is one
+        // we already identified, so info.artwork is OUR PREVIOUS COVER rather than the sender's --
+        // and preferring it there froze the first song's art onto every song after it, even as the
+        // title updated correctly. The sender still wins when the artwork is genuinely the sender's.
+        val art = if (info.identified) identifiedArtwork ?: info.artwork else info.artwork ?: identifiedArtwork
         return info.copy(
             title = title,
             artist = identifiedArtist,
-            artwork = info.artwork ?: identifiedArtwork,
+            artwork = art,
             identified = true,
         )
     }

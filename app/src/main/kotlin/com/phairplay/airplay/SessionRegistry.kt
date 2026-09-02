@@ -47,6 +47,49 @@ class SessionRegistry(capacity: Int = 1) {
             field = value.coerceAtLeast(1)
         }
 
+    /**
+     * What each admitted connection turned out to be, once its SETUP said so.
+     *
+     * SEPARATE FROM ADMISSION, AND IT HAS TO BE. [admit] runs at `accept()`, and nothing on the wire
+     * at that point says whether the connection will become a mirror or an audio session — that
+     * arrives later, in the SETUP plist. So the "how many of each" policy cannot be expressed where
+     * the capacity limit lives; it is applied in [claimType] instead, once the answer exists.
+     */
+    private val kinds = HashMap<Socket, Kind>()
+
+    enum class Kind { MIRROR, AUDIO }
+
+    /**
+     * Records what a connection is, and says whether the policy allows it.
+     *
+     * The policy, in one place:
+     *
+     *  - **Mirroring may be shared.** Several senders can be decoded to several tiles; that is what
+     *    multi-screen is, and the ceiling on it is decoder throughput, not this.
+     *  - **Audio may not.** One set of speakers, one stream through them. A second audio sender is
+     *    refused rather than silently mixed or silently ignored.
+     *  - **The two do not mix.** An audio session arriving while a mirror is running (or the
+     *    reverse) is refused, because the mirror carries its own audio and the result is two
+     *    senders fighting over the same output.
+     *
+     * Returns false when the caller must end this session. Idempotent for a connection that has
+     * already claimed the same kind, because SETUP arrives more than once per session.
+     */
+    fun claimType(socket: Socket, kind: Kind): Boolean = synchronized(lock) {
+        kinds.keys.removeAll { it.isClosed || it !in active }
+        if (kinds[socket] == kind) return@synchronized true
+        val others = kinds.filterKeys { it != socket }.values
+        val allowed = when (kind) {
+            Kind.MIRROR -> others.none { it == Kind.AUDIO }
+            Kind.AUDIO -> others.isEmpty()
+        }
+        if (allowed) kinds[socket] = kind
+        allowed
+    }
+
+    /** What a connection was classified as, or null if its SETUP has not said yet. */
+    fun kindOf(socket: Socket): Kind? = synchronized(lock) { kinds[socket] }
+
     /** Sockets currently being served, in the order they were admitted. */
     fun snapshot(): List<Socket> = synchronized(lock) { active.toList() }
 
@@ -92,6 +135,7 @@ class SessionRegistry(capacity: Int = 1) {
      */
     fun release(socket: Socket): Boolean = synchronized(lock) {
         slots.remove(socket)
+        kinds.remove(socket)
         active.remove(socket)
     }
 
@@ -101,6 +145,7 @@ class SessionRegistry(capacity: Int = 1) {
             val copy = active.toList()
             active.clear()
             slots.clear()
+            kinds.clear()
             copy
         }
         doomed.forEach { runCatching { it.close() } }

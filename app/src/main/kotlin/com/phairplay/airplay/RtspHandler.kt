@@ -193,6 +193,8 @@ open class RtspHandler(
          * addressing exactly the same slot it always has.
          */
         var slot = 0
+        /** The connection this state belongs to, so the session policy can act on it. */
+        var socket: Socket? = null
     }
 
     /**
@@ -261,6 +263,25 @@ open class RtspHandler(
         set(v) { client.currentLocalAddress = v }
 
     /** True once an AirPlay 2 mirroring SETUP has run on this connection (no ANNOUNCE/SDP). */
+    /**
+     * Applies the one-audio-session policy, and ends this session if it loses.
+     *
+     * Enforced HERE rather than at admission because admission happens at `accept()`, where nothing
+     * yet says whether the connection is a mirror or an audio session — see
+     * [SessionRegistry.claimType]. The cost of deciding late is that the loser has already completed
+     * pair-verify by the time it is refused, which is why it gets an explicit close rather than a
+     * silent stream omission: a sender handed a SETUP reply with a stream missing waits for data
+     * that never comes.
+     */
+    private fun claimSessionType(kind: SessionRegistry.Kind): Boolean {
+        val socket = client.socket ?: return true
+        if (sessions.claimType(socket, kind)) return true
+        Logger.w("Refusing $kind session from ${socket.inetAddress?.hostAddress} — " +
+            "already serving ${sessions.kindOf(sessions.snapshot().firstOrNull { it != socket } ?: socket)}")
+        runCatching { socket.close() }
+        return false
+    }
+
     private var isMirrorSession: Boolean
         get() = client.isMirrorSession
         set(v) { client.isMirrorSession = v }
@@ -431,6 +452,7 @@ open class RtspHandler(
         clientState.remove()
         connectStartMs = acceptedAtMs
         client.slot = sessions.slotOf(socket).coerceAtLeast(0)
+        client.socket = socket
         // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
         fairPlay = FairPlay()
@@ -1150,6 +1172,13 @@ open class RtspHandler(
                 val stream = s as? Map<*, *> ?: return@mapNotNull null
                 when ((stream["type"] as? Long)?.toInt()) {
                     110 -> {
+                        // A video stream is what makes this MIRRORING rather than audio. It cannot
+                        // be decided at SETUP-plist level: a Mac sending audio only still uses the
+                        // mirror handshake and still reports isMirrorSession, so the stream list is
+                        // the first honest signal of which of the two this session is.
+                        if (!claimSessionType(SessionRegistry.Kind.MIRROR)) {
+                            return@mapNotNull null
+                        }
                         val scid = (stream["streamConnectionID"] as? Long) ?: 0L
                         val dataPort = onMirrorStreamStart(client.slot, scid)
                         activeStreamTypes.add(110)
@@ -1172,6 +1201,12 @@ open class RtspHandler(
                         // How far behind the sender's own timeline it expects us to play. Ignoring it
                         // made playback run ahead of the phone (audio led its on-screen lyrics).
                         val latencyMin = (stream["latencyMin"] as? Long)?.toInt() ?: DEFAULT_LATENCY_SAMPLES
+                        // Audio only claims the session when no video stream has claimed it first:
+                        // a mirror carries its own audio, and that audio must not be mistaken for a
+                        // separate audio-only sender competing for the speakers.
+                        if (110 !in activeStreamTypes && !claimSessionType(SessionRegistry.Kind.AUDIO)) {
+                            return@mapNotNull null
+                        }
                         val (dataPort, controlPort) = onMirrorAudioStart(client.slot, sr, ch, ct, spf, latencyMin)
                         activeStreamTypes.add(96)
                         currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
