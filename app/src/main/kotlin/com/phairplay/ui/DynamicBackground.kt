@@ -252,7 +252,11 @@ class DynamicBackground @JvmOverloads constructor(
     private var lowPower = false
 
     fun updateColors(bitmap: Bitmap) {
-        Palette.from(bitmap).maximumColorCount(16).generate { palette ->
+        // 32, not Palette's default 16. The finer quantisation is what surfaces SMALL accent
+        // regions -- a teal logo, a red jacket on an otherwise blue sleeve -- which at 16 get merged
+        // into the nearest large area and never reach the pool the hue filter picks from. Costs one
+        // more k-means pass on a 256px bitmap, once per track.
+        Palette.from(bitmap).maximumColorCount(32).generate { palette ->
             if (palette == null) return@generate
             // The six NAMED swatches plus every swatch Palette actually found.
             //
