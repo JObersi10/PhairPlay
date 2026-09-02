@@ -249,4 +249,25 @@ class SessionRegistryTest {
         registry.admit(b)
         assertTrue(registry.claimType(b, SessionRegistry.Kind.AUDIO))
     }
+
+    /**
+     * The count decides whether a disconnect is a full teardown or "others are still connected",
+     * and only the full teardown tells the UI the session ended. A socket that died without
+     * reaching release() therefore left Now Playing on screen over a dead session, behind a
+     * completely clean-looking RTSP log.
+     */
+    @Test
+    fun `a closed session is not counted as still connected`() {
+        val registry = SessionRegistry(capacity = 3)
+        val a = FakeSocket(); val b = FakeSocket()
+        registry.admit(a)
+        registry.admit(b)
+        assertEquals(2, registry.size())
+        // Died without a release() -- the socket-close path never ran.
+        a.close()
+        assertEquals(1, registry.size())
+        registry.release(b)
+        assertEquals(0, registry.size())
+        assertTrue(registry.isEmpty())
+    }
 }

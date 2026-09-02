@@ -93,7 +93,24 @@ class SessionRegistry(capacity: Int = 1) {
     /** Sockets currently being served, in the order they were admitted. */
     fun snapshot(): List<Socket> = synchronized(lock) { active.toList() }
 
-    fun size(): Int = synchronized(lock) { active.size }
+    /**
+     * How many connections are actually being served.
+     *
+     * PRUNES FIRST, and that is not tidiness — it is the whole correctness of this method.
+     * [admit] and [claimType] already drop closed sockets; this did not, so a connection that died
+     * without reaching [release] stayed counted until the NEXT sender happened to connect.
+     *
+     * That count decides which branch `AirPlayReceiver.onStreamingStopped` takes, and only the
+     * full-teardown branch emits ProtocolState.ADVERTISING. So one stale socket left over from an
+     * earlier device made a perfectly ordinary disconnect take the "other senders are still here"
+     * path: the RTSP log printed a clean TEARDOWN, the audio really did stop, and the UI was never
+     * told the session had ended — leaving Now Playing on screen over a dead session with nothing
+     * anywhere to say why.
+     */
+    fun size(): Int = synchronized(lock) {
+        active.removeAll { it.isClosed }
+        active.size
+    }
 
     fun isEmpty(): Boolean = size() == 0
 
