@@ -29,6 +29,48 @@ class DynamicBackground @JvmOverloads constructor(
     }
     private val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
+    // ── Half-resolution composite buffer ─────────────────────────────────────
+    // Everything this view draws is a wide, soft radial gradient — there is no high-frequency
+    // detail for a half-res grid to lose — so the whole field is composited at half width and
+    // height and blitted up with one bilinear pass. That quarters every full-screen fill (the
+    // opaque base, four blobs, three orbs of two gradients each, the vignette), which is the ONLY
+    // thing that was over budget: gfxinfo measured ~19ms of GPU on ten-odd full-screen SCREEN
+    // passes at 1080p, Slow-UI-thread and Missed-Vsync both zero. A quarter of that clears 16.6ms,
+    // which is why FRAME_STRIDE can now be 1. Allocated once per size (~2 MB), reused every frame;
+    // recycled on detach.
+    private var scratch: Bitmap? = null
+    private var scratchCanvas: Canvas? = null
+    private var scratchW = 0
+    private var scratchH = 0
+    private val blitDst = android.graphics.Rect()
+    // FILTER_BITMAP = bilinear on the upscale, so the half-res grid does not show as blockiness.
+    private val upscalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    /**
+     * Ensures [scratch] is a half-resolution ARGB buffer for a [w]x[h] view. Rounds each axis up so
+     * an odd dimension never drops its last column/row on the scale-back. Returns false (and the
+     * caller falls back to full-res) only if allocation fails — half res of 1080p is ~2 MB, but the
+     * Fire TV's low-memory killer is real, so an OOM here must degrade rather than crash.
+     */
+    private fun ensureScratch(w: Int, h: Int): Boolean {
+        val bw = (w + 1) / 2
+        val bh = (h + 1) / 2
+        if (bw <= 0 || bh <= 0) return false
+        if (scratch == null || scratchW != bw || scratchH != bh) {
+            scratch?.recycle()
+            val bmp = try {
+                Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+            } catch (e: OutOfMemoryError) {
+                scratch = null; scratchCanvas = null; scratchW = 0; scratchH = 0
+                return false
+            }
+            scratch = bmp
+            scratchCanvas = Canvas(bmp)
+            scratchW = bw; scratchH = bh
+        }
+        return true
+    }
+
     // ── Per-frame scratch, allocated once ────────────────────────────────────
     // onDraw runs ~60x/sec; anything new()'d in there is pure garbage-collector pressure.
     private val blobMix = FloatArray(4)
@@ -103,19 +145,18 @@ class DynamicBackground @JvmOverloads constructor(
             // and never accuracy. (A PiP window strides further still — the backdrop is a few
             // hundred pixels wide there and competes for CPU with the video decoder.)
             //
-            // Measured with gfxinfo: this device spends ~19ms of GPU per frame on the Home screen
-            // AND on Now Playing, with Slow UI thread and Missed Vsync both zero. Identical on two
-            // completely different drawings, which makes it a fill-rate floor for full-screen
-            // alpha-blended content at 1080p rather than anything about the orbs. 16.6ms is
-            // therefore not reachable here at all.
+            // gfxinfo once measured ~19ms of GPU per frame here — ten-odd full-screen SCREEN passes
+            // at 1080p, with Slow UI thread and Missed Vsync both zero, i.e. a pure fill-rate wall
+            // that no amount of scheduling could get under 16.6ms. The stride was pinned to 2 then:
+            // a free-running loop alternated 1-2-1-2 refreshes per frame (~50fps, period always
+            // changing), and an exactly even 30 read as steadier than that flutter.
             //
-            // Left to run free, the loop lands just over one vsync and alternates 1-2-1-2 refreshes
-            // per frame forever — a fluctuating ~50fps whose period keeps changing. Pinning it to
-            // every SECOND vsync gives an exactly even 30fps: every frame is held the same length,
-            // which is the property the eye is actually reading. Lower average, steadier picture.
-            //
-            // If a future device can hold 16.6ms this should drop to 1; it is deliberately a single
-            // constant so that is a one-line change.
+            // The half-resolution composite buffer (see onDraw) quartered that fill and put the
+            // frame back inside 16.6ms, so FRAME_STRIDE is now 1 — a true, steady 60. The stride
+            // machinery is kept because it is still the one-line lever back to an even 30 if a
+            // future change re-inflates the per-frame cost, and because the PiP path below leans on
+            // it: there the backdrop is a few hundred pixels wide and competes with the video
+            // decoder, so it strides further regardless of the fill headroom.
             frameCount++
             val stride = if (lowPower) LOW_POWER_STRIDE else FRAME_STRIDE
             if (frameCount % stride == 0) invalidate()
@@ -202,6 +243,9 @@ class DynamicBackground @JvmOverloads constructor(
         super.onDetachedFromWindow()
         t1.cancel(); t2.cancel(); t3.cancel()
         stopFrameLoop()
+        // Release the ~2 MB half-res buffer; recreated on the next attach. The Fire TV's
+        // low-memory killer answers idle bitmaps left on a backgrounded view.
+        scratch?.recycle(); scratch = null; scratchCanvas = null; scratchW = 0; scratchH = 0
     }
 
     fun setEnergy(e: Float) {
@@ -366,7 +410,34 @@ class DynamicBackground @JvmOverloads constructor(
      * full-resolution space and the composition is identical — radii, centres and the vignette all
      * keep their tuned values instead of needing a second set for the scaled buffer.
      */
-    override fun onDraw(canvas: Canvas) = drawBackdrop(canvas)
+    override fun onDraw(canvas: Canvas) {
+        // BLACK draws one rectangle; a half-res buffer would be pure overhead for it.
+        if (backdropTheme == BackdropTheme.BLACK) { canvas.drawColor(Color.BLACK); return }
+        val w = width; val h = height
+        if (w <= 0 || h <= 0) return
+
+        val buf = if (ensureScratch(w, h)) scratchCanvas else null
+        val bmp = scratch
+        if (buf == null || bmp == null) {
+            // Allocation failed — draw full-res. Correct, just back to the old fill cost.
+            drawBackdrop(canvas)
+            return
+        }
+
+        // Pre-SCALE the buffer canvas rather than the geometry, so every coordinate in
+        // drawBackdrop stays in full-resolution space and the composition is byte-for-byte the
+        // tuned one — radii, anchors, orbits and the vignette all keep their measured values
+        // instead of needing a second set for the scaled grid.
+        val save = buf.save()
+        buf.scale(scratchW.toFloat() / w, scratchH.toFloat() / h)
+        drawBackdrop(buf)
+        buf.restoreToCount(save)
+
+        // One bilinear upscale. The base is opaque, so this is a plain textured copy — a single
+        // full-screen pass in place of the ten-odd blended ones it replaced.
+        blitDst.set(0, 0, w, h)
+        canvas.drawBitmap(bmp, null, blitDst, upscalePaint)
+    }
 
     private fun drawBackdrop(canvas: Canvas) {
         // Nothing to compose: no palette, no beat, no edge treatment. Just the card on black.
@@ -1156,39 +1227,44 @@ class DynamicBackground @JvmOverloads constructor(
 
         private const val REF_FRAME_MS = 33.33f
         /**
-         * Vsyncs per drawn frame. 2 = an exactly even 30fps on a 60Hz panel. See the note in the
-         * frame callback: this device cannot hold 16.6ms, so a steady stride beats a free-running
-         * rate that keeps changing period. Drop to 1 on hardware that can.
+         * Vsyncs per drawn frame. 1 = draw every vsync = a true 60fps.
+         *
+         * This was 2 (an exactly even 30fps) because the device could not hold 16.6ms: the note in
+         * the frame callback measured ~19ms of GPU on ten-odd full-screen SCREEN passes at 1080p,
+         * and a steady 30 beat a free-running ~50 whose period kept changing. The half-resolution
+         * composite buffer (see onDraw) quartered that fill, which is what put a frame back inside
+         * the budget and let this drop to 1. If a future change re-inflates the per-frame fill past
+         * 16.6ms, this is the one-line lever back to a steady 30.
          */
-        private const val FRAME_STRIDE = 2
+        private const val FRAME_STRIDE = 1
         /** Same idea in a PiP window, where the backdrop is small and nobody is studying it. */
         private const val LOW_POWER_STRIDE = 4
         /** Overall loudness follow, used by the full-screen pulse. */
         private const val ENERGY_RATE = 0.36f
 
         /**
-         * Orb spring. Stiffness sets how quickly a swell is chased: omega = sqrt(k) = 34 rad/s.
+         * Orb spring — MATCHED TO AMTV, which is the whole point of the feel.
          *
-         * RAISED from 400 (omega 20) because the spring was arriving visibly late on the beat. A
-         * spring's lag is not a matter of taste, it is arithmetic: time to first peak is
-         * pi / (omega * sqrt(1 - zeta^2)), which at omega 20 and zeta 0.6 is ~196ms. That is a
-         * fifth of a second behind the kick, on top of the output latency the route compensation is
-         * already accounting for, and it is why the orbs read as smooth but behind. At omega 34 the
-         * same figure is ~115ms, which is close enough to the transient to look struck by it while
-         * keeping the momentum that made a staircase input come out as one curve.
+         * AMTV drives each band with a Compose `spring(dampingRatio = 0.6, stiffness =
+         * StiffnessMediumLow)`. StiffnessMediumLow is 400, mass 1, so omega = sqrt(400) = 20 rad/s
+         * and damping = 2 * zeta * omega = 2 * 0.6 * 20 = 24. Those two numbers ARE the smoothness
+         * and the thump: at omega 20 the spring carries real momentum through the ~33ms staircase of
+         * band levels, so a chain of steps comes out as one gliding curve rather than a stack of
+         * little ease-outs, and at zeta 0.6 it overshoots ~9% on a hit — a slow, visible bloom that
+         * peaks around pi / (omega*sqrt(1-zeta^2)) ~= 196ms and settles gently. That lingering bloom
+         * is what reads as "thumpy".
          *
-         * Damping is held at zeta ~0.6 (2 * 0.6 * 34 = 41, rounded to 42) so the overshoot that
-         * gives a hit its flare survives the change.
+         * This was briefly RAISED to 1200 (omega 34) to fight apparent lateness — but that snappier
+         * spring settles too fast to bloom and loses the glide, i.e. it stops feeling like AMTV,
+         * which is exactly the complaint. Lateness is not the spring's job to fix: it belongs to the
+         * output-latency compensation on the emit side (emitDelayed in AudioStreamServer). Shape and
+         * delay the signal there; follow it here with AMTV's own constants.
          *
-         * CRITICALLY DAMPED on purpose (zeta = 1, so damping = 2*sqrt(k)). A springier orb would
-         * overshoot, and the render clamps the level to 0..1 — so the overshoot would not read as a
-         * pop, it would flatten against the ceiling and cost the top of the range, which is the
-         * pinning this whole scheme is built to avoid. The asymmetry that makes a hit arrive fast
-         * and fade slow already lives in the DSP (BAND_ATTACK / BAND_RELEASE in AudioStreamServer),
-         * which is the right place for it: shape the signal, then follow it smoothly.
+         * zeta stays 0.6 (under-damped) deliberately — the overshoot is the flare, and
+         * ORB_LEVEL_CEILING below leaves room for it instead of clamping it flat.
          */
-        private const val ORB_STIFFNESS = 1200f
-        private const val ORB_DAMPING = 42f
+        private const val ORB_STIFFNESS = 400f
+        private const val ORB_DAMPING = 24f
 
         /** Integration sub-step. Well inside the 2/omega = 100ms explicit-Euler stability bound. */
         private const val SPRING_MAX_STEP_S = 0.008f
