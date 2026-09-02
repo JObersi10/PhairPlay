@@ -220,6 +220,14 @@ class AudioStreamServer(
      * are held apart because the vocal figure is a difference of their two ROOTS, which cannot be
      * reconstructed once they have been added together.
      */
+    /**
+     * Per-band adaptive swell ceiling: the largest rise above baseline seen recently.
+     *
+     * Seeded at the floor rather than zero, so the first window of a track cannot divide by a
+     * near-zero ceiling and read full scale.
+     */
+    private val bandExcessPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
+
     private var winBass = 0.0
     private var winVocalMid = 0.0
     private var winVocalSide = 0.0
@@ -777,8 +785,33 @@ class AudioStreamServer(
             // it needs headroom to avoid pinning; treble and vocals move far less and were being
             // asked to clear the same bar, which left both of them dim on material that plainly had
             // cymbals and singing in it.
-            val excessMax = BAND_EXCESS_MAX[b]
-            val excess = ((raw[b] / base) - 1.0).coerceIn(0.0, excessMax) / excessMax
+            // THE CEILING ADAPTS. It used to be three fixed numbers, and that is why bass barely
+            // moved.
+            //
+            // Measured on the device across 25 consecutive windows of real music: bass ranged
+            // 0.13-0.36 and never once passed 0.36, while vocal used 0.04-0.94. The band carrying
+            // the thump was living in the bottom third of its scale. The arithmetic is plain --
+            // a kick rises about 0.35 above its own 1.5s baseline, and dividing that by a fixed
+            // ceiling of 1.15 caps it at ~0.30 no matter how hard it hits.
+            //
+            // A fixed ceiling cannot be right for both a dynamic-range-preserving master and a
+            // brickwalled pop mix: the first needs headroom, the second needs almost none, and one
+            // number chosen for the first leaves the second flat. So the ceiling now TRACKS the
+            // largest swell this band has actually produced recently, the same asymmetric
+            // peak-follower already used for the vocal presence reference: it jumps instantly to a
+            // new loudest and falls away slowly.
+            //
+            // Both bounds matter and neither is decoration. [BAND_EXCESS_MAX] survives as a hard
+            // UPPER clamp so one freak transient cannot desensitise a band for the next minute --
+            // the failure recorded against BAND_PEAK_DECAY, where a single early peak left
+            // everything after it reading 0.10-0.30. [BAND_EXCESS_FLOOR] is the lower clamp, and it
+            // is what stops a quiet or silent passage dividing its own room tone up into a full
+            // glow: with no floor, `excess / excessPeak` is ~1 whenever the band is merely
+            // consistent, which would pin every orb bright on silence.
+            val excessRaw = ((raw[b] / base) - 1.0).coerceAtLeast(0.0)
+            bandExcessPeak[b] = Math.max(excessRaw, bandExcessPeak[b] * BAND_PEAK_DECAY)
+                .coerceIn(BAND_EXCESS_FLOOR[b], BAND_EXCESS_MAX[b])
+            val excess = (excessRaw / bandExcessPeak[b]).coerceIn(0.0, 1.0)
             // The gate lives HERE, on the swell, and it is PER BAND.
             //
             // There used to be a second gate after the vocal presence term as well, re-expanding an
@@ -1364,11 +1397,25 @@ class AudioStreamServer(
         /**
          * How far above its own average a band has to rise to read as full scale.
          *
-         * Generous on purpose. At ~0.65 every ordinary hit reaches the top and clips flat, which
-         * is the pinned look this whole scheme exists to avoid; a bit over 1.0 puts normal hits in
-         * the middle of the range and leaves the top for the genuinely big ones.
+         * NOW AN UPPER CLAMP ON THE ADAPTIVE CEILING, not the ceiling itself. As a fixed divisor
+         * these values left bass measurably pinned to the bottom third of its range -- see the note
+         * at the use site. They are kept because the adaptive ceiling still needs a maximum: without
+         * one, a single freak transient sets a ceiling that takes most of a minute to decay, and
+         * every band reads low until it does.
          */
         private val BAND_EXCESS_MAX = doubleArrayOf(1.15, 0.85, 0.62)
+
+        /**
+         * Lower clamp on the adaptive ceiling — in effect, maximum sensitivity per band.
+         *
+         * This is the number to raise if the orbs are still not lively enough on quiet or heavily
+         * compressed material, and the number to raise if silence starts to glow. It sets how small
+         * a swell is allowed to count as full scale: at 0.30, bass has to rise 30% above its own
+         * running average to fill the orb, which on the measured material is a little under an
+         * ordinary kick. Below its own floor a band simply reads proportionally less, which is what
+         * keeps a quiet passage quiet instead of amplifying room tone into a glow.
+         */
+        private val BAND_EXCESS_FLOOR = doubleArrayOf(0.30, 0.25, 0.20)
 
         /**
          * How much of the vocal band's absolute presence counts, before swell is added on top.
