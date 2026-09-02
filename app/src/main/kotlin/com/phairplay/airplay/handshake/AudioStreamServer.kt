@@ -809,9 +809,30 @@ class AudioStreamServer(
             // glow: with no floor, `excess / excessPeak` is ~1 whenever the band is merely
             // consistent, which would pin every orb bright on silence.
             val excessRaw = ((raw[b] / base) - 1.0).coerceAtLeast(0.0)
-            bandExcessPeak[b] = Math.max(excessRaw, bandExcessPeak[b] * BAND_PEAK_DECAY)
+            // THE CEILING RISES SLOWLY AND SITS ABOVE THE MUSIC. Both halves of that matter, and
+            // the first version of this had neither, which made the orbs bistable.
+            //
+            // That version tracked the instantaneous peak: `peak = max(excessRaw, decayed)`. So the
+            // ceiling was redefined by whatever hit was loudest, and `excessRaw / peak` came out at
+            // EXACTLY 1.0 every time a hit set a new maximum, then collapsed toward 0 between hits.
+            // A comparator, not a scale -- measurably so, the device log filling with 0.96/0.95 and
+            // runs of 0.00 with very little in between. It fixed the range and destroyed the
+            // gradations inside it.
+            //
+            // Rising slowly means one hit cannot redefine full scale; the ceiling settles on what
+            // this track's hits typically reach, over about half a second. [BAND_EXCESS_HEADROOM]
+            // is the other half: putting the ceiling a little ABOVE that typical peak is what
+            // leaves somewhere for a genuinely big hit to go. Without it the loudest thing in the
+            // music always reads 1.0 by construction, whatever else is happening, and an ordinary
+            // beat is indistinguishable from a drop.
+            //
+            // Falling stays slow and multiplicative, as it was: a ceiling that drops quickly during
+            // a quiet passage makes the next soft note read as a hit.
+            val ceilRate = if (excessRaw > bandExcessPeak[b]) BAND_CEIL_ATTACK else BAND_CEIL_RELEASE
+            bandExcessPeak[b] += ceilRate * (excessRaw - bandExcessPeak[b])
+            val ceiling = (bandExcessPeak[b] * BAND_EXCESS_HEADROOM)
                 .coerceIn(BAND_EXCESS_FLOOR[b], BAND_EXCESS_MAX[b])
-            val excess = (excessRaw / bandExcessPeak[b]).coerceIn(0.0, 1.0)
+            val excess = (excessRaw / ceiling).coerceIn(0.0, 1.0)
             // The gate lives HERE, on the swell, and it is PER BAND.
             //
             // There used to be a second gate after the vocal presence term as well, re-expanding an
@@ -1416,6 +1437,32 @@ class AudioStreamServer(
          * keeps a quiet passage quiet instead of amplifying room tone into a glow.
          */
         private val BAND_EXCESS_FLOOR = doubleArrayOf(0.30, 0.25, 0.20)
+
+        /**
+         * How far above the band's typical peak the ceiling sits.
+         *
+         * This is what keeps the scale continuous. At 1.0 the loudest recent hit reads exactly full
+         * scale by construction, so every hit that sets a new maximum is 1.0 and a real drop looks
+         * identical to an ordinary beat. At 1.35 a typical hit lands around 0.74, leaving the top
+         * quarter of the range for the ones that genuinely are bigger — which is the difference
+         * between an orb that flickers between its limits and one that visibly thumps harder when
+         * the music does.
+         *
+         * Raise it for a calmer picture with more headroom, lower it for a hotter one. Below ~1.1
+         * the bistable behaviour returns.
+         */
+        private const val BAND_EXCESS_HEADROOM = 1.35
+
+        /**
+         * How fast the ceiling adapts, per window. Slow on the way up, slower on the way down.
+         *
+         * Attack is ~0.5s: fast enough to find a new track's level within a bar or two, slow enough
+         * that a single transient cannot redefine full scale — which is exactly what went wrong
+         * when the ceiling took the instantaneous maximum. Release is gentler still, because a
+         * ceiling that drops through a quiet passage makes the next soft note read as a hit.
+         */
+        private const val BAND_CEIL_ATTACK = 0.06
+        private const val BAND_CEIL_RELEASE = 0.010
 
         /**
          * How much of the vocal band's absolute presence counts, before swell is added on top.
