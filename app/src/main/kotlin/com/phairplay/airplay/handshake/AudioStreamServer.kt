@@ -228,6 +228,10 @@ class AudioStreamServer(
      */
     private val bandExcessPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
 
+    /** Per-interval extremes for the band log — see the note at the log site. */
+    private val logMin = FloatArray(3) { Float.MAX_VALUE }
+    private val logMax = FloatArray(3)
+
     private var winBass = 0.0
     private var winVocalMid = 0.0
     private var winVocalSide = 0.0
@@ -905,12 +909,25 @@ class AudioStreamServer(
         // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
         // one. Three numbers a couple of times a second settle it: if they move independently the
         // orbs are following the music, and if one sits at 0.00 that band is the thing to fix.
+        // MIN AND MAX OVER THE INTERVAL, not the instantaneous value.
+        //
+        // This logged one window's levels every two seconds, which at ~30 windows a second samples
+        // one frame in sixty. That cannot show a beat: a snapshot lands wherever it lands in the
+        // envelope, so a band that swings 0.0-1.0 on every kick and one that sits flat at 0.5 both
+        // print an unremarkable middling number. Several rounds of tuning were read off exactly
+        // that aliased view. The SWING is the thing being tuned, so the swing is what gets printed.
+        for (b in 0 until 3) {
+            if (bandLevel[b] < logMin[b]) logMin[b] = bandLevel[b]
+            if (bandLevel[b] > logMax[b]) logMax[b] = bandLevel[b]
+        }
         if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
             lastBandLogMs = now
             Logger.i(
-                "Bands bass=%.2f vocal=%.2f treble=%.2f"
-                    .format(bandLevel[0], bandLevel[1], bandLevel[2])
+                "Bands bass=%.2f-%.2f vocal=%.2f-%.2f treble=%.2f-%.2f".format(
+                    logMin[0], logMax[0], logMin[1], logMax[1], logMin[2], logMax[2],
+                )
             )
+            for (b in 0 until 3) { logMin[b] = Float.MAX_VALUE; logMax[b] = 0f }
         }
         val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
         val delay = beatEmitDelayMs()
@@ -1502,12 +1519,25 @@ class AudioStreamServer(
         /**
          * Envelope follower, PER WINDOW at ~30/sec. Fast attack, slow release.
          *
-         * Both values are unchanged and both now mean what they say. Applied per PCM block the
-         * release decayed three times faster than intended, so the glow snapped off after a hit
-         * rather than trailing it — and that trail is most of what reads as thump.
+         * A THUMP IS AN EDGE. Attack was 0.42, a rise time constant of ~79ms and ~130ms to reach
+         * 90% — against a kick drum whose audible transient is 20-50ms. The visual therefore rose
+         * about three times slower than the sound that caused it, and a slow rise does not read as
+         * a hit at all; it reads as a glow swelling, which is exactly the report. At 0.85 the level
+         * is essentially at the target within two windows, so what reaches the spring is a step,
+         * and the spring's own under-damped overshoot becomes the flare rather than being spent
+         * smoothing an input that was already smooth.
+         *
+         * Release matters as much and in the opposite direction. At 0.11 the decay constant is
+         * ~300ms, so at 120 BPM — a 500ms beat period — the level never returned near zero between
+         * hits and every band sat in a permanent mid-range haze. Measured: bass spent a whole
+         * playback sitting between 0.32 and 0.73 and rarely left it. 0.20 is ~165ms, which clears
+         * comfortably between beats while still trailing the hit rather than snapping off with it.
+         *
+         * Both are still slower than the smoothing downstream, so nothing here is a step function
+         * by the time it reaches a pixel.
          */
-        private const val BAND_ATTACK = 0.42f
-        private const val BAND_RELEASE = 0.11f
+        private const val BAND_ATTACK = 0.85f
+        private const val BAND_RELEASE = 0.20f
 
         // ── Onset detection ─────────────────────────────────────────────────────────────────────
         //
