@@ -1129,9 +1129,23 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Idle screensaver ──────────────────────────────────────────────────────
 
     /** Applies the user's screensaver preferences and re-arms the idle countdown. */
-    /** Beat Pulse from Settings: 1 Normal, 2 Strong, 3 Insane. */
+    /**
+     * Beat Pulse from Settings: 0 Calm, 1 Normal, 2 Strong, 3 Insane.
+     *
+     * SHIFTED UP A STEP. The scale was 0.45 / 1.0 / 2.0 / 3.5, and in use Normal read as barely
+     * reacting and Strong as merely normal — so three of the four settings sat below where people
+     * actually wanted to live and only Insane felt like anything. Each name now does roughly what
+     * the one above it used to, and the top has somewhere new to go.
+     *
+     * Calm keeps 0.45 unchanged: it is the default and the one setting that was already right,
+     * being the quiet backdrop you leave on rather than a reaction you watch.
+     *
+     * The top of the range no longer clips flat either — see `DynamicBackground.softCap`. A hard
+     * ceiling is why the largest multiplier felt harsh rather than large; it now rolls off, so
+     * Insane keeps responding instead of pinning at one radius.
+     */
     fun setBeatPulse(level: Int) {
-        dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
+        dynamicBg.setBeatMultiplier(when (level) { 1 -> 2f; 2 -> 3.5f; 3 -> 5.5f; else -> 0.45f })
     }
 
     /** Orb drift speed from Settings: 0 Slow, 1 Normal, 2 Fast. */

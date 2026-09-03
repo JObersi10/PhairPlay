@@ -29,48 +29,6 @@ class DynamicBackground @JvmOverloads constructor(
     }
     private val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    // ── Half-resolution composite buffer ─────────────────────────────────────
-    // Everything this view draws is a wide, soft radial gradient — there is no high-frequency
-    // detail for a half-res grid to lose — so the whole field is composited at half width and
-    // height and blitted up with one bilinear pass. That quarters every full-screen fill (the
-    // opaque base, four blobs, three orbs of two gradients each, the vignette), which is the ONLY
-    // thing that was over budget: gfxinfo measured ~19ms of GPU on ten-odd full-screen SCREEN
-    // passes at 1080p, Slow-UI-thread and Missed-Vsync both zero. A quarter of that clears 16.6ms,
-    // which is why FRAME_STRIDE can now be 1. Allocated once per size (~2 MB), reused every frame;
-    // recycled on detach.
-    private var scratch: Bitmap? = null
-    private var scratchCanvas: Canvas? = null
-    private var scratchW = 0
-    private var scratchH = 0
-    private val blitDst = android.graphics.Rect()
-    // FILTER_BITMAP = bilinear on the upscale, so the half-res grid does not show as blockiness.
-    private val upscalePaint = Paint(Paint.FILTER_BITMAP_FLAG)
-
-    /**
-     * Ensures [scratch] is a half-resolution ARGB buffer for a [w]x[h] view. Rounds each axis up so
-     * an odd dimension never drops its last column/row on the scale-back. Returns false (and the
-     * caller falls back to full-res) only if allocation fails — half res of 1080p is ~2 MB, but the
-     * Fire TV's low-memory killer is real, so an OOM here must degrade rather than crash.
-     */
-    private fun ensureScratch(w: Int, h: Int): Boolean {
-        val bw = (w + 1) / 2
-        val bh = (h + 1) / 2
-        if (bw <= 0 || bh <= 0) return false
-        if (scratch == null || scratchW != bw || scratchH != bh) {
-            scratch?.recycle()
-            val bmp = try {
-                Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
-            } catch (e: OutOfMemoryError) {
-                scratch = null; scratchCanvas = null; scratchW = 0; scratchH = 0
-                return false
-            }
-            scratch = bmp
-            scratchCanvas = Canvas(bmp)
-            scratchW = bw; scratchH = bh
-        }
-        return true
-    }
-
     // ── Per-frame scratch, allocated once ────────────────────────────────────
     // onDraw runs ~60x/sec; anything new()'d in there is pure garbage-collector pressure.
     private val blobMix = FloatArray(4)
@@ -243,9 +201,6 @@ class DynamicBackground @JvmOverloads constructor(
         super.onDetachedFromWindow()
         t1.cancel(); t2.cancel(); t3.cancel()
         stopFrameLoop()
-        // Release the ~2 MB half-res buffer; recreated on the next attach. The Fire TV's
-        // low-memory killer answers idle bitmaps left on a backgrounded view.
-        scratch?.recycle(); scratch = null; scratchCanvas = null; scratchW = 0; scratchH = 0
     }
 
     fun setEnergy(e: Float) {
@@ -410,34 +365,30 @@ class DynamicBackground @JvmOverloads constructor(
      * full-resolution space and the composition is identical — radii, centres and the vignette all
      * keep their tuned values instead of needing a second set for the scaled buffer.
      */
-    override fun onDraw(canvas: Canvas) {
-        // BLACK draws one rectangle; a half-res buffer would be pure overhead for it.
-        if (backdropTheme == BackdropTheme.BLACK) { canvas.drawColor(Color.BLACK); return }
-        val w = width; val h = height
-        if (w <= 0 || h <= 0) return
-
-        val buf = if (ensureScratch(w, h)) scratchCanvas else null
-        val bmp = scratch
-        if (buf == null || bmp == null) {
-            // Allocation failed — draw full-res. Correct, just back to the old fill cost.
-            drawBackdrop(canvas)
-            return
-        }
-
-        // Pre-SCALE the buffer canvas rather than the geometry, so every coordinate in
-        // drawBackdrop stays in full-resolution space and the composition is byte-for-byte the
-        // tuned one — radii, anchors, orbits and the vignette all keep their measured values
-        // instead of needing a second set for the scaled grid.
-        val save = buf.save()
-        buf.scale(scratchW.toFloat() / w, scratchH.toFloat() / h)
-        drawBackdrop(buf)
-        buf.restoreToCount(save)
-
-        // One bilinear upscale. The base is opaque, so this is a plain textured copy — a single
-        // full-screen pass in place of the ten-odd blended ones it replaced.
-        blitDst.set(0, 0, w, h)
-        canvas.drawBitmap(bmp, null, blitDst, upscalePaint)
-    }
+    /**
+     * Draws straight onto the View's own hardware canvas.
+     *
+     * A HALF-RESOLUTION SCRATCH BITMAP USED TO SIT HERE, AND IT MADE THINGS MUCH WORSE. The idea
+     * was sound on paper — quarter the pixels of ten full-screen blended passes, pay one bilinear
+     * upscale — but `Canvas(bitmap)` is a SOFTWARE canvas. Every radial gradient was then
+     * rasterised by the CPU, on the UI thread, once per frame, and only the final blit reached the
+     * GPU.
+     *
+     * dumpsys gfxinfo on the device, backdrop running:
+     *
+     *     50th percentile: 46ms     90th: 81ms     99th: 200ms
+     *     50th gpu percentile: 4ms  90th gpu: 5ms
+     *     Slow UI thread: 3654 of 6186 frames
+     *
+     * A GPU sitting at 4ms behind 46ms frames is the whole diagnosis: the work did not get
+     * smaller, it moved onto the slower processor and off the one built for it. Direct drawing
+     * costs ~19ms of GPU and near-zero UI thread, which is worse in theory and twice as fast in
+     * fact.
+     *
+     * If this is attempted again it has to be a hardware layer, not a Bitmap — and the measurement
+     * to check is `gpu percentile` against the total, not the total alone.
+     */
+    override fun onDraw(canvas: Canvas) = drawBackdrop(canvas)
 
     private fun drawBackdrop(canvas: Canvas) {
         // Nothing to compose: no palette, no beat, no edge treatment. Just the card on black.
@@ -553,10 +504,10 @@ class DynamicBackground @JvmOverloads constructor(
         // composition still has one member that moves with everything.
         val mean = (bass + vocal + treble) / 3f
         val base = maxOf(w, h) * FIELD_BASE_RADIUS
-        blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp), cs[0], beatAlpha)
-        blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp), cs[1], beatAlpha)
-        blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp), cs[2], beatAlpha)
-        blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp), cs[3], beatAlpha)
+        blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp, e), cs[0], beatAlpha)
+        blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp, e), cs[1], beatAlpha)
+        blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp, e), cs[2], beatAlpha)
+        blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp, e), cs[3], beatAlpha)
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -821,7 +772,7 @@ class DynamicBackground @JvmOverloads constructor(
             // hit. Clamping here would flatten exactly the peak that makes a beat read.
             val lvl = orbEnergy[k].coerceAtLeast(0f)
             val radius = short * ORB_BASE_RADIUS[k] *
-                (1f + (lvl * ORB_SIZE_RIDE[k] * amp).coerceAtMost(ORB_SWELL_CAP))
+                (1f + softCap(lvl * ORB_SIZE_RIDE[k] * amp, ORB_SWELL_CAP))
             if (radius <= 0f) continue
 
             // The first three palette slots, blended toward the incoming palette so a track change
@@ -1002,7 +953,23 @@ class DynamicBackground @JvmOverloads constructor(
     private val blobMatrix = android.graphics.Matrix()
 
     /** A blob's radius factor for its band level, with the intensity setting on the render. */
-    private fun blobScale(level: Float, amp: Float) = 1f + level * FIELD_BEAT_SCALE * amp
+    /**
+     * Blob size: its own band, plus a small shared nudge on the beat.
+     *
+     * The band term is continuous — it says how big the low end (or the voice, or the cymbals) is
+     * right now. The nudge is the onset envelope, which answers a different question: did something
+     * just HIT. Bass alone does not cover it, because a kick that lands while the bass is already
+     * loud barely moves the band at all, and that is exactly the moment the picture should
+     * acknowledge.
+     *
+     * DELIBERATELY SMALL, and deliberately size rather than brightness. These blobs cover the whole
+     * screen, so anything on alpha pulses every pixel at once — which is what read as "too
+     * sensitive" before, and why [beatAlpha] is all but constant. A few percent of radius on every
+     * blob together is a nudge you feel rather than a flash you notice, and it scales with Beat
+     * Pulse like everything else, so Calm barely shows it and Insane leans on it.
+     */
+    private fun blobScale(level: Float, amp: Float, onset: Float = 0f) =
+        1f + level * FIELD_BEAT_SCALE * amp + onset * FIELD_ONSET_NUDGE * amp
 
     private fun blend(c1: Int, c2: Int, f: Float): Int {
         val i = 1f - f
@@ -1055,6 +1022,16 @@ class DynamicBackground @JvmOverloads constructor(
         // the screen; per-blob it changes the composition rather than merely inflating it, so it
         // can be much larger without the whole picture pumping.
         private const val FIELD_BEAT_SCALE = 0.42f
+
+        /**
+         * How much the onset envelope adds to every blob at once, before Beat Pulse scales it.
+         *
+         * Small on purpose. This is the "something just hit" term and it moves all four blobs
+         * together, so it reads as the picture leaning in rather than as any one source growing.
+         * At 0.07 an ordinary beat is a couple of percent of radius on Calm and around a third of
+         * that of FIELD_BEAT_SCALE at Insane — present, never the main event.
+         */
+        private const val FIELD_ONSET_NUDGE = 0.07f
 
         /**
          * Field brightness. Near-constant on purpose -- see the note at the call site.
@@ -1236,7 +1213,7 @@ class DynamicBackground @JvmOverloads constructor(
          * the budget and let this drop to 1. If a future change re-inflates the per-frame fill past
          * 16.6ms, this is the one-line lever back to a steady 30.
          */
-        private const val FRAME_STRIDE = 1
+        private const val FRAME_STRIDE = 2
         /** Same idea in a PiP window, where the backdrop is small and nobody is studying it. */
         private const val LOW_POWER_STRIDE = 4
         /** Overall loudness follow, used by the full-screen pulse. */
@@ -1305,6 +1282,23 @@ class DynamicBackground @JvmOverloads constructor(
 
         /** Ceiling on the swell term, so a high intensity cannot inflate an orb without limit. */
         private const val ORB_SWELL_CAP = 2.2f
+
+        /**
+         * Soft ceiling: approaches [cap] asymptotically instead of stopping dead at it.
+         *
+         * `coerceAtMost` was here, and a hard clip is what made the higher Beat Pulse settings feel
+         * harsh rather than big. Once the multiplier pushes an ordinary hit past the cap, every hit
+         * above it renders at exactly the same size — so the loudest settings flatten the very
+         * differences they were turned up to exaggerate, and the orb spends its time pinned at one
+         * radius, snapping between there and wherever the music drops it.
+         *
+         * `cap * (1 - e^(-x/cap))` is linear for small x — so Calm and Normal are unchanged, to the
+         * pixel — and rolls off smoothly above it, so Insane keeps growing with the music instead
+         * of slamming into a wall. That roll-off is what makes a large multiplier read as powerful
+         * rather than broken.
+         */
+        private fun softCap(x: Float, cap: Float): Float =
+            if (x <= 0f) 0f else cap * (1f - Math.exp((-x / cap).toDouble()).toFloat())
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
