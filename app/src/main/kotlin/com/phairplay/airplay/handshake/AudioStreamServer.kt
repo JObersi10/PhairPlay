@@ -1188,7 +1188,22 @@ class AudioStreamServer(
         // at 14-40 packets: at 352 frames each that is 110-320ms of pure, self-inflicted lag, and
         // it drifts with the queue. What is genuinely still ahead of this PCM is what AudioTrack
         // has not played yet, and nothing else.
-        return extraDelayMs + beatDelayMs + outputLatencyMs()
+        // MINUS THE TIME THE ORB SPRING TAKES TO REACH ITS PEAK.
+        //
+        // Everything above lines the EMISSION up with the moment the audio is heard, which is
+        // correct and still leaves the orbs visibly behind the beat — because a level handed to the
+        // backdrop is not a picture yet. It goes into an under-damped spring, and that spring's
+        // first peak is what the eye reads as the hit landing.
+        //
+        // That time is arithmetic, not taste: pi / (omega * sqrt(1 - zeta^2)). DynamicBackground's
+        // ORB_STIFFNESS 400 and ORB_DAMPING 24 give omega 20 and zeta 0.6, so the peak arrives
+        // ~196ms after the level does, every time, on top of a delay that was already correct.
+        //
+        // Compensating for output latency and then adding an uncompensated 196ms of visual rise
+        // is why the orbs read as late "after a beat drop". The target is when the orb PEAKS, not
+        // when the number is emitted, so the spring's own rise comes back off the total.
+        return (extraDelayMs + beatDelayMs + outputLatencyMs() - ORB_SPRING_PEAK_MS)
+            .coerceAtLeast(0L)
     }
 
     /**
@@ -1503,6 +1518,18 @@ class AudioStreamServer(
          * the hold does not collapse between them, short enough that it follows a change of section
          * rather than a whole track.
          */
+        /**
+         * Time for the orb spring's first peak, in ms — pi / (omega * sqrt(1 - zeta^2)) for
+         * DynamicBackground's ORB_STIFFNESS 400 / ORB_DAMPING 24 (omega 20, zeta 0.6).
+         *
+         * Duplicated from the view deliberately rather than plumbed through: it is a property of
+         * the visual, the audio path cannot ask for it, and a wrong value here shows up as the
+         * orbs being early or late rather than as anything breaking. If the spring is ever
+         * retuned, this has to move with it — that is the cost of the duplication and it is
+         * written here so the next person finds it.
+         */
+        private const val ORB_SPRING_PEAK_MS = 196L
+
         private const val BAND_BEAT_PEAK_DECAY = 0.93
 
         /**
@@ -1535,11 +1562,19 @@ class AudioStreamServer(
          *
          * The presence term is the absolute half of the answer: it is the band against its own
          * recent PEAK, which does not run away during a loud passage, so a dense section keeps the
-         * orbs open while the swell still supplies the punch on top. Bass and treble take slightly
-         * less of it than the vocal (0.80 against 0.90) so that a hit still wins over a constant
-         * level and they keep pulsing rather than settling into a steady glow.
+         * orbs open while the swell still supplies the punch on top.
+         *
+         * THE WEIGHT IS A FLOOR, WHICH IS WHY BASS AND TREBLE TAKE HALF OF WHAT THE VOCAL DOES.
+         * The output is `max(swell, presence * weight)`, so during any loud passage — where
+         * presence is ~1 by definition — the weight is simply the lowest value the band can report.
+         * At 0.80 that pinned bass to 0.85-1.00 with whole windows reading a flat 1.00-1.00: the
+         * orbs stopped shrinking and started saturating, which is the same loss of dynamics from
+         * the other end. At 0.50 a loud section holds the orbs half open and leaves the upper half
+         * of the range for the swell, which is the part that carries the beat. The vocal keeps 0.90
+         * because a held note has no swell at all and the presence term is the only thing lighting
+         * it — that is the case the term was introduced for.
          */
-        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.80, 0.90, 0.80)
+        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.50, 0.90, 0.50)
 
         /**
          * How loud centre content has to be, against the band's own peak, before it counts at all.

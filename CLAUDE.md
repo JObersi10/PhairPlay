@@ -167,6 +167,14 @@ analysis and the Now Playing card are written up for
 reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
 constants that only look arbitrary until you have shipped the wrong one.
 
+**Bluetooth audio sink (phone streams to the TV over Bluetooth) is not possible** and was checked
+on the device, not assumed. `dumpsys bluetooth_manager` lists exactly four profiles — `GattService`,
+`A2dpService`, `HidHostService`, `AvrcpTargetService` — with no `A2dpSinkService`, and every paired
+device reports `A2DP_SINK=-1`. The stack is source-only. Two independent blockers: A2DP sink is a
+build-time option baked into the system image, and `BluetoothProfile.A2DP_SINK` is a `@SystemApi`
+needing signature-level `BLUETOOTH_PRIVILEGED` that a sideloaded app cannot hold. AirPlay and DLNA
+already cover "phone streams music to the TV", over Wi-Fi and without the codec penalty.
+
 Google Cast was removed entirely. Port 8009 is permanently held by
 `com.amazon.cast.sink`, and a receiver must answer `DeviceAuthMessage` with a
 Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it.
