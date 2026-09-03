@@ -204,8 +204,18 @@ data class AppSettings(
     /** What to do when a stream ends. */
     val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,
 
-    /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
+    /**
+     * Beat Pulse for the PROJECTOR orbs: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane.
+     *
+     * Separate from [fieldPulse] because the two backdrops answer to the same music through
+     * different geometry — three bounded orbs on black against four screen-sized blobs blended over
+     * each other — so a value that looks right on one is wrong on the other. A single dial could
+     * only ever suit whichever backdrop it was last tuned against.
+     */
     val beatPulse: Int = 0,
+
+    /** Beat Pulse for the DYNAMIC blob field. Same scale, its own value — see [beatPulse]. */
+    val fieldPulse: Int = 0,
 
     /**
      * Serve more than one sender at a time, showing each on its own tile.

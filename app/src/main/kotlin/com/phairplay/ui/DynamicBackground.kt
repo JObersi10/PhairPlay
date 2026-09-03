@@ -407,7 +407,7 @@ class DynamicBackground @JvmOverloads constructor(
         // Levels stay 0..1; the intensity setting is applied to the RENDER below, never to the
         // level itself. See the note in drawOrb -- a pre-clip multiply pins the top of the range
         // flat and makes the highest settings indistinguishable from one another.
-        val amp = beatMultiplier
+        val amp = fieldMultiplier
         val e = energy.coerceIn(0f, 1f)
         // BAND ENVELOPES ONLY -- `energy` is deliberately not mixed in here any more.
         //
@@ -425,8 +425,16 @@ class DynamicBackground @JvmOverloads constructor(
         // on every kick. That is what read as "too sensitive" -- the response was not too large in
         // magnitude, it was applied to the one property that affects every pixel at once. The beat
         // now shows as size, which is local and reads correctly from across a room.
+        // ALPHA DOES NOT TAKE THE INTENSITY DIAL, and that is the fix for "Strong just saturates
+        // the colours".
+        //
+        // These blobs are SCREEN-blended, which is additive, and they cover the whole screen. Push
+        // their alpha up and overlapping colours sum toward white — so turning Beat Pulse up did
+        // not make the field react harder, it washed the picture out and slammed into
+        // FIELD_ALPHA_CAP on every beat, which is the sudden flash. Intensity belongs on SIZE,
+        // where it is local and where more of it reads as more movement rather than less colour.
         val beatAlpha =
-            (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA * amp).coerceAtMost(FIELD_ALPHA_CAP)
+            (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA).coerceAtMost(FIELD_ALPHA_CAP)
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
         // near-black used on a TV: #050505 is a deliberate lift that stops OLED/LCD panels crushing
@@ -536,7 +544,18 @@ class DynamicBackground @JvmOverloads constructor(
     }
 
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
-    fun setBeatMultiplier(m: Float) { beatMultiplier = m }
+    /** Projector orbs. */
+    fun setOrbBeatMultiplier(m: Float) { beatMultiplier = m }
+
+    /**
+     * Dynamic blob field, kept separate from the orbs' multiplier.
+     *
+     * The two backdrops answer to the same music through completely different geometry — three
+     * bounded orbs on black against four screen-sized blobs SCREEN-blended over each other — so a
+     * setting that looks right on one is wrong on the other by construction. One dial could only
+     * ever suit whichever was tuned last.
+     */
+    fun setFieldBeatMultiplier(m: Float) { fieldMultiplier = m }
 
     /**
      * How fast the orbs travel their ellipses: 0 = Slow, 1 = Normal, 2 = Fast.
@@ -969,7 +988,8 @@ class DynamicBackground @JvmOverloads constructor(
      * Pulse like everything else, so Calm barely shows it and Insane leans on it.
      */
     private fun blobScale(level: Float, amp: Float, onset: Float = 0f) =
-        1f + level * FIELD_BEAT_SCALE * amp + onset * FIELD_ONSET_NUDGE * amp
+        1f + softCap(level * FIELD_BEAT_SCALE * amp + onset * FIELD_ONSET_NUDGE * amp,
+                     FIELD_SWELL_CAP)
 
     private fun blend(c1: Int, c2: Int, f: Float): Int {
         val i = 1f - f
@@ -983,6 +1003,7 @@ class DynamicBackground @JvmOverloads constructor(
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 
     @Volatile private var beatMultiplier = 1f
+    @Volatile private var fieldMultiplier = 1f
     private var textFocusX = 0f
     private var textFocusY = 0f
     private var textFocusRadius = 0f
@@ -1032,6 +1053,16 @@ class DynamicBackground @JvmOverloads constructor(
          * that of FIELD_BEAT_SCALE at Insane — present, never the main event.
          */
         private const val FIELD_ONSET_NUDGE = 0.07f
+
+        /**
+         * Soft ceiling on how far a blob may grow, for the same reason the orbs have one.
+         *
+         * Four screen-sized sources that all swell together stop being four sources: they overlap
+         * everywhere, and SCREEN-blending overlapping colour sums toward white. So unbounded growth
+         * at a high Beat Pulse does not read as a bigger reaction, it reads as the picture losing
+         * its colour on every beat. Rolling off leaves the blobs distinct at any setting.
+         */
+        private const val FIELD_SWELL_CAP = 0.55f
 
         /**
          * Field brightness. Near-constant on purpose -- see the note at the call site.

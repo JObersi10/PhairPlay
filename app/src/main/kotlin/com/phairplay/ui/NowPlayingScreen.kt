@@ -1144,9 +1144,13 @@ class NowPlayingScreen @JvmOverloads constructor(
      * ceiling is why the largest multiplier felt harsh rather than large; it now rolls off, so
      * Insane keeps responding instead of pinning at one radius.
      */
-    fun setBeatPulse(level: Int) {
-        dynamicBg.setBeatMultiplier(when (level) { 1 -> 2f; 2 -> 3.5f; 3 -> 5.5f; else -> 0.45f })
+    fun setBeatPulse(orbLevel: Int, fieldLevel: Int) {
+        dynamicBg.setOrbBeatMultiplier(pulseMultiplier(orbLevel))
+        dynamicBg.setFieldBeatMultiplier(pulseMultiplier(fieldLevel))
     }
+
+    private fun pulseMultiplier(level: Int) =
+        when (level) { 1 -> 2f; 2 -> 3.5f; 3 -> 5.5f; else -> 0.45f }
 
     /** Orb drift speed from Settings: 0 Slow, 1 Normal, 2 Fast. */
     fun setOrbSpeed(level: Int) { dynamicBg.setOrbSpeed(level) }

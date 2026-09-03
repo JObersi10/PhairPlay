@@ -127,6 +127,7 @@ class SettingsRepository(private val context: Context) {
         audioBufferMs      = this[Keys.AUDIO_BUFFER_MS]          ?: AppSettings.DEFAULT_AUDIO_BUFFER_MS,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
+        fieldPulse          = this[Keys.FIELD_PULSE]               ?: 0,
         orbSpeed           = this[Keys.ORB_SPEED]                ?: 1,
         multiScreen        = this[Keys.MULTI_SCREEN]             ?: false,
         betaUpdates        = this[Keys.BETA_UPDATES]             ?: false,
@@ -180,6 +181,7 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AUDIO_BUFFER_MS]      = settings.audioBufferMs
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
+        this[Keys.FIELD_PULSE]           = settings.fieldPulse
         this[Keys.ORB_SPEED]            = settings.orbSpeed
         this[Keys.MULTI_SCREEN]         = settings.multiScreen
         this[Keys.BETA_UPDATES]         = settings.betaUpdates
@@ -237,6 +239,7 @@ class SettingsRepository(private val context: Context) {
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
+        val FIELD_PULSE = intPreferencesKey("field_pulse")
         val ORB_SPEED           = intPreferencesKey("orb_speed")
         val MULTI_SCREEN        = booleanPreferencesKey("multi_screen")
         val BETA_UPDATES        = booleanPreferencesKey("beta_updates")

@@ -1060,7 +1060,7 @@ class MainActivity : AppCompatActivity() {
                 backAction = settings.backAction
                 pipEnabled = settings.pipEnabled
                 refreshPipParams()
-                nowPlayingScreen.setBeatPulse(settings.beatPulse)
+                nowPlayingScreen.setBeatPulse(settings.beatPulse, settings.fieldPulse)
                 nowPlayingScreen.setOrbSpeed(settings.orbSpeed)
                 nowPlayingScreen.setBackdropTheme(settings.backdropTheme)
                 // Cached for the same reason as backAction: the session-end path is synchronous.

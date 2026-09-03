@@ -341,8 +341,14 @@ class SettingsFragment : Fragment() {
         showAudioDelay(settings.audioDelayMs)
         showTrimOutput(settings.currentAudioRoute, settings.currentRouteCompensationMs)
         showAudioBuffer(settings.audioBufferMs)
-        showBeatPulse(settings.beatPulse)
-        showOrbSpeed(settings.orbSpeed)
+        // ONE ROW, FOLLOWING THE BACKDROP THAT IS ACTUALLY ON.
+        //
+        // The two backdrops keep separate Beat Pulse values, but showing two rows would mean one of
+        // them is always editing something the user cannot see. So the row edits whichever backdrop
+        // is selected, and its value reflects that one; Orb Speed is projector-only and simply goes
+        // away otherwise, rather than sitting there doing nothing. BLACK draws no motion at all, so
+        // neither applies.
+        showBackdropControls(settings)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
@@ -600,15 +606,32 @@ class SettingsFragment : Fragment() {
             .show()
     }
 
+    /** The backdrop the Beat Pulse row is currently editing. Projector unless the field is on. */
+    private var pulseTheme: BackdropTheme = BackdropTheme.DYNAMIC
+
+    private fun showBackdropControls(settings: AppSettings) {
+        pulseTheme = settings.backdropTheme
+        val level = if (pulseTheme == BackdropTheme.PROJECTOR) settings.beatPulse
+                    else settings.fieldPulse
+        showBeatPulse(level)
+        rowBeatPulse.visibility =
+            if (pulseTheme == BackdropTheme.BLACK) View.GONE else View.VISIBLE
+        rowOrbSpeed.visibility =
+            if (pulseTheme == BackdropTheme.PROJECTOR) View.VISIBLE else View.GONE
+        showOrbSpeed(settings.orbSpeed)
+    }
+
     private fun pickBeatPulse() {
         val labels = arrayOf(beatPulseLabel(0), beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))
+        val projector = pulseTheme == BackdropTheme.PROJECTOR
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.setting_beat_pulse)
             .setItems(labels) { _, which ->
                 val level = which
-                save { it.copy(beatPulse = level) }
+                save { if (projector) it.copy(beatPulse = level) else it.copy(fieldPulse = level) }
                 showBeatPulse(level)
-                Logger.i("Beat pulse set to ${beatPulseLabel(level)}")
+                Logger.i("Beat pulse (${if (projector) "projector" else "dynamic"}) set to " +
+                    beatPulseLabel(level))
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()

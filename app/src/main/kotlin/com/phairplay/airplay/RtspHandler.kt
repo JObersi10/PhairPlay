@@ -1181,6 +1181,24 @@ open class RtspHandler(
                         }
                         val scid = (stream["streamConnectionID"] as? Long) ?: 0L
                         val dataPort = onMirrorStreamStart(client.slot, scid)
+                        // PORT 0 IS A REFUSAL, AND IT HAS TO LOOK LIKE ONE.
+                        //
+                        // onMirrorStreamStart returns 0 when it cannot serve this tile — the
+                        // decoder frame budget is the usual reason, e.g. a 2560x1440 Mac arriving
+                        // behind a phone that has already taken most of it. Answering 200 with
+                        // `dataPort: 0` told the sender its stream was set up and then pointed it at
+                        // nothing, so mirroring "connected" and ended a moment later with no error
+                        // anywhere on either side. Measured on the device: a Mac needing 221M px/s
+                        // against 27M remaining, accepted, then gone.
+                        //
+                        // Dropping the stream from the reply instead means the sender gets a
+                        // response with no video stream in it, which is a state it already handles —
+                        // the same shape as any other stream it asked for and did not get.
+                        if (dataPort <= 0) {
+                            Logger.w("mirror stream type=110 REFUSED (no capacity) — " +
+                                "omitting it from the SETUP reply so the sender sees the failure")
+                            return@mapNotNull null
+                        }
                         activeStreamTypes.add(110)
                         Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())

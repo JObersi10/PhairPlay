@@ -450,7 +450,7 @@ class MirrorStreamServer(
             // don't feed the decoder predicted frames with missing references (which smear/blocky).
             if (!keyframe) return
             awaitingKeyframe = false
-            Logger.i("Mirror: resynced on keyframe after ${'$'}framesSinceKeyframe skipped frames")
+            Logger.i("Mirror: resynced on keyframe after $framesSinceKeyframe skipped frames")
         }
         if (framePtsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
         val errorsBefore = d.decodeErrorCount

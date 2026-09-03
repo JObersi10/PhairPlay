@@ -231,6 +231,9 @@ class AudioStreamServer(
     private val logMin = FloatArray(3) { Float.MAX_VALUE }
     private val logMax = FloatArray(3)
 
+    /** Windows seen per band, for the baseline warm-up in [updateBands]. */
+    private val bandWindows = IntArray(3)
+
     private var winBass = 0.0
     private var winVocalMid = 0.0
     private var winVocalSide = 0.0
@@ -779,8 +782,21 @@ class AudioStreamServer(
         for (b in 0 until 3) {
             // ~1.5s follow. Seeded on the first window rather than from zero: starting at zero
             // makes the first second of every track one enormous false swell.
+            // WARM-UP: 1/n for the first windows, then the fixed rate.
+            //
+            // An EMA seeded from a single sample is biased toward that sample, and at 0.02 it takes
+            // ~1.5s to shake it off — which is the backdrop visibly needing a moment to settle at
+            // the start of a track. Weighting the k-th window by 1/k makes the baseline the true
+            // running mean of everything seen so far, so it is correct from the second window
+            // instead of merely approaching correct; once 1/k falls below the fixed rate the two
+            // are the same thing and it carries on as before.
+            //
+            // No new constant and no guessed ramp: 1/k IS the unbiased mean, and the crossover
+            // happens on its own at k = 1/BAND_BASE_FOLLOW.
+            bandWindows[b]++
+            val warm = 1.0 / bandWindows[b]
             if (bandBase[b] <= 0.0) bandBase[b] = raw[b].coerceAtLeast(BAND_BASE_FLOOR)
-            else bandBase[b] += BAND_BASE_FOLLOW * (raw[b] - bandBase[b])
+            else bandBase[b] += Math.max(BAND_BASE_FOLLOW, warm) * (raw[b] - bandBase[b])
             val base = bandBase[b].coerceAtLeast(BAND_BASE_FLOOR)
             // Headroom matters. Divide by a tight ceiling and ordinary hits clip flat at 1 again,
             // which is the very thing the baseline was introduced to stop.
@@ -963,6 +979,34 @@ class AudioStreamServer(
         // A prime that timed out with nothing in the queue means the sender opened the stream and
         // sent no audio. Starting playback from empty guarantees an immediate underrun, so say so
         // rather than pretending the buffer is at its target.
+        if (frameQueue.isEmpty()) {
+            // NOTHING YET IS NOT THE SAME AS NOTHING COMING, and starting anyway is the worst of
+            // the three options.
+            //
+            // The deadline exists so a sender that opens a stream and never sends cannot stall this
+            // thread forever. But an EMPTY queue at the deadline was being treated as "begin
+            // playback", which starts AudioTrack with nothing to give it — an underrun on the first
+            // buffer by construction, heard as the stream being choppy for its first second.
+            //
+            // Measured on the device: the deadline fired at +725ms and the first PCM arrived 4ms
+            // later. The sender was simply slow to start, and we gave up immediately before it
+            // spoke. Waiting costs nothing when there is no audio to play, so wait for the FIRST
+            // frame on a longer bound, then take a short top-up so playback still begins with a
+            // little depth rather than on the very packet that ended the wait.
+            val firstDeadline = System.currentTimeMillis() + FIRST_FRAME_TIMEOUT_MS
+            while (running && frameQueue.isEmpty() && System.currentTimeMillis() < firstDeadline) {
+                Thread.sleep(5)
+            }
+            if (frameQueue.isNotEmpty()) {
+                val topUp = System.currentTimeMillis() + PRIME_TOP_UP_MS
+                while (running && frameQueue.size < targetDepthFrames &&
+                       System.currentTimeMillis() < topUp) {
+                    Thread.sleep(5)
+                }
+                Logger.i("Audio: sender was slow to start — primed ${frameQueue.size} frames " +
+                    "after waiting for the first packet")
+            }
+        }
         if (frameQueue.isEmpty()) {
             Logger.w("Audio: prime timed out with an empty queue — sender opened the stream but sent nothing")
             return
@@ -1336,6 +1380,19 @@ class AudioStreamServer(
         private const val TARGET_BUFFER_MS = 100
 
         private const val PRIME_TIMEOUT_MS = 700L
+
+        /**
+         * How long to keep waiting when the prime deadline passes with NOTHING received.
+         *
+         * Longer than [PRIME_TIMEOUT_MS] on purpose: at this point the alternative is starting
+         * playback with an empty buffer, which is a guaranteed underrun, so waiting is strictly
+         * better right up until the sender is genuinely dead. Three seconds distinguishes "slow to
+         * start" from "opened the stream and left".
+         */
+        private const val FIRST_FRAME_TIMEOUT_MS = 3_000L
+
+        /** Short grace after the first packet, so playback starts with depth rather than on it. */
+        private const val PRIME_TOP_UP_MS = 150L
 
         /** One health line a second — frequent enough to see a glitch, quiet enough to read. */
         private const val HEALTH_LOG_INTERVAL_MS = 1_000L
