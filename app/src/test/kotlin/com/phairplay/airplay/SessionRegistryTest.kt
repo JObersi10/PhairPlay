@@ -15,11 +15,14 @@ import java.net.Socket
 class SessionRegistryTest {
 
     /** A socket whose only interesting property is whether it has been closed. */
-    private class FakeSocket : Socket() {
+    private class FakeSocket(private val addr: java.net.InetAddress? = null) : Socket() {
         private var closed = false
         override fun isClosed(): Boolean = closed
         override fun close() { closed = true }
+        override fun getInetAddress(): java.net.InetAddress? = addr
     }
+
+    private fun addr(s: String): java.net.InetAddress = java.net.InetAddress.getByName(s)
 
     @Test
     fun `at capacity one, the second sender is refused`() {
@@ -269,5 +272,45 @@ class SessionRegistryTest {
         registry.release(b)
         assertEquals(0, registry.size())
         assertTrue(registry.isEmpty())
+    }
+
+    /**
+     * One device is allowed to change what it is doing. A Mac playing audio that then starts
+     * screen mirroring opens a SECOND control connection while the first is still up, and keying
+     * the policy on sockets made the mirror claim collide with its own device's audio — refused,
+     * socket closed, mirroring dead the instant it started.
+     */
+    @Test
+    fun `the same sender may add mirroring to its own audio session`() {
+        val registry = SessionRegistry(capacity = 3)
+        val mac = addr("192.168.1.50")
+        val audio = FakeSocket(mac); val mirror = FakeSocket(mac)
+        registry.admit(audio)
+        registry.admit(mirror)
+        assertTrue(registry.claimType(audio, SessionRegistry.Kind.AUDIO))
+        assertTrue(registry.claimType(mirror, SessionRegistry.Kind.MIRROR))
+    }
+
+    /** ...but a DIFFERENT device still may not, which is the rule the exemption must not weaken. */
+    @Test
+    fun `a different sender still cannot mirror against someone else's audio`() {
+        val registry = SessionRegistry(capacity = 3)
+        val audio = FakeSocket(addr("192.168.1.50"))
+        val other = FakeSocket(addr("192.168.1.51"))
+        registry.admit(audio)
+        registry.admit(other)
+        assertTrue(registry.claimType(audio, SessionRegistry.Kind.AUDIO))
+        assertFalse(registry.claimType(other, SessionRegistry.Kind.MIRROR))
+    }
+
+    @Test
+    fun `a different sender still cannot take audio from an existing audio session`() {
+        val registry = SessionRegistry(capacity = 3)
+        val first = FakeSocket(addr("192.168.1.50"))
+        val second = FakeSocket(addr("192.168.1.51"))
+        registry.admit(first)
+        registry.admit(second)
+        assertTrue(registry.claimType(first, SessionRegistry.Kind.AUDIO))
+        assertFalse(registry.claimType(second, SessionRegistry.Kind.AUDIO))
     }
 }

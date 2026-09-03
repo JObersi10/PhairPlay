@@ -1263,8 +1263,8 @@ class DynamicBackground @JvmOverloads constructor(
          * zeta stays 0.6 (under-damped) deliberately — the overshoot is the flare, and
          * ORB_LEVEL_CEILING below leaves room for it instead of clamping it flat.
          */
-        private const val ORB_STIFFNESS = 400f
-        private const val ORB_DAMPING = 24f
+        private const val ORB_STIFFNESS = 900f
+        private const val ORB_DAMPING = 36f
 
         /** Integration sub-step. Well inside the 2/omega = 100ms explicit-Euler stability bound. */
         private const val SPRING_MAX_STEP_S = 0.008f

@@ -78,7 +78,28 @@ class SessionRegistry(capacity: Int = 1) {
     fun claimType(socket: Socket, kind: Kind): Boolean = synchronized(lock) {
         kinds.keys.removeAll { it.isClosed || it !in active }
         if (kinds[socket] == kind) return@synchronized true
-        val others = kinds.filterKeys { it != socket }.values
+        // OTHER SENDERS, NOT OTHER SOCKETS. The policy exists to stop two DIFFERENT devices
+        // fighting over the audio path; it was reading one device changing its mind as a conflict.
+        //
+        // A Mac that is playing audio and then starts screen mirroring opens a SECOND control
+        // connection while the first is still up. Keyed on sockets, the mirror claim saw its own
+        // device's AUDIO among `others`, refused, and `claimSessionType` closed the socket — so
+        // mirroring from a Mac that had been playing audio died the instant it started, with the
+        // refusal logged as though a second sender had been turned away.
+        //
+        // Address rather than session id, because the two connections share nothing else at this
+        // point: the mirror one has not sent a SETUP yet, which is the whole reason admission
+        // cannot classify it. Two senders behind one NAT would be treated as one device, which is
+        // not a case that exists on a LAN with AirPlay.
+        // A NULL ADDRESS IS NEVER "THE SAME SENDER". Comparing addresses directly made two unknown
+        // sockets compare equal (null == null), which quietly exempted every connection from the
+        // policy — the three tests asserting that a second sender is refused all went green-to-red
+        // together, which is what a rule that has stopped applying looks like. The exemption has to
+        // require positive identification, not the absence of it.
+        val here = socket.inetAddress
+        val others = kinds.filterKeys { other ->
+            other != socket && !(here != null && other.inetAddress == here)
+        }.values
         val allowed = when (kind) {
             Kind.MIRROR -> others.none { it == Kind.AUDIO }
             Kind.AUDIO -> others.isEmpty()

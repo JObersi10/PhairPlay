@@ -1520,7 +1520,7 @@ class AudioStreamServer(
          */
         /**
          * Time for the orb spring's first peak, in ms — pi / (omega * sqrt(1 - zeta^2)) for
-         * DynamicBackground's ORB_STIFFNESS 400 / ORB_DAMPING 24 (omega 20, zeta 0.6).
+         * DynamicBackground's ORB_STIFFNESS 900 / ORB_DAMPING 36 (omega 30, zeta 0.6).
          *
          * Duplicated from the view deliberately rather than plumbed through: it is a property of
          * the visual, the audio path cannot ask for it, and a wrong value here shows up as the
@@ -1528,7 +1528,7 @@ class AudioStreamServer(
          * retuned, this has to move with it — that is the cost of the duplication and it is
          * written here so the next person finds it.
          */
-        private const val ORB_SPRING_PEAK_MS = 196L
+        private const val ORB_SPRING_PEAK_MS = 131L
 
         private const val BAND_BEAT_PEAK_DECAY = 0.93
 
@@ -1573,8 +1573,18 @@ class AudioStreamServer(
          * of the range for the swell, which is the part that carries the beat. The vocal keeps 0.90
          * because a held note has no swell at all and the presence term is the only thing lighting
          * it — that is the case the term was introduced for.
+         *
+         * BASS TAKES THE LEAST OF ALL, and the reason is what bass IS rather than a preference.
+         * Presence is the band against its own recent peak, and bass in most music is close to
+         * continuous — a kick pattern, a sustained sub — so it sits near its own peak nearly all the
+         * time and the weight becomes a permanent floor. Measured at 0.50: bass held a floor of
+         * 0.44-0.51 window after window while the vocal, being intermittent, dropped to 0.09-0.29.
+         * The bass orb was simply bigger than the vocal orb whatever the music did, which is the
+         * "bass is amplified, it maxes out more than the vocal orb" report. At 0.32 its floor sits
+         * below the vocal's typical level, so the two are comparable again and bass gets its size
+         * from the beat rather than from being bass.
          */
-        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.50, 0.90, 0.50)
+        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.32, 0.90, 0.45)
 
         /**
          * How loud centre content has to be, against the band's own peak, before it counts at all.
@@ -1616,9 +1626,27 @@ class AudioStreamServer(
          *
          * Both are still slower than the smoothing downstream, so nothing here is a step function
          * by the time it reaches a pixel.
+         *
+         * PUSHED FURTHER, TOWARD A METER AND AWAY FROM AN ENVELOPE. 0.85/0.20 still integrated
+         * visibly: a run of loud windows piled up faster than the release could drain, so a dense
+         * passage read as one long swell rather than as separate hits — "it adds up". Attack 0.92 is
+         * within a single window of the target, and release 0.38 is a ~75ms decay, short enough that
+         * consecutive beats stay separated instead of merging. The reference here is a live spectrum
+         * meter, the kind on a car stereo, and a meter integrates almost nothing on purpose: it
+         * shows the signal now, not a smoothed history of it.
+         *
+         * THE RELEASE THEN WENT TOO FAR THE OTHER WAY. At 0.38 (~75ms) the fall was as quick as the
+         * rise, and an envelope that is symmetric is not a thump — it is a flicker. What a hit
+         * should look like is fast start, smooth end: the attack carries the impact and the decay
+         * carries the weight, which is also how the sound itself behaves.
+         *
+         * 0.22 is a ~135ms decay. It is still well inside a beat period at any normal tempo, so
+         * consecutive hits stay separate and nothing piles up, but the orb now falls away from a
+         * hit instead of snapping off it. Attack and release are deliberately far apart — that
+         * ratio IS the shape, and moving them together loses it in one direction or the other.
          */
-        private const val BAND_ATTACK = 0.85f
-        private const val BAND_RELEASE = 0.20f
+        private const val BAND_ATTACK = 0.92f
+        private const val BAND_RELEASE = 0.22f
 
         // ── Onset detection ─────────────────────────────────────────────────────────────────────
         //
