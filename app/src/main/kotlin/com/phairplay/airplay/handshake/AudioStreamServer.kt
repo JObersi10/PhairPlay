@@ -226,10 +226,6 @@ class AudioStreamServer(
      * Seeded at the floor rather than zero, so the first window of a track cannot divide by a
      * near-zero ceiling and read full scale.
      */
-    private val bandExcessPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
-
-    /** Short peak hold feeding [bandExcessPeak], so the ceiling averages beats instead of chasing gaps. */
-    private val bandBeatPeak = DoubleArray(3) { BAND_EXCESS_FLOOR[it] }
 
     /** Per-interval extremes for the band log — see the note at the log site. */
     private val logMin = FloatArray(3) { Float.MAX_VALUE }
@@ -792,71 +788,24 @@ class AudioStreamServer(
             // it needs headroom to avoid pinning; treble and vocals move far less and were being
             // asked to clear the same bar, which left both of them dim on material that plainly had
             // cymbals and singing in it.
-            // THE CEILING ADAPTS. It used to be three fixed numbers, and that is why bass barely
-            // moved.
+            // A FIXED CEILING, and the adaptive one is not coming back in this form.
             //
-            // Measured on the device across 25 consecutive windows of real music: bass ranged
-            // 0.13-0.36 and never once passed 0.36, while vocal used 0.04-0.94. The band carrying
-            // the thump was living in the bottom third of its scale. The arithmetic is plain --
-            // a kick rises about 0.35 above its own 1.5s baseline, and dividing that by a fixed
-            // ceiling of 1.15 caps it at ~0.30 no matter how hard it hits.
+            // It was tried three ways — the instantaneous peak, then a slow one-sided follower,
+            // then a beat-peak hold with headroom — and every version ended the same way: lively
+            // for a minute, then flat. That is not a tuning failure, it is what the construction
+            // does. A ceiling that tracks the music divides the music by itself, so the longer a
+            // track plays the more its loud parts define "normal" and the less anything can stand
+            // out. Slower adaptation only postpones it, which is exactly what each fix bought.
             //
-            // A fixed ceiling cannot be right for both a dynamic-range-preserving master and a
-            // brickwalled pop mix: the first needs headroom, the second needs almost none, and one
-            // number chosen for the first leaves the second flat. So the ceiling now TRACKS the
-            // largest swell this band has actually produced recently, the same asymmetric
-            // peak-follower already used for the vocal presence reference: it jumps instantly to a
-            // new loudest and falls away slowly.
+            // Divide by a constant and a loud passage stays loud.
             //
-            // Both bounds matter and neither is decoration. [BAND_EXCESS_MAX] survives as a hard
-            // UPPER clamp so one freak transient cannot desensitise a band for the next minute --
-            // the failure recorded against BAND_PEAK_DECAY, where a single early peak left
-            // everything after it reading 0.10-0.30. [BAND_EXCESS_FLOOR] is the lower clamp, and it
-            // is what stops a quiet or silent passage dividing its own room tone up into a full
-            // glow: with no floor, `excess / excessPeak` is ~1 whenever the band is merely
-            // consistent, which would pin every orb bright on silence.
+            // The constants are read off the measurement rather than guessed: a kick rises about
+            // 0.35 above its own 1.5s baseline, so a ceiling near 0.45 puts an ordinary hit around
+            // 0.8 and lets a genuinely big one clip at 1.0 — which is what a thump should do. The
+            // original 1.15 is what pinned bass to the bottom third of its range and started all
+            // of this.
             val excessRaw = ((raw[b] / base) - 1.0).coerceAtLeast(0.0)
-            // THE CEILING RISES SLOWLY AND SITS ABOVE THE MUSIC. Both halves of that matter, and
-            // the first version of this had neither, which made the orbs bistable.
-            //
-            // That version tracked the instantaneous peak: `peak = max(excessRaw, decayed)`. So the
-            // ceiling was redefined by whatever hit was loudest, and `excessRaw / peak` came out at
-            // EXACTLY 1.0 every time a hit set a new maximum, then collapsed toward 0 between hits.
-            // A comparator, not a scale -- measurably so, the device log filling with 0.96/0.95 and
-            // runs of 0.00 with very little in between. It fixed the range and destroyed the
-            // gradations inside it.
-            //
-            // Rising slowly means one hit cannot redefine full scale; the ceiling settles on what
-            // this track's hits typically reach, over about half a second. [BAND_EXCESS_HEADROOM]
-            // is the other half: putting the ceiling a little ABOVE that typical peak is what
-            // leaves somewhere for a genuinely big hit to go. Without it the loudest thing in the
-            // music always reads 1.0 by construction, whatever else is happening, and an ordinary
-            // beat is indistinguishable from a drop.
-            //
-            // Falling stays slow and multiplicative, as it was: a ceiling that drops quickly during
-            // a quiet passage makes the next soft note read as a hit.
-            // TWO STAGES, because a one-sided follower on this signal is a RATCHET.
-            //
-            // The previous version rose at 0.06 and fell at 0.010 -- six times faster up than down
-            // -- directly on excessRaw. Over a few minutes that converges on the LOUDEST hit in the
-            // track rather than a typical one, and it never comes back down, which is both reports
-            // at once: the orbs are lively at the start of a track and progressively flatter the
-            // longer it plays ("got stale"), and the weaker half of a backbeat/downbeat pair slides
-            // under BAND_GATE and reads exactly zero ("misses every other beat").
-            //
-            // Making the fall faster does not fix it, and that is the trap: excessRaw sits near
-            // zero BETWEEN beats, so any follower quick enough to come down is dragged toward zero
-            // in the gaps and the next hit saturates. The signal has to be peak-held first.
-            //
-            // So: hold each beat's peak with a ~0.5s decay, then follow THAT symmetrically over
-            // ~2s. The ceiling becomes the mean of recent beat peaks instead of a high-water mark,
-            // which is the quantity that was wanted all along -- a hit of ordinary size lands
-            // mid-range, a bigger one goes above it, and neither redefines the scale.
-            bandBeatPeak[b] = Math.max(excessRaw, bandBeatPeak[b] * BAND_BEAT_PEAK_DECAY)
-            bandExcessPeak[b] += BAND_CEIL_RATE * (bandBeatPeak[b] - bandExcessPeak[b])
-            val ceiling = (bandExcessPeak[b] * BAND_EXCESS_HEADROOM)
-                .coerceIn(BAND_EXCESS_FLOOR[b], BAND_EXCESS_MAX[b])
-            val excess = (excessRaw / ceiling).coerceIn(0.0, 1.0)
+            val excess = (excessRaw / BAND_EXCESS_MAX[b]).coerceIn(0.0, 1.0)
             // The gate lives HERE, on the swell, and it is PER BAND.
             //
             // There used to be a second gate after the vocal presence term as well, re-expanding an
@@ -1470,40 +1419,18 @@ class AudioStreamServer(
         /**
          * How far above its own average a band has to rise to read as full scale.
          *
-         * NOW AN UPPER CLAMP ON THE ADAPTIVE CEILING, not the ceiling itself. As a fixed divisor
-         * these values left bass measurably pinned to the bottom third of its range -- see the note
-         * at the use site. They are kept because the adaptive ceiling still needs a maximum: without
-         * one, a single freak transient sets a ceiling that takes most of a minute to decay, and
-         * every band reads low until it does.
+         * LOWERED from 1.15/0.85/0.62, which is what pinned bass to 0.13-0.36 and never let it out
+         * of the bottom third of its range. Those were chosen to stop hits clipping flat, before it
+         * was measured that an ordinary kick only rises ~0.35 above its own baseline — so they were
+         * roughly three times too generous for real material and clipping was never the risk.
+         *
+         * These are the sensitivity dials now that the ceiling is fixed again. LOWER = more
+         * sensitive. If a band pins at 1.00 through whole windows, raise its number; if it never
+         * reaches the top on a real hit, lower it.
          */
-        private val BAND_EXCESS_MAX = doubleArrayOf(1.15, 0.85, 0.62)
+        private val BAND_EXCESS_MAX = doubleArrayOf(0.45, 0.40, 0.35)
 
-        /**
-         * Lower clamp on the adaptive ceiling — in effect, maximum sensitivity per band.
-         *
-         * This is the number to raise if the orbs are still not lively enough on quiet or heavily
-         * compressed material, and the number to raise if silence starts to glow. It sets how small
-         * a swell is allowed to count as full scale: at 0.30, bass has to rise 30% above its own
-         * running average to fill the orb, which on the measured material is a little under an
-         * ordinary kick. Below its own floor a band simply reads proportionally less, which is what
-         * keeps a quiet passage quiet instead of amplifying room tone into a glow.
-         */
-        private val BAND_EXCESS_FLOOR = doubleArrayOf(0.30, 0.25, 0.20)
 
-        /**
-         * How far above the band's typical peak the ceiling sits.
-         *
-         * This is what keeps the scale continuous. At 1.0 the loudest recent hit reads exactly full
-         * scale by construction, so every hit that sets a new maximum is 1.0 and a real drop looks
-         * identical to an ordinary beat. At 1.35 a typical hit lands around 0.74, leaving the top
-         * quarter of the range for the ones that genuinely are bigger — which is the difference
-         * between an orb that flickers between its limits and one that visibly thumps harder when
-         * the music does.
-         *
-         * Raise it for a calmer picture with more headroom, lower it for a hotter one. Below ~1.1
-         * the bistable behaviour returns.
-         */
-        private const val BAND_EXCESS_HEADROOM = 1.35
 
         /**
          * How fast the ceiling adapts, per window. Slow on the way up, slower on the way down.
@@ -1530,16 +1457,7 @@ class AudioStreamServer(
          */
         private const val ORB_SPRING_PEAK_MS = 131L
 
-        private const val BAND_BEAT_PEAK_DECAY = 0.93
 
-        /**
-         * How fast the ceiling follows those beat peaks, per window. SYMMETRIC — up and down at the
-         * same rate, ~2 seconds.
-         *
-         * Symmetry is the point. An asymmetric rate on a peak-held signal is still a ratchet, just
-         * a slower one, and the ratchet is what made the orbs go stale partway through a track.
-         */
-        private const val BAND_CEIL_RATE = 0.015
 
         /**
          * How much of the vocal band's absolute presence counts, before swell is added on top.

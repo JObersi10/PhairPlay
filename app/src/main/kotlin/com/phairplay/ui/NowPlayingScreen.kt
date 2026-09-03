@@ -1290,6 +1290,20 @@ class NowPlayingScreen @JvmOverloads constructor(
         artWrapper.animate().cancel()
         artWrapper.scaleX = 1f
         artWrapper.scaleY = 1f
+        // THE COVER GOES TOO, IMMEDIATELY.
+        //
+        // Everything else here is reset per session and the artwork was not, so the ImageView still
+        // held the last track's cover when the next sender connected — it stayed on screen until
+        // the new image arrived and decoded, about a second, reading as the new session briefly
+        // playing the old song.
+        //
+        // The deferred clear in [applyArtwork] must be cancelled rather than left to fire: it
+        // exists for the gap BETWEEN tracks in one session, where dropping the cover for a moment
+        // is a flicker rather than a fact. Across a disconnect the fact is that there is no track,
+        // and holding the old art is exactly the wrong bet.
+        artworkClear?.let { removeCallbacks(it); artworkClear = null }
+        artworkKey = null
+        applyArtworkNow(null)
     }
 
     private fun darken(color: Int, f: Float) = Color.rgb(
