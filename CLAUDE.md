@@ -436,6 +436,12 @@ Run the whole matrix before pushing:
 
 `./gradlew app:testFiretvDebugUnitTest`. Both flavors must compile.
 
+**This task is NOT in the CI matrix above.** That gap is not free: all four `MdnsServiceTest` cases
+sat red for several commits, because CI runs `:test-runner:test` and nobody ran this locally. The
+failure was in the mocking, not the code — a relaxed mock answers `getString` with `""` rather than
+`null`, so `PairingKeys.load()` took the "already stored" path and tried to build an Ed25519 key
+from a zero-length seed. Run this task if you touch anything it covers; CI will not tell you.
+
 Tests encode intended behaviour, so a failing test after a change is a question,
 not an obstacle — `startOnBoot`'s default was wrong in the model and the test
 caught it. But device evidence outranks a test: the two TEARDOWN tests asserted
@@ -451,6 +457,10 @@ behaviour that demonstrably broke iOS, and were rewritten.
   the Fire TV — launching (`monkey -p ... -c android.intent.category.LEANBACK_LAUNCHER 1`), key
   injection and `exec-out screencap` are all fine for verifying a change. Say when you do it.
 - Never `pm clear` without saying so first
+- **The diagnostic server needs no drive.** `curl http://192.168.1.246:8001/` works whenever the TV
+  is up, so a missing SABRENT costs you the build and `adb` — not the logs. There is also a second
+  `adb` under `SideQuest/platform-tools`; it runs its own server and fails to authenticate against
+  the Fire TV, so always use `$ANDROID_HOME/platform-tools/adb`.
 - The SABRENT drive is often **attached but not mounted** after a reconnect: `diskutil list external`
   shows it, `/Volumes` does not. `diskutil mount disk4s2` fixes it. Without it the wrapper fails with
   "JAVA_HOME is set to an invalid directory", which reads like a config error and is not one.

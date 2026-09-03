@@ -176,6 +176,26 @@ class PhairPlayService : Service() {
      * That failure is invisible -- the setting shows as on, and nothing happens, with nothing in the
      * log to say why.
      */
+    /**
+     * Keeps [artworkLookup] current, for the same reason [watchIdentifySetting] exists.
+     *
+     * `startReceivers()` samples settings once with `settingsFlow.first()`, which is right for
+     * anything consulted only while BUILDING a receiver and silently wrong for anything toggled
+     * during a session. Online cover lookup is consulted per track, so a one-shot read meant
+     * turning it on mid-session did nothing until the receivers next restarted -- the switch showed
+     * as on, no cover appeared, and nothing in the log said why. This is the same bug that hid in
+     * `TrackIdentifier.enabled`, in the one other place that had its shape.
+     */
+    private fun watchArtworkSetting() {
+        serviceScope.launch {
+            settingsRepository.settingsFlow.collect { settings ->
+                if (artworkLookup == settings.artworkLookup) return@collect
+                artworkLookup = settings.artworkLookup
+                Logger.i("Artwork lookup ${if (artworkLookup) "enabled" else "disabled"}")
+            }
+        }
+    }
+
     private fun watchIdentifySetting() {
         serviceScope.launch {
             settingsRepository.settingsFlow.collect { settings ->
@@ -484,6 +504,7 @@ class PhairPlayService : Service() {
         DiagnosticServer.statusProvider = ::diagnosticStatus
         DiagnosticServer.start(serviceScope)
         watchIdentifySetting()
+        watchArtworkSetting()
         startAudioRouteWatcher()
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
@@ -1016,7 +1037,8 @@ class PhairPlayService : Service() {
 
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
-        artworkLookup = settings.artworkLookup
+        // `artworkLookup` is NOT set here either -- watchArtworkSetting() owns it, for the same
+        // reason as `enabled` below.
         // `enabled` is NOT set here -- watchIdentifySetting() owns it, so that toggling the switch
         // during a session takes effect immediately instead of at the next receiver restart.
         com.phairplay.media.shazam.TrackIdentifier.onIdentified = { match ->

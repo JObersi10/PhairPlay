@@ -904,7 +904,7 @@ class AudioStreamServer(
             // it, and the per-band gate and excess ceiling already set the range the curve was
             // brought in to fix.
             val norm =
-                if (b == BAND_VOCAL) Math.max(swell, gated * BAND_PRESENCE_WEIGHT) else swell
+                Math.max(swell, gated * BAND_PRESENCE_WEIGHT[b])
             // Envelope follower, fast up and slow down -- how a VU meter behaves, and how a glow
             // should. Rising quickly keeps the hit on the beat; falling slowly is what makes the
             // decay look smooth, and the slow fall is most of what reads as "thump".
@@ -1525,8 +1525,21 @@ class AudioStreamServer(
          *
          * At 0.9 a strong, sustained centre vocal can carry the orb on its own, and the beat swell
          * still wins on the hits, which is the intended "lit while singing, brighter on the beat".
+         *
+         * NOW APPLIED TO EVERY BAND, not just the vocal, because pure swell has a failure that only
+         * shows on loud music: it measures a rise above the band's OWN 1.5s baseline, and during a
+         * sustained loud section the baseline catches up. `raw / base - 1` then falls back toward
+         * zero while the music is at its biggest, so the orbs were SMALLEST exactly when the track
+         * was densest -- reported as "they shrink with a lot of audio", and correct arithmetic doing
+         * precisely the wrong thing.
+         *
+         * The presence term is the absolute half of the answer: it is the band against its own
+         * recent PEAK, which does not run away during a loud passage, so a dense section keeps the
+         * orbs open while the swell still supplies the punch on top. Bass and treble take slightly
+         * less of it than the vocal (0.80 against 0.90) so that a hit still wins over a constant
+         * level and they keep pulsing rather than settling into a steady glow.
          */
-        private const val BAND_PRESENCE_WEIGHT = 0.90
+        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.80, 0.90, 0.80)
 
         /**
          * How loud centre content has to be, against the band's own peak, before it counts at all.

@@ -42,6 +42,19 @@ class MdnsServiceTest {
         // Tell the mock context to return our mock NsdManager
         every { mockContext.getSystemService(Context.NSD_SERVICE) } returns mockNsdManager
 
+        // AND A SHARED-PREFS MOCK THAT SAYS "NOTHING STORED YET".
+        //
+        // Registering the AirPlay service reads the Ed25519 identity for the `pk` TXT record, which
+        // iOS requires to list the receiver at all. PairingKeys.load() asks SharedPreferences for a
+        // stored hex seed and generates one when there is none — but a RELAXED mock answers
+        // getString with "" rather than null, so load() took the "already stored" path, decoded an
+        // empty string to a zero-length seed and threw ArrayIndexOutOfBoundsException trying to copy
+        // 32 bytes out of it. Every test in this class failed on it, in the mocking rather than in
+        // anything MdnsService does.
+        val prefs = mockk<android.content.SharedPreferences>(relaxed = true)
+        every { prefs.getString(any(), any()) } returns null
+        every { mockContext.getSharedPreferences(any(), any()) } returns prefs
+
         mdnsService = MdnsService(mockContext)
     }
 
