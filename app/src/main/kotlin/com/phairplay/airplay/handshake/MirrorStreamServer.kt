@@ -50,6 +50,16 @@ class MirrorStreamServer(
     private val onConnectionEnded: () -> Unit = {},
     /** Decoded size for THIS session, so its tile can letterbox to its own aspect. */
     private val onOutputSize: (width: Int, height: Int) -> Unit = { _, _ -> },
+    /**
+     * Asks the sender for a fresh IDR. Default no-op so the protocol tests can build one of these
+     * without an event channel.
+     *
+     * Every `awaitingKeyframe = true` below is a point at which the picture is broken until the
+     * sender's next IDR, and macOS emits roughly one per SESSION — so without this the wait is
+     * measured in seconds and shows as a black screen or a smear that will not clear. Nothing on
+     * this side can shorten it: the frames do not exist yet.
+     */
+    private val requestKeyFrame: (String) -> Unit = {},
 ) {
     /** [queuedAtMs] is when the payload arrived, which is what [videoDelayMs] is measured from. */
     private sealed class Item(val queuedAtMs: Long = System.currentTimeMillis())
@@ -259,6 +269,7 @@ class MirrorStreamServer(
             queue.offer(item)
             framesDropped++
             awaitingKeyframe = true        // a frame was lost — resync the decoder at the next IDR
+            requestKeyFrame("frame dropped under load")
         }
         StreamStats.videoQueue = queue.size
         if (framesIn % 300 == 0) {
@@ -370,6 +381,9 @@ class MirrorStreamServer(
         val sc = MirrorCrypto.START_CODE
         decoder = VideoDecoder(surface, onOutputSize).also { it.initialize(sc + sps, sc + pps, width, height) }
         awaitingKeyframe = true                                // a fresh decoder must start at an IDR
+        // The cold-first-connect case: the sender sent its single IDR before this decoder existed,
+        // so waiting for the next one is the black screen. Ask instead of racing.
+        requestKeyFrame("decoder rebuilt")
         StreamStats.videoRes = "${width}x${height}"
         Logger.i("Mirror decoder (re)built for ${surfaceLabel(surface)} surface (sps=${sps.size}B pps=${pps.size}B)")
     }
@@ -447,7 +461,8 @@ class MirrorStreamServer(
             // nothing said so — the stream carried on feeding predicted frames onto a reference
             // the decoder never accepted.
             awaitingKeyframe = true
-            Logger.w("Mirror: decoder rejected a frame — waiting for the next IDR to resync")
+            requestKeyFrame("decoder rejected a frame")
+            Logger.w("Mirror: decoder rejected a frame — asked the sender for an IDR to resync")
         }
         framePtsUs += FRAME_INTERVAL_US
     }

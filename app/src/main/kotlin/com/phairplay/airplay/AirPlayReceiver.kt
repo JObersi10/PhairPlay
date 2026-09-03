@@ -337,6 +337,8 @@ class AirPlayReceiver(
     /** Serialises remote-command writes against the reply the read loop is decrypting. */
     private val eventWriteLock = Any()
     private val eventCseq = java.util.concurrent.atomic.AtomicInteger(1)
+    /** Rate limit for [requestKeyFrame]; a sender cannot encode IDRs faster than this anyway. */
+    @Volatile private var lastKeyFrameRequestMs = 0L
     /** MediaRemote commands the current sender said it would accept. Empty until it tells us. */
     @Volatile private var supportedRemoteCommands: Set<Int> = emptySet()
     /**
@@ -504,6 +506,72 @@ class AirPlayReceiver(
      *
      * @return false when there is no event channel or the sender did not advertise this command.
      */
+    /**
+     * Asks the sender for a fresh IDR, over the event channel.
+     *
+     * THIS IS NOT A GUESS, WHICH IS THE ONLY REASON IT IS ENABLED WHILE [sendMediaRemoteCommand]
+     * IS NOT. Apple's own receiver SDK (the CarPlay Communication Plugin sources, which use the
+     * same screen protocol as mirroring) defines it in AirPlayCommon.h:
+     *
+     *     ForceKeyFrame: Tells the server to request a key frame from the sender.
+     *     Used when the decoder crashes, etc.  No request keys. No response keys.
+     *     #define kAirPlayCommand_ForceKeyFrame "forceKeyFrame"
+     *
+     * and AirPlayReceiverSessionForceKeyFrame() builds exactly `{type: "forceKeyFrame"}` — no
+     * params — and POSTs it to /command on the event client. The MediaRemote attempt failed
+     * because its two payload keys were invented by mirroring a sender→receiver message and appear
+     * in no implementation anywhere; this one has a documented name and an empty body, so there is
+     * nothing left to get wrong except the framing, which the channel already does for HomeKit.
+     *
+     * WHY IT MATTERS: macOS emits roughly ONE IDR per session. Every path that sets
+     * `MirrorStreamServer.awaitingKeyframe` — a dropped frame, a rejected frame, a decoder rebuilt
+     * against a new Surface — then waits for an IDR that may be many seconds away, and the picture
+     * is black or smeared for the whole wait. That is the cold-first-connect bug and the artifact
+     * bug, and neither is fixable by anything on our side of the socket: the frames we need do not
+     * exist yet. Asking is the only lever.
+     *
+     * Rate-limited, because [MirrorStreamServer] can set awaitingKeyframe on consecutive frames and
+     * a keyframe cannot arrive faster than the sender can encode one. Asking again inside that
+     * window would only cost the sender bandwidth we then have to receive.
+     *
+     * @return false when there is no event channel, or when a request is already outstanding.
+     */
+    fun requestKeyFrame(why: String): Boolean {
+        val cipher = eventCipher
+        val output = eventOutput
+        if (cipher == null || output == null) {
+            Logger.d("Keyframe request ($why) dropped — no event channel")
+            return false
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastKeyFrameRequestMs < KEYFRAME_REQUEST_INTERVAL_MS) return false
+        lastKeyFrameRequestMs = now
+
+        val body = PlistCodec.encode(mapOf("type" to "forceKeyFrame"))
+        val host = eventClientSocket?.inetAddress?.hostAddress?.substringBefore('%')
+        val head = buildString {
+            // HTTP/1.1 to match Apple's own receiver, which sends this through its HTTPClient.
+            // A Go sender implementation verified against real Apple hardware uses RTSP/1.0 on
+            // this socket instead, so the token is the one part of this that is genuinely
+            // uncertain — which is why the reply is logged rather than ignored. A sender that
+            // cannot parse the request line answers nothing at all, and that silence is the
+            // signal to try the other token.
+            append("POST /command HTTP/1.1\r\n")
+            append("Host: ${host ?: "localhost"}\r\n")
+            append("CSeq: ${eventCseq.getAndIncrement()}\r\n")
+            append("Content-Type: application/x-apple-binary-plist\r\n")
+            append("Content-Length: ${body.size}\r\n\r\n")
+        }.toByteArray(Charsets.US_ASCII)
+        scope.launch(Dispatchers.IO) {
+            synchronized(eventWriteLock) {
+                runCatching { cipher.write(output, head + body) }
+                    .onSuccess { Logger.i("Keyframe requested from sender ($why)") }
+                    .onFailure { Logger.e("Keyframe request ($why) failed", it) }
+            }
+        }
+        return true
+    }
+
     fun sendMediaRemoteCommand(command: Int): Boolean {
         // OFF because there is no known delivery format — NOT because it is harmful.
         //
@@ -1080,6 +1148,7 @@ class AirPlayReceiver(
             // frozen on the TV. Tear it down ourselves.
             onConnectionEnded = { scheduleMirrorVideoStop(slot) },
             onOutputSize = { w, h -> runCatching { onMirrorSizeChanged(slot, w, h) } },
+            requestKeyFrame = { why -> requestKeyFrame(why) },
         )
             .also {
                 mirrorServers[slot] = it
@@ -1475,6 +1544,16 @@ class AirPlayReceiver(
          * SessionRegistry.capacity, which is driven by the user's setting.
          */
         const val MAX_SLOTS = 4
+
+        /**
+         * Minimum gap between keyframe requests.
+         *
+         * [MirrorStreamServer] can set `awaitingKeyframe` on consecutive frames — one dropped frame
+         * followed by several rejected ones is ordinary — and an encoder cannot produce IDRs faster
+         * than this regardless. Asking again inside the window only costs bandwidth we then have to
+         * receive and decrypt.
+         */
+        const val KEYFRAME_REQUEST_INTERVAL_MS = 1000L
 
         /**
          * The tile everything single-stream uses: AirPlay URL video, DLNA playback, the audio

@@ -220,7 +220,7 @@ black SurfaceView up before anyone knows the session type. **Unverified.**
 If that is still not early enough, the next honest option is asking the sender for
 a keyframe rather than racing it.
 
-### The event channel is encrypted and we treat it as plaintext
+### The event channel — encrypted, implemented, and now used to ask for keyframes
 
 `AirPlay Documentation.html` (project folder, not the repo) is explicit: after SETUP the sender
 connects to the event port and **enables encryption**. Keys come from the pair-verify secret —
@@ -228,9 +228,56 @@ salt `Events-Salt`, info `Events-Write-Encryption-Key` (output) and `Events-Read
 (input), with the two reversed on the sender side. The channel is logically *receiver → sender*
 even though the sender opens the socket.
 
-Our handler reads raw bytes off that socket and replies in cleartext RTSP, so it has never parsed
-anything real. The doc also says the receiver is expected to `POST /command` with a
-`updateInfo` plist over this channel once RECORD completes, which we never send.
+`EventCipher` implements exactly that (ChaCha20-Poly1305, HKDF-SHA512), and `AirPlayReceiver`
+holds the cipher and output stream so the receiver can send on it. **This section used to say the
+channel was treated as plaintext; that is no longer true** — and believing it cost a round of
+investigation, because it made the keyframe fix below look like a rewrite when it was a small
+change.
+
+We still never send the `updateInfo` plist the doc expects after RECORD.
+
+### Asking the sender for a keyframe — `forceKeyFrame`
+
+macOS emits roughly **one IDR per mirroring session**. Every path that sets
+`MirrorStreamServer.awaitingKeyframe` — a dropped frame, a frame the decoder rejected, a decoder
+rebuilt against a new Surface — then waits for an IDR that may be many seconds away, and the
+picture is black or smeared for the whole wait. That is the cold-first-connect bug AND the artifact
+bug, and **nothing on this side of the socket can fix either**: the frames do not exist yet.
+
+Apple's own receiver SDK (the CarPlay Communication Plugin sources, same screen protocol) defines
+the lever in `AirPlayCommon.h`:
+
+```c
+/*  ForceKeyFrame: Tells the server to request a key frame from the sender.
+    Used when the decoder crashes, etc.  No request keys.  No response keys.  */
+#define kAirPlayCommand_ForceKeyFrame  "forceKeyFrame"
+```
+
+`AirPlayReceiverSessionForceKeyFrame()` builds `{type: "forceKeyFrame"}` — no params — and POSTs it
+to `/command` on the event client. `AirPlayReceiver.requestKeyFrame()` does the same, rate-limited
+to one per second because an encoder cannot beat that anyway.
+
+**This is enabled while the MediaRemote sends are not, and the difference is not confidence — it is
+that there is nothing here to guess.** MRP's two payload keys were invented by mirroring a
+sender→receiver message and appear in no implementation anywhere. This has a documented name and an
+empty body.
+
+**No open-source receiver does this.** UxPlay, RPiPlay and pyatv all wait passively; a GitHub search
+for `kAirPlayScreenOpCode_ForceKeyFrame` returns only copies of Apple's header. So there is no
+reference implementation to check against, and one thing is genuinely unsettled: Apple's receiver
+sends this through its HTTPClient (`HTTP/1.1`), while a Go implementation verified against real
+Apple hardware uses `RTSP/1.0` on the same socket. We send HTTP/1.1 and log the reply — **a sender
+that cannot parse the request line answers nothing at all**, so silence in the log is the signal to
+flip the token, not evidence that the command is wrong.
+
+There is also a second, unused route: the mirror data socket's own header has
+`kAirPlayScreenOpCode_ForceKeyFrame = 3` alongside the 0/1/2/5 we already handle. Nobody in open
+source has ever written one back up that socket, so whether senders read it is unknown. `/command`
+is the route with a real code path behind it.
+
+**RTCP FIR/PLI does not apply here** — mirroring video is not RTP-over-UDP at all, it is framed
+AVCC over plain TCP, so there is nothing for RTCP feedback to attach to. The RTCP-on-port+1
+references in the wild are the RAOP *audio* side.
 
 ### Remote play/pause/skip — SOLVED, and it was the advertised version all along
 
