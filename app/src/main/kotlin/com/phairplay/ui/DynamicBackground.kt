@@ -173,12 +173,29 @@ class DynamicBackground @JvmOverloads constructor(
                 orbVel[i] += accel * step
                 orbEnergy[i] = (orbEnergy[i] + orbVel[i] * step).coerceIn(0f, ORB_LEVEL_CEILING)
             }
+            for (i in 0 until 3) {
+                val accel = -FIELD_STIFFNESS * (fieldEnergy[i] - orbTarget[i]) -
+                            FIELD_DAMPING * fieldVel[i]
+                fieldVel[i] += accel * step
+                fieldEnergy[i] = (fieldEnergy[i] + fieldVel[i] * step).coerceIn(0f, ORB_LEVEL_CEILING)
+            }
             remaining -= step
         }
-        bandBass = orbEnergy[0]
-        bandVocal = orbEnergy[1]
-        bandTreble = orbEnergy[2]
+        bandBass = fieldEnergy[0]
+        bandVocal = fieldEnergy[1]
+        bandTreble = fieldEnergy[2]
     }
+
+    /**
+     * The blob field's own spring state, separate from the orbs'.
+     *
+     * Both backdrops used to read `orbEnergy`, so the field inherited a spring tuned for three
+     * small bounded orbs on black — where overshoot is a flare you want. Four screen-sized blobs do
+     * not flare, they lumber: the same bloom that reads as a hit on an orb reads as the whole
+     * picture arriving late and soft, which is the field being "too smooth".
+     */
+    private val fieldVel = FloatArray(3)
+    private val fieldEnergy = FloatArray(3)
 
     /** Per-orb spring velocity. The state that exponential easing did not have. */
     private val orbVel = FloatArray(3)
@@ -1061,8 +1078,20 @@ class DynamicBackground @JvmOverloads constructor(
          * everywhere, and SCREEN-blending overlapping colour sums toward white. So unbounded growth
          * at a high Beat Pulse does not read as a bigger reaction, it reads as the picture losing
          * its colour on every beat. Rolling off leaves the blobs distinct at any setting.
+         *
+         * RAISED from 0.55, which was so low it caused the failure it was meant to prevent — one
+         * step down the scale instead of at the top. A soft cap is only soft while the input is
+         * well under it; past that it flattens everything into the same value. At 0.55 a full hit
+         * came out at 0.43 on Normal and 0.54 on Insane, so a 2.75x difference in multiplier
+         * arrived as 1.25x on screen and the two settings were indistinguishable — which is exactly
+         * what was reported.
+         *
+         * At 1.2 the same hits land at 0.60 and 1.02: Insane is visibly bigger, and the roll-off
+         * still does its job above that. The number to keep in mind when changing it is that the
+         * cap must sit ABOVE the largest ordinary input (0.42 * 5.5 = 2.31 at Insane is beyond it,
+         * but the curve is still climbing there rather than pinned).
          */
-        private const val FIELD_SWELL_CAP = 0.55f
+        private const val FIELD_SWELL_CAP = 1.2f
 
         /**
          * Field brightness. Near-constant on purpose -- see the note at the call site.
@@ -1249,6 +1278,21 @@ class DynamicBackground @JvmOverloads constructor(
         private const val LOW_POWER_STRIDE = 4
         /** Overall loudness follow, used by the full-screen pulse. */
         private const val ENERGY_RATE = 0.36f
+
+        /**
+         * The FIELD's spring: stiffer and better damped than the orbs'.
+         *
+         * omega = sqrt(2500) = 50 rad/s and zeta = 70 / (2 * 50) = 0.7, so its first peak lands at
+         * pi / (omega * sqrt(1 - zeta^2)) ≈ 88ms against the orbs' ~131ms, with noticeably less
+         * overshoot. Both numbers are deliberate: the field should track the music rather than
+         * bloom through it, because a blob that overshoots is a screen-sized brightness change
+         * whereas an orb that overshoots is a flare in one place.
+         *
+         * Still a spring, not exponential easing — the input is a 33ms staircase either way, and
+         * only a spring carries velocity across a step. This is a shorter, tighter one.
+         */
+        private const val FIELD_STIFFNESS = 2500f
+        private const val FIELD_DAMPING = 70f
 
         /**
          * Orb spring — MATCHED TO AMTV, which is the whole point of the feel.

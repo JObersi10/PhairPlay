@@ -700,6 +700,16 @@ class SettingsFragment : Fragment() {
                 val theme = options[which]
                 save { it.copy(backdropTheme = theme) }
                 showBackdropTheme(theme)
+                // AND RE-RUN THE ROWS THAT DEPEND ON IT, HERE, because nothing else will.
+                //
+                // populateUI runs once from settingsFlow.first(); the screen does not collect the
+                // flow, so every picker is responsible for repainting what it changed. That is fine
+                // for a row that only shows its own value, and wrong for this one, which decides
+                // whether Orb Speed exists at all and which backdrop's Beat Pulse is being edited.
+                // Without this the split silently did nothing until Settings was reopened.
+                viewLifecycleOwner.lifecycleScope.launch {
+                    showBackdropControls(settingsRepository.settingsFlow.first())
+                }
                 Logger.i("Backdrop set to $theme")
             }
             .setNegativeButton(android.R.string.cancel, null)

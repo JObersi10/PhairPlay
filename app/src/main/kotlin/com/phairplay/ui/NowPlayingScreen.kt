@@ -1145,12 +1145,9 @@ class NowPlayingScreen @JvmOverloads constructor(
      * Insane keeps responding instead of pinning at one radius.
      */
     fun setBeatPulse(orbLevel: Int, fieldLevel: Int) {
-        dynamicBg.setOrbBeatMultiplier(pulseMultiplier(orbLevel))
-        dynamicBg.setFieldBeatMultiplier(pulseMultiplier(fieldLevel))
+        dynamicBg.setOrbBeatMultiplier(ORB_PULSE[orbLevel.coerceIn(0, 3)])
+        dynamicBg.setFieldBeatMultiplier(FIELD_PULSE[fieldLevel.coerceIn(0, 3)])
     }
-
-    private fun pulseMultiplier(level: Int) =
-        when (level) { 1 -> 2f; 2 -> 3.5f; 3 -> 5.5f; else -> 0.45f }
 
     /** Orb drift speed from Settings: 0 Slow, 1 Normal, 2 Fast. */
     fun setOrbSpeed(level: Int) { dynamicBg.setOrbSpeed(level) }
@@ -1338,6 +1335,20 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        /**
+         * Beat Pulse multipliers, PER BACKDROP, because the same number is not the same strength.
+         *
+         * A projector orb rides ORB_SIZE_RIDE up to 1.05 against a swell cap of 2.2, so its radius
+         * moves far more per unit of multiplier than a blob does — the field's own FIELD_BEAT_SCALE
+         * is 0.42 into a 0.55 cap. Running both off one table is what made Normal read as "too
+         * much" on projector while the same setting was right on dynamic.
+         *
+         * The projector column is the scale these orbs were originally tuned against; the field
+         * column is the shifted-up one, where Normal genuinely did read as barely reacting. Calm is
+         * 0.45 in both — it is the default and the one setting that was right everywhere.
+         */
+        private val ORB_PULSE = floatArrayOf(0.45f, 1f, 2f, 3.5f)
+        private val FIELD_PULSE = floatArrayOf(0.45f, 2f, 3.5f, 5.5f)
         // Text sizes for the PiP-compact swap. See [setCompact].
         //
         // FULL_* must match the sizes the views are CONSTRUCTED with, or the first exit from PiP
