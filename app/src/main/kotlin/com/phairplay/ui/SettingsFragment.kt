@@ -609,16 +609,26 @@ class SettingsFragment : Fragment() {
     /** The backdrop the Beat Pulse row is currently editing. Projector unless the field is on. */
     private var pulseTheme: BackdropTheme = BackdropTheme.DYNAMIC
 
+    /** Beat Pulse values as last known, so the row can switch backdrops without a store read. */
+    private var beatPulseProjector = 0
+    private var beatPulseField = 0
+
     private fun showBackdropControls(settings: AppSettings) {
-        pulseTheme = settings.backdropTheme
-        val level = if (pulseTheme == BackdropTheme.PROJECTOR) settings.beatPulse
-                    else settings.fieldPulse
+        beatPulseProjector = settings.beatPulse
+        beatPulseField = settings.fieldPulse
+        showBackdropControls(settings.backdropTheme)
+        showOrbSpeed(settings.orbSpeed)
+    }
+
+    private fun showBackdropControls(theme: BackdropTheme) {
+        pulseTheme = theme
+        val level = if (pulseTheme == BackdropTheme.PROJECTOR) beatPulseProjector
+                    else beatPulseField
         showBeatPulse(level)
         rowBeatPulse.visibility =
             if (pulseTheme == BackdropTheme.BLACK) View.GONE else View.VISIBLE
         rowOrbSpeed.visibility =
             if (pulseTheme == BackdropTheme.PROJECTOR) View.VISIBLE else View.GONE
-        showOrbSpeed(settings.orbSpeed)
     }
 
     private fun pickBeatPulse() {
@@ -629,6 +639,7 @@ class SettingsFragment : Fragment() {
             .setItems(labels) { _, which ->
                 val level = which
                 save { if (projector) it.copy(beatPulse = level) else it.copy(fieldPulse = level) }
+                if (projector) beatPulseProjector = level else beatPulseField = level
                 showBeatPulse(level)
                 Logger.i("Beat pulse (${if (projector) "projector" else "dynamic"}) set to " +
                     beatPulseLabel(level))
@@ -700,16 +711,19 @@ class SettingsFragment : Fragment() {
                 val theme = options[which]
                 save { it.copy(backdropTheme = theme) }
                 showBackdropTheme(theme)
-                // AND RE-RUN THE ROWS THAT DEPEND ON IT, HERE, because nothing else will.
+                // AND RE-RUN THE ROWS THAT DEPEND ON IT, from the theme just chosen.
                 //
                 // populateUI runs once from settingsFlow.first(); the screen does not collect the
-                // flow, so every picker is responsible for repainting what it changed. That is fine
-                // for a row that only shows its own value, and wrong for this one, which decides
-                // whether Orb Speed exists at all and which backdrop's Beat Pulse is being edited.
-                // Without this the split silently did nothing until Settings was reopened.
-                viewLifecycleOwner.lifecycleScope.launch {
-                    showBackdropControls(settingsRepository.settingsFlow.first())
-                }
+                // flow, so every picker repaints what it changed. That is fine for a row showing
+                // only its own value, and wrong for this one, which decides whether Orb Speed
+                // exists at all and which backdrop's Beat Pulse is being edited.
+                //
+                // NOT BY RE-READING THE STORE. The first attempt launched a coroutine to read the
+                // settings back, which races the save that was launched a line earlier — two
+                // independent coroutines, and the read frequently won, so the rows repainted from
+                // the OLD theme and the split still appeared to do nothing. `theme` is already the
+                // answer; asking DataStore for it again can only be wrong or slow.
+                showBackdropControls(theme)
                 Logger.i("Backdrop set to $theme")
             }
             .setNegativeButton(android.R.string.cancel, null)

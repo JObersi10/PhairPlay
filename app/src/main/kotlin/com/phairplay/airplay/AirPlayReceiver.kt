@@ -677,11 +677,30 @@ class AirPlayReceiver(
         Logger.d("mDNS service started")
     }
 
+    /**
+     * What to advertise to a sender that is connecting now.
+     *
+     * Full configured size while nothing is mirroring. Once a tile is running, the next sender is
+     * offered 1080p at most — the frame budget is shared, and a 2560x1440 stream costs 221M px/s of
+     * a 248M budget on this hardware, so a second one at that size cannot be served no matter what
+     * we would like. 1080p60 costs about half as much, which is what makes two fit at all.
+     *
+     * This is a ceiling, never a floor: a receiver configured below 1080p keeps its own smaller
+     * size rather than being talked up to one it cannot decode.
+     */
+    private fun advertisedMirrorSize(): Pair<Int, Int> {
+        val busy = mirrorServers.any { it != null }
+        if (!busy) return mirrorWidth to mirrorHeight
+        return minOf(mirrorWidth, SECOND_SENDER_MAX_WIDTH) to
+               minOf(mirrorHeight, SECOND_SENDER_MAX_HEIGHT)
+    }
+
     private fun startRtspHandler() {
         rtspHandler = RtspHandler(
             context = context,
             displayWidth = mirrorWidth,
             displayHeight = mirrorHeight,
+            displaySizeFor = { advertisedMirrorSize() },
             audioEnabled = audioEnabled,
             videoSurfaceProvider = { videoSurfaceProvider(PRIMARY_SLOT) },
             maxSessions = maxSessions,
@@ -1544,6 +1563,16 @@ class AirPlayReceiver(
          * SessionRegistry.capacity, which is driven by the user's setting.
          */
         const val MAX_SLOTS = 4
+
+        /**
+         * Largest size offered to a sender arriving while another is already mirroring.
+         *
+         * 1080p because that is what the measured frame budget affords twice over: DecoderCapacity
+         * reports 248M px/s on this Fire TV, a 1080p60 stream costs ~124M, and 2560x1440 costs
+         * ~221M. Two 1080p tiles fit exactly; one 1440p tile plus anything does not.
+         */
+        const val SECOND_SENDER_MAX_WIDTH = 1920
+        const val SECOND_SENDER_MAX_HEIGHT = 1080
 
         /**
          * Minimum gap between keyframe requests.

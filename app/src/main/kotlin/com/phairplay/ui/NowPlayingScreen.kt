@@ -1343,11 +1343,14 @@ class NowPlayingScreen @JvmOverloads constructor(
          * is 0.42 into a 0.55 cap. Running both off one table is what made Normal read as "too
          * much" on projector while the same setting was right on dynamic.
          *
-         * The projector column is the scale these orbs were originally tuned against; the field
-         * column is the shifted-up one, where Normal genuinely did read as barely reacting. Calm is
-         * 0.45 in both — it is the default and the one setting that was right everywhere.
+         * The projector column has now been brought DOWN twice on the same report — Normal reading
+         * as far too strong — so the original 1.0 was not a safe floor either. The orbs' own
+         * geometry is why: ORB_SIZE_RIDE peaks at 1.05 and the soft cap is 2.2, so a multiplier of
+         * 1.0 already lets an ordinary hit more than double an orb's radius. At 0.65 Normal is a
+         * clear swell rather than a lunge, and Insane at 2.4 still reaches the cap on a big hit.
+         * The field column stays where it is; it was reported as fine.
          */
-        private val ORB_PULSE = floatArrayOf(0.45f, 1f, 2f, 3.5f)
+        private val ORB_PULSE = floatArrayOf(0.30f, 0.65f, 1.3f, 2.4f)
         private val FIELD_PULSE = floatArrayOf(0.45f, 2f, 3.5f, 5.5f)
         // Text sizes for the PiP-compact swap. See [setCompact].
         //

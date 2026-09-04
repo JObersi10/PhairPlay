@@ -30,6 +30,20 @@ open class RtspHandler(
     private val context: android.content.Context,
     private val displayWidth: Int = 1920,
     private val displayHeight: Int = 1080,
+    /**
+     * The screen size to advertise to the sender asking RIGHT NOW, which is not always the one
+     * configured.
+     *
+     * A sender picks its encode resolution from what /info advertises, and it picks ONCE, before
+     * anything on this side knows whether it will fit. So a 1440p Mac arriving behind a phone that
+     * has already taken the frame budget could only ever be refused — measured on the device as
+     * "needs 221M px/s, only 27M left of 248M". Telling the second sender a smaller number instead
+     * lets it encode something that fits, which is the only point at which the decision can still
+     * be made.
+     *
+     * Defaults to the configured size, so a single sender is unaffected.
+     */
+    private val displaySizeFor: () -> Pair<Int, Int> = { displayWidth to displayHeight },
     private val audioEnabled: Boolean = false,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
@@ -957,7 +971,13 @@ open class RtspHandler(
         return RtspResponse(
             statusCode = 200,
             statusMessage = "OK",
-            bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
+            bodyBytes = displaySizeFor().let { (w, h) ->
+                if (w != displayWidth || h != displayHeight) {
+                    Logger.i("GET /info advertising ${w}x$h (reduced from ${displayWidth}x$displayHeight " +
+                        "— another sender is already mirroring)")
+                }
+                InfoResponder.build(context, w, h, pinRequired = pinAuthEnabled)
+            },
             contentType = "application/x-apple-binary-plist",
             protocol = request.responseProtocol()
         )

@@ -366,7 +366,12 @@ macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
 - **`leanback` marked `required="true"` filters the app off every non-TV device**,
   even after a successful `adb install`. It is declared `required="false"` with both
   `LEANBACK_LAUNCHER` and `LAUNCHER` categories so tablets get an icon too.
-- **A wedged Gradle daemon looks exactly like a slow build.** One sat at 230–312%
+- **A wedged Gradle daemon looks exactly like a slow build.** It happens again if the SABRENT
+  drive drops mid-build: the daemon holds its JDK, the SDK and the build output on a volume that
+  has vanished, and then spins forever. Seen at **945 minutes of CPU over 5h09m elapsed with an
+  empty log** — the tell is the log's mtime, not the CPU figure. The rebuild after `kill -9` took
+  4m13s.
+ One sat at 230–312%
   CPU for three hours and silently blocked every later invocation; `pkill -f
   GradleDaemon` did not take, `kill -9 <pid>` did. Check `ps aux | grep GradleDaemon`
   and its accumulated CPU time before believing a build is merely slow.
