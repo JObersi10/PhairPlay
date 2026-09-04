@@ -1183,7 +1183,26 @@ class AirPlayReceiver(
             // with its own fullscreen player) used to leave the session "live" with its last frame
             // frozen on the TV. Tear it down ourselves.
             onConnectionEnded = { scheduleMirrorVideoStop(slot) },
-            onOutputSize = { w, h -> runCatching { onMirrorSizeChanged(slot, w, h) } },
+            onOutputSize = { w, h ->
+                // RE-COST THE TILE THE MOMENT THE REAL SIZE IS KNOWN.
+                //
+                // Admission has to charge SOMETHING before a single frame has arrived, and the only
+                // figure available then is what the sender was advertised — a worst case. It is a
+                // long way from the truth: an iPhone advertised 2560x1440 actually streams a
+                // portrait 666x1440, so it was booked at 221M px/s and really costs ~57M. With the
+                // budget at 248M that one over-estimate reserved almost everything and refused the
+                // next sender at 1080p, which needs 124M and would have fitted twice over.
+                //
+                // The decoder reports the size it read from the SPS, which is the first authoritative
+                // number anyone has. Replacing the estimate with it hands the difference back.
+                val real = com.phairplay.media.DecoderCapacity.costOf(w, h)
+                if (mirrorCosts.getOrNull(slot) != real && slot in mirrorCosts.indices) {
+                    Logger.i("Tile $slot re-costed: ${w}x$h is ${real / 1_000_000}M px/s " +
+                        "(booked ${mirrorCosts[slot] / 1_000_000}M at admission)")
+                    mirrorCosts[slot] = real
+                }
+                runCatching { onMirrorSizeChanged(slot, w, h) }
+            },
             requestKeyFrame = { why -> requestKeyFrame(why) },
         )
             .also {

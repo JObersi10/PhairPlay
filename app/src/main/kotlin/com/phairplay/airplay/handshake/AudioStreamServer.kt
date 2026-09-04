@@ -922,6 +922,7 @@ class AudioStreamServer(
 
     private val RAW_BANDS = DoubleArray(3)
     private var lastBandLogMs = 0L
+    @Volatile private var lastDelayLogMs = 0L
     private var lastBandEmitMs = 0L
 
 
@@ -1195,8 +1196,24 @@ class AudioStreamServer(
         // Compensating for output latency and then adding an uncompensated 196ms of visual rise
         // is why the orbs read as late "after a beat drop". The target is when the orb PEAKS, not
         // when the number is emitted, so the spring's own rise comes back off the total.
-        return (extraDelayMs + beatDelayMs + outputLatencyMs() - ORB_SPRING_PEAK_MS)
-            .coerceAtLeast(0L)
+        val out = outputLatencyMs()
+        val total = (extraDelayMs + beatDelayMs + out - ORB_SPRING_PEAK_MS).coerceAtLeast(0L)
+        // PRINTED, BECAUSE "THE VISUALS ARE OUT" DOES NOT SAY WHICH WAY.
+        //
+        // Four terms compose this and one of them can silently be zero: outputLatencyMs() returns 0
+        // whenever getTimestamp() fails, which is exactly the case on some routes — and CLAUDE.md
+        // already records that the timestamp stops at the HAL, so the Bluetooth link's own latency
+        // was never in here to begin with. A total of 219ms and a total of 469ms are both
+        // "compensating 350ms" as far as the existing log is concerned, and they look completely
+        // different on screen. Once a second is often enough to see which one is happening.
+        val now = System.currentTimeMillis()
+        if (now - lastDelayLogMs > DELAY_LOG_INTERVAL_MS) {
+            lastDelayLogMs = now
+            Logger.i("Beat delay ${total}ms = route ${beatDelayMs}ms + user ${extraDelayMs}ms " +
+                "+ track ${out}ms - spring ${ORB_SPRING_PEAK_MS}ms" +
+                (if (out == 0L) " (track latency unavailable on this route)" else ""))
+        }
+        return total
     }
 
     /**
@@ -1525,8 +1542,17 @@ class AudioStreamServer(
          * vocal orb was therefore driven by swell alone: it tracked the rhythm and stayed dark
          * through held notes, which is the opposite of what an orb watching the singer is for.
          *
-         * At 0.9 a strong, sustained centre vocal can carry the orb on its own, and the beat swell
-         * still wins on the hits, which is the intended "lit while singing, brighter on the beat".
+         * At 0.9 a strong, sustained centre vocal could carry the orb on its own — and on dense
+         * material it did nothing else. THE WEIGHT IS A FLOOR: the output is
+         * `max(swell, presence * weight)` and presence is ~1 whenever the band is near its own
+         * recent peak, which on rock is continuously. Measured: vocal ran 0.94-1.00 and 0.69-1.00
+         * window after window, pinned by its own presence term rather than by the music. Exactly
+         * the failure bass had at 0.80, in the band where it is hardest to notice because a vocal
+         * orb being lit looks plausible.
+         *
+         * 0.55 still carries a held note over the gate on its own and leaves the top half of the
+         * range to the swell. Treble comes down with it for the same reason — distorted guitar is
+         * as continuous as a voice.
          *
          * NOW APPLIED TO EVERY BAND, not just the vocal, because pure swell has a failure that only
          * shows on loud music: it measures a rise above the band's OWN 1.5s baseline, and during a
@@ -1559,7 +1585,7 @@ class AudioStreamServer(
          * below the vocal's typical level, so the two are comparable again and bass gets its size
          * from the beat rather than from being bass.
          */
-        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.32, 0.90, 0.45)
+        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.32, 0.55, 0.32)
 
         /**
          * How loud centre content has to be, against the band's own peak, before it counts at all.
@@ -1580,6 +1606,7 @@ class AudioStreamServer(
         private const val VOCAL_LOW_HZ = 500.0
         private const val VOCAL_HIGH_HZ = 3400.0
         private const val BAND_LOG_INTERVAL_MS = 2000L
+        private const val DELAY_LOG_INTERVAL_MS = 5000L
         private const val BAND_EMIT_INTERVAL_MS = 33L
 
         /**
