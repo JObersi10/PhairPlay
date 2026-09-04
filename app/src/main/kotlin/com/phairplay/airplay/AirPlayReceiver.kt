@@ -1141,11 +1141,25 @@ class AirPlayReceiver(
         // Refusing returns port 0. The sender loses video and its session survives, which is the
         // honest outcome: better a device that plainly did not start than one that appears to be
         // mirroring and is not.
-        val cost = com.phairplay.media.DecoderCapacity.costOf(mirrorWidth, mirrorHeight)
+        // CHARGE THIS SENDER FOR WHAT IT WAS OFFERED, not for what the receiver is configured to
+        // do at its largest.
+        //
+        // This used costOf(mirrorWidth, mirrorHeight) — the CONFIGURED size — so a second sender
+        // that had just been advertised 1080p was still billed for 2560x1440 and refused on the
+        // strength of a number nobody had agreed to. The log said both halves in the same second:
+        //
+        //     GET /info advertising 1920x1080 (reduced from 2560x1440 — another sender ...)
+        //     Tile 1 refused: 2560x1440 needs 221M px/s, only 27M left of 248M
+        //
+        // [advertisedMirrorSize] is what the sender was actually told, and it is evaluated here for
+        // the same reason it is evaluated at /info: it depends on how many tiles are already
+        // running, and this slot's own server does not exist yet.
+        val (tileWidth, tileHeight) = advertisedMirrorSize()
+        val cost = com.phairplay.media.DecoderCapacity.costOf(tileWidth, tileHeight)
         val committed = mirrorCosts.filterIndexed { i, _ -> i != slot }.sum()
         val budget = com.phairplay.media.DecoderCapacity.pixelBudgetPerSecond()
         if (committed + cost > budget) {
-            Logger.w("Tile $slot refused: ${mirrorWidth}x$mirrorHeight needs " +
+            Logger.w("Tile $slot refused: ${tileWidth}x$tileHeight needs " +
                      "${cost / 1_000_000}M px/s, only ${(budget - committed) / 1_000_000}M left " +
                      "of ${budget / 1_000_000}M")
             return 0
@@ -1161,7 +1175,10 @@ class AirPlayReceiver(
             // Each tile draws into its own Surface. With one shared provider two senders decoded
             // into the same SurfaceView and the second simply painted over the first.
             surfaceProvider = { videoSurfaceProvider(slot) },
-            width = mirrorWidth, height = mirrorHeight,
+            // The size this tile was offered, for the same reason as the cost above. It is only a
+            // hint — the decoder trusts the SPS it actually receives — but a hint that disagrees
+            // with what the sender was told is a hint worth not giving.
+            width = tileWidth, height = tileHeight,
             // A sender that goes quiet without a TEARDOWN (phone screen off, or an app taking over
             // with its own fullscreen player) used to leave the session "live" with its last frame
             // frozen on the TV. Tear it down ourselves.

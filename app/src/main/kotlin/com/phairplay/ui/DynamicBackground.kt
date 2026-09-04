@@ -529,10 +529,21 @@ class DynamicBackground @JvmOverloads constructor(
         // composition still has one member that moves with everything.
         val mean = (bass + vocal + treble) / 3f
         val base = maxOf(w, h) * FIELD_BASE_RADIUS
+        // WEIGHTED TOWARD BASS, rather than each blob following its own band alone.
+        //
+        // Per-band motion is right for the projector orbs, which are small, separated and read
+        // individually. At screen size it is three rhythms competing across one picture, and the
+        // eye cannot attribute them to anything — it just reads as busy.
+        //
+        // Going all the way to bass-only would fix that and cost more than it is worth: four blobs
+        // moving identically are one shape, and the reason there are four is four palette colours
+        // drifting independently. Mixing most of the way to bass keeps them distinct while making
+        // the field read as ONE beat, which is the "leaner" part.
+        fun led(own: Float) = own + (bass - own) * FIELD_BASS_LEAD
         blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp, e), cs[0], beatAlpha)
-        blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp, e), cs[1], beatAlpha)
-        blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp, e), cs[2], beatAlpha)
-        blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp, e), cs[3], beatAlpha)
+        blob(canvas, 1, cx1, cy1, base * blobScale(led(vocal), amp, e), cs[1], beatAlpha)
+        blob(canvas, 2, cx2, cy2, base * blobScale(led(treble), amp, e), cs[2], beatAlpha)
+        blob(canvas, 3, cx3, cy3, base * blobScale(led(mean), amp, e), cs[3], beatAlpha)
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -1070,6 +1081,17 @@ class DynamicBackground @JvmOverloads constructor(
          * that of FIELD_BEAT_SCALE at Insane — present, never the main event.
          */
         private const val FIELD_ONSET_NUDGE = 0.07f
+
+        /**
+         * How far each non-bass blob is pulled toward the bass level. 0 = its own band only,
+         * 1 = bass-only.
+         *
+         * 0.7 leaves every blob visibly its own thing while the beat carries all four together.
+         * Raise it toward 1 for a field that pulses as a single unit; drop it to 0 to go back to
+         * three independent rhythms. This is the one number to move if the field feels either busy
+         * or monotonous — the bands themselves are correct and should not be re-tuned for it.
+         */
+        private const val FIELD_BASS_LEAD = 0.7f
 
         /**
          * Soft ceiling on how far a blob may grow, for the same reason the orbs have one.
