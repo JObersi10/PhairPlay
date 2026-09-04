@@ -337,7 +337,7 @@ class RtspHandlerTest {
             lastPhotoType = imageType
         },
         onPhotoCleared = { photoCleared = true },
-        onMirrorAudioStop = { audioStopped = true },
+        onMirrorAudioStop = { _ -> audioStopped = true },
         onMirrorVideoStop = { _ -> videoStopped = true }
     )
 
@@ -391,7 +391,7 @@ class TestableRtspHandler(
     onStreamingStopped: (Int, Int) -> Unit,
     onPhotoReceived: (ByteArray, PhotoImageType) -> Unit = { _, _ -> },
     onPhotoCleared: () -> Unit = {},
-    onMirrorAudioStop: () -> Unit = {},
+    onMirrorAudioStop: (Int) -> Unit = {},
     onMirrorVideoStop: (Int) -> Unit = {}
 ) : RtspHandler(
     context = io.mockk.mockk(relaxed = true),

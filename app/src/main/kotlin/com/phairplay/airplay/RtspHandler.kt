@@ -37,9 +37,8 @@ open class RtspHandler(
      * A sender picks its encode resolution from what /info advertises, and it picks ONCE, before
      * anything on this side knows whether it will fit. So a 1440p Mac arriving behind a phone that
      * has already taken the frame budget could only ever be refused — measured on the device as
-     * "needs 221M px/s, only 27M left of 248M". Telling the second sender a smaller number instead
-     * lets it encode something that fits, which is the only point at which the decision can still
-     * be made.
+     * "needs 221M px/s, only 27M left of 248M". Telling senders a smaller number instead lets them
+     * encode something that fits, which is the only point at which the decision can still be made.
      *
      * Defaults to the configured size, so a single sender is unaffected.
      */
@@ -74,7 +73,7 @@ open class RtspHandler(
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
     private val onMirrorAudioStart: (slot: Int, sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
-    private val onMirrorAudioStop: () -> Unit = {},
+    private val onMirrorAudioStop: (slot: Int) -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
     private val onMirrorVideoStop: (slot: Int) -> Unit = {},
     /** AirPlay 2 buffered audio-only SETUP (type 103, Apple Music → TV); returns the TCP data port. */
@@ -974,7 +973,7 @@ open class RtspHandler(
             bodyBytes = displaySizeFor().let { (w, h) ->
                 if (w != displayWidth || h != displayHeight) {
                     Logger.i("GET /info advertising ${w}x$h (reduced from ${displayWidth}x$displayHeight " +
-                        "— another sender is already mirroring)")
+                        "— multi-screen is on)")
                 }
                 InfoResponder.build(context, w, h, pinRequired = pinAuthEnabled)
             },
@@ -1485,7 +1484,7 @@ open class RtspHandler(
             // gave up, which looked like the receiver killing itself the instant audio started.
             // When the sender really is finished it closes the socket, and that path already does
             // the full cleanup.
-            if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
+            if (streamTypes.contains(96)) { onMirrorAudioStop(client.slot); activeStreamTypes.remove(96) }
             if (streamTypes.contains(110)) { onMirrorVideoStop(client.slot); activeStreamTypes.remove(110) }
             if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
             Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")

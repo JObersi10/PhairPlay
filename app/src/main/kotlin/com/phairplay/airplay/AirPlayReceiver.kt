@@ -689,10 +689,19 @@ class AirPlayReceiver(
      * size rather than being talked up to one it cannot decode.
      */
     private fun advertisedMirrorSize(): Pair<Int, Int> {
-        val busy = mirrorServers.any { it != null }
-        if (!busy) return mirrorWidth to mirrorHeight
-        return minOf(mirrorWidth, SECOND_SENDER_MAX_WIDTH) to
-               minOf(mirrorHeight, SECOND_SENDER_MAX_HEIGHT)
+        // MULTI-SCREEN CAPS EVERYONE, not just the sender that happens to arrive second.
+        //
+        // Capping only the newcomer left the FIRST sender free to take 1440p, and 2560x1440 costs
+        // 221M px/s of a 248M budget — so whoever connected first could still lock everyone else
+        // out, and whether two devices worked came down to arrival order. Turning multi-screen on
+        // is a statement that more than one sender matters more than any single one being at its
+        // largest, so the ceiling applies from the first connection.
+        //
+        // Single-sender mode is untouched: with multi-screen off there is nothing to share with and
+        // no reason to give up resolution.
+        if (maxSessions <= 1) return mirrorWidth to mirrorHeight
+        return minOf(mirrorWidth, MULTI_SCREEN_MAX_WIDTH) to
+               minOf(mirrorHeight, MULTI_SCREEN_MAX_HEIGHT)
     }
 
     private fun startRtspHandler() {
@@ -716,7 +725,7 @@ class AirPlayReceiver(
             onMirrorAudioStart = { slot, sampleRate, channels, ct, spf, latency ->
                 startMirrorAudio(slot, sampleRate, channels, ct, spf, latency)
             },
-            onMirrorAudioStop = { stopMirrorAudio() },
+            onMirrorAudioStop = { slot -> stopMirrorAudio(slot) },
             onMirrorVideoStop = { slot -> stopMirrorVideo(slot) },
             onBufferedAudioStart = { startBufferedAudio() },
             onBufferedAudioStop = { stopBufferedAudio() },
@@ -1334,10 +1343,31 @@ class AirPlayReceiver(
     }
 
     /** Stops ONLY the mirror audio stream (macOS dynamic-stream TEARDOWN) — video keeps running. */
-    private fun stopMirrorAudio() {
-        audioServers.indices.forEach { audioServers[it]?.stop(); audioServers[it] = null; audioActive[it] = false }
-        audioOwnerSlot = null
-        forgetVolume()
+    /**
+     * Stops ONE sender's mirror audio. A stream-level TEARDOWN is per session, not global.
+     *
+     * This took no slot and cleared every one of them, so an iPhone ending its audio stream
+     * destroyed the Mac's audio server as well — and then the handover found no survivor to give
+     * the output to, which is why disconnecting one device left the other silent instead of
+     * promoting it. The teardown was correct about what had happened and wrong about to whom.
+     */
+    private fun stopMirrorAudio(slot: Int) {
+        if (slot in audioServers.indices) {
+            audioServers[slot]?.stop()
+            audioServers[slot] = null
+            audioActive[slot] = false
+        }
+        val survivor = audioServers.indices.firstOrNull { audioServers[it] != null }
+        if (audioOwnerSlot == slot || survivor == null) {
+            audioOwnerSlot = null
+            forgetVolume()
+        }
+        if (survivor != null) {
+            // Someone else is still streaming: hand them the speakers rather than going quiet.
+            giveAudioTo(survivor, deliberate = false, why = "tile $slot stopped its audio")
+            Logger.i("Mirror audio stopped for tile $slot — tile $survivor keeps playing")
+            return
+        }
         audioPlaying = false
         clearNowPlayingMetadata()
         emitNowPlaying()
@@ -1601,14 +1631,14 @@ class AirPlayReceiver(
         const val MAX_SLOTS = 4
 
         /**
-         * Largest size offered to a sender arriving while another is already mirroring.
+         * Largest size offered to any sender while multi-screen is enabled.
          *
          * 1080p because that is what the measured frame budget affords twice over: DecoderCapacity
          * reports 248M px/s on this Fire TV, a 1080p60 stream costs ~124M, and 2560x1440 costs
          * ~221M. Two 1080p tiles fit exactly; one 1440p tile plus anything does not.
          */
-        const val SECOND_SENDER_MAX_WIDTH = 1920
-        const val SECOND_SENDER_MAX_HEIGHT = 1080
+        const val MULTI_SCREEN_MAX_WIDTH = 1920
+        const val MULTI_SCREEN_MAX_HEIGHT = 1080
 
         /**
          * Minimum gap between keyframe requests.
