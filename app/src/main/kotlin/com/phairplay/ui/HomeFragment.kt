@@ -15,6 +15,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.flow.first
 import com.phairplay.DeviceFeatures
 import com.phairplay.R
 import com.phairplay.service.PhairPlayService
@@ -69,7 +70,12 @@ class HomeFragment : Fragment() {
     private lateinit var cardDlna: View
     private lateinit var btnStart: Button
     private lateinit var btnStop: Button
+    private lateinit var btnSettings: android.widget.Button
     private lateinit var btnRestart: Button
+    private lateinit var receiverField: ReceiverFieldView
+    private lateinit var textLastSender: TextView
+    /** Breathing animator on the service dot; cancelled with the view. */
+    private var dotBreath: android.animation.ValueAnimator? = null
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View =
         inflater.inflate(R.layout.fragment_home, container, false)
@@ -80,6 +86,32 @@ class HomeFragment : Fragment() {
         configureProtocolCards()
         configureButtons()
         showDeviceName()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        receiverField.resume()
+        // Re-read on every return rather than collecting: the background check writes this at most
+        // once every six hours, and coming back to Home is the moment it can be acted on.
+        viewLifecycleOwner.lifecycleScope.launch {
+            val pending = runCatching {
+                com.phairplay.settings.SettingsRepository(requireContext())
+                    .settingsFlow.first().pendingUpdateTag
+            }.getOrNull().orEmpty()
+            showUpdateBadge(pending.isNotBlank())
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Nothing on screen should be animating while the screen is not on screen.
+        receiverField.pause()
+    }
+
+    override fun onDestroyView() {
+        super.onDestroyView()
+        dotBreath?.cancel()
+        dotBreath = null
     }
 
     override fun onStart() {
@@ -109,6 +141,13 @@ class HomeFragment : Fragment() {
         btnStart         = view.findViewById(R.id.btn_start)
         btnStop          = view.findViewById(R.id.btn_stop)
         btnRestart       = view.findViewById(R.id.btn_restart)
+        btnSettings      = view.findViewById(R.id.btn_settings)
+        receiverField    = view.findViewById(R.id.receiver_field)
+        textLastSender   = view.findViewById(R.id.text_last_sender)
+        FocusMotion.attach(btnStart)
+        FocusMotion.attach(btnStop)
+        FocusMotion.attach(btnRestart)
+        FocusMotion.attach(btnSettings)
     }
 
     /**
@@ -116,27 +155,57 @@ class HomeFragment : Fragment() {
      * The dynamic parts (state, detail text) are updated when service state changes.
      */
     private fun configureProtocolCards() {
-        setupCard(cardAirPlay,   R.drawable.ic_airplay,  R.string.protocol_airplay)
-        setupCard(cardDlna,      R.drawable.ic_cast,     R.string.protocol_dlna)
+        setupCard(cardAirPlay, R.drawable.ic_airplay, R.string.protocol_airplay, R.color.chip_airplay)
+        setupCard(cardDlna,    R.drawable.ic_cast,    R.string.protocol_dlna,    R.color.chip_dlna)
         // Fire TV cannot complete a Miracast session, so the card would sit on "Advertising" for
         // ever and invite the user to try something that never connects. See DeviceFeatures.
         if (DeviceFeatures.MIRACAST_SUPPORTED) {
-            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast)
+            setupCard(cardMiracast, R.drawable.ic_miracast, R.string.protocol_miracast, R.color.chip_miracast)
         } else {
             cardMiracast.visibility = View.GONE
         }
     }
 
-    private fun setupCard(card: View, iconRes: Int, nameRes: Int) {
-        card.findViewById<android.widget.ImageView>(R.id.img_protocol_icon)?.setImageResource(iconRes)
+    private fun setupCard(card: View, iconRes: Int, nameRes: Int, chipColorRes: Int) {
+        card.findViewById<android.widget.ImageView>(R.id.img_protocol_icon)?.let { icon ->
+            icon.setImageResource(iconRes)
+            // The chip carries the protocol's colour and the glyph is punched out of it in the
+            // page colour, so the three cards are told apart before any text is read. They used to
+            // be three identical grey tiles distinguished only by their labels.
+            val chip = androidx.core.content.ContextCompat.getColor(requireContext(), chipColorRes)
+            icon.backgroundTintList = android.content.res.ColorStateList.valueOf(chip)
+            icon.imageTintList = android.content.res.ColorStateList.valueOf(
+                androidx.core.content.ContextCompat.getColor(requireContext(), R.color.bg_bottom)
+            )
+        }
         card.findViewById<TextView>(R.id.text_protocol_name)?.setText(nameRes)
+        FocusMotion.attach(card)
     }
 
     /**
      * Configures Start / Stop / Restart button click listeners.
      * Calls [ServiceController] which sends Intent actions to [PhairPlayService].
      */
+    /**
+     * Shows an unread dot on Settings when the background check has found an update.
+     *
+     * A compound drawable rather than a badge view: the button already sizes itself to its text, so
+     * a dot on the end travels with it and needs no layout of its own. Cleared when there is nothing
+     * pending, because a badge that outlives the thing it points at teaches people to ignore badges.
+     */
+    private fun showUpdateBadge(pending: Boolean) {
+        val dot = if (pending) R.drawable.update_badge else 0
+        btnSettings.setCompoundDrawablesRelativeWithIntrinsicBounds(0, 0, dot, 0)
+        btnSettings.compoundDrawablePadding = if (pending) dp(8) else 0
+    }
+
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
+
     private fun configureButtons() {
+        btnSettings.setOnClickListener {
+            (activity as? com.phairplay.MainActivity)?.openSettings()
+        }
         btnStart.setOnClickListener {
             Logger.d("User tapped Start")
             ServiceController.start(requireContext())
@@ -157,7 +226,10 @@ class HomeFragment : Fragment() {
      */
     private fun showDeviceName() {
         val name = NetworkUtils.getDeviceName(requireContext())
-        textDeviceName.text = getString(R.string.home_device_visible_as, name)
+        // The name alone. It is the hero of the screen now, at display size, and the card's own
+        // label above it already says what it is for -- "Visible as: Living Room" set in 40sp read
+        // as a sentence that had been enlarged by mistake.
+        textDeviceName.text = name
     }
 
     // ─── State Observation ───────────────────────────────────────────────────
@@ -184,8 +256,16 @@ class HomeFragment : Fragment() {
         }
         viewLifecycleOwner.lifecycleScope.launch {
             svc.airPlayState.collectLatest { state ->
+                val previous = airPlayState
                 airPlayState = state
                 updateProtocolCard(cardAirPlay, state, showLastSender = true)
+                // The receiver field is the screen-level echo of the card's own transition: a
+                // sender arriving is the one event worth announcing beyond the card it lands on.
+                if (state == ProtocolState.CONNECTED && previous != ProtocolState.CONNECTED) {
+                    receiverField.setMode(ReceiverFieldView.Mode.CONNECTED)
+                } else if (previous == ProtocolState.CONNECTED && state != ProtocolState.CONNECTED) {
+                    receiverField.setMode(ReceiverFieldView.Mode.IDLE)
+                }
             }
         }
         viewLifecycleOwner.lifecycleScope.launch {
@@ -198,6 +278,7 @@ class HomeFragment : Fragment() {
             svc.lastSender.collectLatest { sender ->
                 lastSender = sender
                 updateProtocolCard(cardAirPlay, airPlayState, showLastSender = true)
+                showLastSenderLine(sender)
             }
         }
     }
@@ -214,7 +295,80 @@ class HomeFragment : Fragment() {
             is ServiceState.Error      -> Pair(R.string.service_state_error,      R.color.status_stopped)
         }
         textServiceState.setText(textRes)
-        dotServiceState.background.setTint(requireContext().getColor(colorRes))
+        dotServiceState.backgroundTintList =
+            android.content.res.ColorStateList.valueOf(requireContext().getColor(colorRes))
+
+        // The dot breathes only while the service is actually up. A stopped or errored receiver
+        // holds still, so "is it alive" is answerable from across the room without reading a word.
+        setDotBreathing(state is ServiceState.Running)
+
+        // The field is off when the service is: an animated receiver behind "Stopped" would be
+        // saying the opposite of the text next to it.
+        receiverField.setMode(
+            when (state) {
+                is ServiceState.Running -> if (anyConnected()) ReceiverFieldView.Mode.STREAMING
+                                           else ReceiverFieldView.Mode.IDLE
+                is ServiceState.Restarting -> ReceiverFieldView.Mode.DISCOVERY
+                else -> ReceiverFieldView.Mode.OFF
+            }
+        )
+        applyControlHierarchy(state)
+    }
+
+    /**
+     * Which control is the obvious one, given what the service is doing.
+     *
+     * All four remain present and functional; only their weight changes. The service is normally
+     * already running, so Start is the odd one out rather than the headline: offering it at full
+     * strength next to a receiver that is already up is offering to do nothing.
+     */
+    private fun applyControlHierarchy(state: ServiceState) {
+        val running = state is ServiceState.Running || state is ServiceState.Restarting
+        btnStart.visibility = if (running) View.GONE else View.VISIBLE
+        btnStop.visibility = if (running) View.VISIBLE else View.GONE
+        btnRestart.visibility = if (running) View.VISIBLE else View.GONE
+        // Whichever action leads gets the primary treatment; the rest stay quiet.
+        btnStart.setBackgroundResource(R.drawable.btn_primary_selector)
+        btnRestart.setBackgroundResource(
+            if (running) R.drawable.btn_primary_selector else R.drawable.btn_control_selector
+        )
+        // Focus must never be left on a button that just disappeared.
+        if (!running && btnRestart.isFocused) btnStart.requestFocus()
+        if (running && btnStart.isFocused) btnRestart.requestFocus()
+    }
+
+    private fun setDotBreathing(on: Boolean) {
+        if (!on) {
+            dotBreath?.cancel(); dotBreath = null
+            dotServiceState.alpha = 1f
+            return
+        }
+        if (dotBreath?.isRunning == true) return
+        dotBreath = android.animation.ValueAnimator.ofFloat(1f, 0.45f).apply {
+            duration = 1600L
+            repeatMode = android.animation.ValueAnimator.REVERSE
+            repeatCount = android.animation.ValueAnimator.INFINITE
+            interpolator = android.view.animation.AccelerateDecelerateInterpolator()
+            addUpdateListener { dotServiceState.alpha = it.animatedValue as Float }
+            start()
+        }
+    }
+
+    private fun anyConnected(): Boolean = airPlayState == ProtocolState.CONNECTED
+
+
+    /**
+     * The reassurance line under the status: this worked before, and here is what it was.
+     * Hidden entirely when there is nothing to say, rather than showing an empty label.
+     */
+    private fun showLastSenderLine(sender: PhairPlayService.LastSender?) {
+        if (sender == null || sender.name.isBlank()) {
+            textLastSender.visibility = View.GONE
+            return
+        }
+        textLastSender.text =
+            getString(R.string.home_last_connected, sender.name, relativeTime(sender.atMs))
+        textLastSender.visibility = View.VISIBLE
     }
 
     /** Coarse "2h ago" style age — precision past the hour is noise on a status card. */
@@ -253,6 +407,8 @@ class HomeFragment : Fragment() {
             ProtocolState.ERROR       -> Triple(R.string.protocol_state_error,       R.color.status_stopped,   R.string.protocol_detail_error)
         }
 
+        // Animate the transition before the text changes, so the swell lands with the new value.
+        ProtocolCardAnimator.apply(card, state, animate = true)
         stateText.setText(stateRes)
         // While idle, naming the device we last saw is more reassuring than "Waiting for sender…".
         val sender = lastSender
@@ -271,6 +427,6 @@ class HomeFragment : Fragment() {
         } else {
             detail.setText(detailRes)
         }
-        dot.background.setTint(requireContext().getColor(colorRes))
+        ProtocolCardAnimator.tintDot(dot, requireContext().getColor(colorRes))
     }
 }

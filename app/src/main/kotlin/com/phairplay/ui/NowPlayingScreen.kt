@@ -323,6 +323,12 @@ class NowPlayingScreen @JvmOverloads constructor(
         albumView = TextView(context).apply {
             setTextColor(Color.argb(140, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            // Tracking is size-specific, and it runs the opposite way at the two ends of the scale:
+            // the 36sp title is pulled tighter (-0.02) because letters read too far apart as they
+            // grow, while these dim lower lines are opened up slightly so they stay legible small,
+            // dim, and several feet away. A single tracking value across the card would be wrong at
+            // one end or the other.
+            letterSpacing = 0.01f
             gravity = Gravity.START
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -330,6 +336,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         metaSecondaryView = TextView(context).apply {
             setTextColor(Color.argb(100, 255, 255, 255))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            letterSpacing = 0.02f
             gravity = Gravity.START
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
@@ -390,6 +397,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         pillLabel = TextView(context).apply {
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            letterSpacing = 0.03f
         }
         pill.addView(pillIcon); pill.addView(pillLabel)
 
@@ -452,7 +460,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         // sliding around and re-measuring -- which is the compact "glitching" rather than any
         // rendering fault. Ellipsis is the honest treatment at this size: it does not move, and a
         // truncated title in a thumbnail is readable in a way a moving one is not.
-        if (isCompact) {
+        if (scrollingSuppressed()) {
             // Horizontal scrolling has to go, not just the animation. A TextView with
             // setHorizontallyScrolling(true) does not apply ellipsize at all and can still hold a
             // scroll offset, so the "static, truncated" title was neither: it kept whatever offset
@@ -490,7 +498,7 @@ class NowPlayingScreen @JvmOverloads constructor(
         out.addListener(object : android.animation.AnimatorListenerAdapter() {
             override fun onAnimationCancel(animation: android.animation.Animator) { cancelled = true }
             override fun onAnimationEnd(animation: android.animation.Animator) {
-                if (cancelled || isCompact || !view.isAttachedToWindow) return
+                if (cancelled || scrollingSuppressed() || !view.isAttachedToWindow) return
                 scrollAnimators[view] = back
                 back.start()
             }
@@ -501,6 +509,23 @@ class NowPlayingScreen @JvmOverloads constructor(
         scrollAnimators[view] = out
         out.start()
     }
+
+    /**
+     * Whether the marquee should be replaced by an ellipsis rather than animated.
+     *
+     * True in PiP, and true in any MINI_* preset — which is the remaining half of the "glitchy
+     * marquee". Delaying the pass until the transform settles fixed it being sized against the
+     * wrong width; it did not fix what happens afterwards. A mini preset leaves `contentGroup`
+     * scaled by a FRACTIONAL factor for as long as it is on screen, and the scroll is driven by
+     * `scrollTo(Int, 0)` — whole pixels in the view's own space, which the scale then maps onto
+     * fractional device pixels. The rounding lands differently on every frame, so the glyphs
+     * shimmer against each other while the text slides.
+     *
+     * Nothing about the animation can fix that: the text is being resampled, not mis-timed. So take
+     * the same decision the PiP branch already takes for the same reason — at this size a truncated
+     * title is more readable than a moving one, and it does not move, so it cannot shimmer.
+     */
+    private fun scrollingSuppressed(): Boolean = isCompact || layoutPreset != LayoutPreset.FULL
 
     /** Restarts every scroll pass — called when the displayed text changes. */
     private fun restartScrolls() = scrollTrackedViews.forEach { scheduleScroll(it) }
@@ -666,16 +691,49 @@ class NowPlayingScreen @JvmOverloads constructor(
         // pivot the scaled card is a rect of w*s x h*s centred in the view, and putting it in a
         // corner is just arithmetic — which interpolates cleanly.
         val margin = dp(24).toFloat()
-        val dx = (w - w * s) / 2f - margin
-        val dy = (h - h * s) / 2f - margin
+
+        // PIN THE CONTENT TO THE CORNER, NOT THE BOX AROUND IT.
+        //
+        // contentGroup is MATCH_PARENT x MATCH_PARENT with CENTER_VERTICAL gravity, so the thing
+        // you can actually see — the ~340dp artwork row — floats in the middle of a full-screen
+        // box. Placing the corner by the view's own width/height therefore put the *box* edge at
+        // the margin and left the content stranded near the middle: the card visibly refused to go
+        // any further down, with a large unexplained gap under it. The vertical case is the obvious
+        // one because the content is far shorter than the screen; horizontally the row nearly fills
+        // the width, which is why only "it won't go more down" was noticeable.
+        //
+        // Measured, not assumed: the row's height depends on how many metadata lines the sender
+        // actually sent, so a constant here would be wrong on the next track.
+        var cl = Float.MAX_VALUE; var ct = Float.MAX_VALUE
+        var cr = -Float.MAX_VALUE; var cb = -Float.MAX_VALUE
+        for (i in 0 until contentGroup.childCount) {
+            val child = contentGroup.getChildAt(i)
+            if (child.visibility == View.GONE) continue
+            cl = minOf(cl, child.left.toFloat()); ct = minOf(ct, child.top.toFloat())
+            cr = maxOf(cr, child.right.toFloat()); cb = maxOf(cb, child.bottom.toFloat())
+        }
+        // Before the first layout there are no child bounds to read; fall back to the whole box,
+        // which is the old behaviour and is corrected on the next pass.
+        if (cl > cr || ct > cb) { cl = 0f; ct = 0f; cr = w; cb = h }
+
+        // Scaling happens about the box centre, so the content's centre and half-size move with it.
+        val halfW = (cr - cl) / 2f * s
+        val halfH = (cb - ct) / 2f * s
+        val scaledCx = w / 2f + ((cl + cr) / 2f - w / 2f) * s
+        val scaledCy = h / 2f + ((ct + cb) / 2f - h / 2f) * s
+
         val tx = when (layoutPreset) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT -> -dx
-            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT -> dx
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_BOTTOM_LEFT ->
+                (margin + halfW) - scaledCx
+            LayoutPreset.MINI_TOP_RIGHT, LayoutPreset.MINI_BOTTOM_RIGHT ->
+                (w - margin - halfW) - scaledCx
             else -> 0f
         }
         val ty = when (layoutPreset) {
-            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT -> -dy
-            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT -> dy
+            LayoutPreset.MINI_TOP_LEFT, LayoutPreset.MINI_TOP_RIGHT ->
+                (margin + halfH) - scaledCy
+            LayoutPreset.MINI_BOTTOM_LEFT, LayoutPreset.MINI_BOTTOM_RIGHT ->
+                (h - margin - halfH) - scaledCy
             else -> 0f
         }
 
@@ -878,7 +936,13 @@ class NowPlayingScreen @JvmOverloads constructor(
                 positionBaseEpoch = SystemClock.elapsedRealtime()
                 seekMultiplier = 1f
             }
-        } else if (!info.title.isNullOrBlank() && positionBaseEpoch == 0L && !isPaused) {
+        } else if (!info.title.isNullOrBlank() && !info.identified &&
+            positionBaseEpoch == 0L && !isPaused
+        ) {
+            // NOT for an identified track. Fingerprinting gives a name, never a position -- we
+            // joined the song partway through and nothing told us how far. Starting the clock here
+            // would show a counter from 0:00 that is wrong by however much of the track already
+            // played, which reads as a broken timer rather than as an unknown one.
             positionBaseMs = 0L; positionBaseEpoch = SystemClock.elapsedRealtime()
         }
 
@@ -1065,10 +1129,28 @@ class NowPlayingScreen @JvmOverloads constructor(
     // ── Idle screensaver ──────────────────────────────────────────────────────
 
     /** Applies the user's screensaver preferences and re-arms the idle countdown. */
-    /** Beat Pulse from Settings: 1 Normal, 2 Strong, 3 Insane. */
-    fun setBeatPulse(level: Int) {
-        dynamicBg.setBeatMultiplier(when (level) { 1 -> 1f; 2 -> 2f; 3 -> 3.5f; else -> 0.45f })
+    /**
+     * Beat Pulse from Settings: 0 Calm, 1 Normal, 2 Strong, 3 Insane.
+     *
+     * SHIFTED UP A STEP. The scale was 0.45 / 1.0 / 2.0 / 3.5, and in use Normal read as barely
+     * reacting and Strong as merely normal — so three of the four settings sat below where people
+     * actually wanted to live and only Insane felt like anything. Each name now does roughly what
+     * the one above it used to, and the top has somewhere new to go.
+     *
+     * Calm keeps 0.45 unchanged: it is the default and the one setting that was already right,
+     * being the quiet backdrop you leave on rather than a reaction you watch.
+     *
+     * The top of the range no longer clips flat either — see `DynamicBackground.softCap`. A hard
+     * ceiling is why the largest multiplier felt harsh rather than large; it now rolls off, so
+     * Insane keeps responding instead of pinning at one radius.
+     */
+    fun setBeatPulse(orbLevel: Int, fieldLevel: Int) {
+        dynamicBg.setOrbBeatMultiplier(ORB_PULSE[orbLevel.coerceIn(0, 3)])
+        dynamicBg.setFieldBeatMultiplier(FIELD_PULSE[fieldLevel.coerceIn(0, 3)])
     }
+
+    /** Orb drift speed from Settings: 0 Slow, 1 Normal, 2 Fast. */
+    fun setOrbSpeed(level: Int) { dynamicBg.setOrbSpeed(level) }
 
     /** What fills the screen behind the card — see [DynamicBackground.setTheme]. */
     fun setBackdropTheme(theme: BackdropTheme) {
@@ -1223,6 +1305,20 @@ class NowPlayingScreen @JvmOverloads constructor(
         artWrapper.animate().cancel()
         artWrapper.scaleX = 1f
         artWrapper.scaleY = 1f
+        // THE COVER GOES TOO, IMMEDIATELY.
+        //
+        // Everything else here is reset per session and the artwork was not, so the ImageView still
+        // held the last track's cover when the next sender connected — it stayed on screen until
+        // the new image arrived and decoded, about a second, reading as the new session briefly
+        // playing the old song.
+        //
+        // The deferred clear in [applyArtwork] must be cancelled rather than left to fire: it
+        // exists for the gap BETWEEN tracks in one session, where dropping the cover for a moment
+        // is a flicker rather than a fact. Across a disconnect the fact is that there is no track,
+        // and holding the old art is exactly the wrong bet.
+        artworkClear?.let { removeCallbacks(it); artworkClear = null }
+        artworkKey = null
+        applyArtworkNow(null)
     }
 
     private fun darken(color: Int, f: Float) = Color.rgb(
@@ -1239,6 +1335,23 @@ class NowPlayingScreen @JvmOverloads constructor(
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
     companion object {
+        /**
+         * Beat Pulse multipliers, PER BACKDROP, because the same number is not the same strength.
+         *
+         * A projector orb rides ORB_SIZE_RIDE up to 1.05 against a swell cap of 2.2, so its radius
+         * moves far more per unit of multiplier than a blob does — the field's own FIELD_BEAT_SCALE
+         * is 0.42 into a 0.55 cap. Running both off one table is what made Normal read as "too
+         * much" on projector while the same setting was right on dynamic.
+         *
+         * The projector column has now been brought DOWN twice on the same report — Normal reading
+         * as far too strong — so the original 1.0 was not a safe floor either. The orbs' own
+         * geometry is why: ORB_SIZE_RIDE peaks at 1.05 and the soft cap is 2.2, so a multiplier of
+         * 1.0 already lets an ordinary hit more than double an orb's radius. At 0.65 Normal is a
+         * clear swell rather than a lunge, and Insane at 2.4 still reaches the cap on a big hit.
+         * The field column stays where it is; it was reported as fine.
+         */
+        private val ORB_PULSE = floatArrayOf(0.30f, 0.65f, 1.3f, 2.4f)
+        private val FIELD_PULSE = floatArrayOf(0.45f, 2f, 3.5f, 5.5f)
         // Text sizes for the PiP-compact swap. See [setCompact].
         //
         // FULL_* must match the sizes the views are CONSTRUCTED with, or the first exit from PiP

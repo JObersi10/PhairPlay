@@ -37,6 +37,7 @@ import com.phairplay.settings.StreamEndAction
 import com.phairplay.util.Logger
 import com.phairplay.ui.HomeFragment
 import com.phairplay.ui.MirrorControls
+import com.phairplay.ui.MultiScreenLayout
 import com.phairplay.ui.HomeKitSetupFragment
 import com.phairplay.ui.OnboardingFragment
 import com.phairplay.ui.NowPlayingScreen
@@ -71,13 +72,12 @@ import timber.log.Timber
 class MainActivity : AppCompatActivity() {
 
     // UI references
-    private lateinit var navItemHome: TextView
-    private lateinit var navItemSettings: TextView
     private lateinit var contentContainer: FrameLayout
     private lateinit var streamingContainer: com.phairplay.ui.TouchOverlayFrameLayout
 
     // The SurfaceView for full-screen video output
     private lateinit var streamingScreen: StreamingScreen
+    private lateinit var multiScreen: MultiScreenLayout
     private lateinit var photoScreen: PhotoScreen
     private lateinit var nowPlayingScreen: NowPlayingScreen
     private lateinit var pinScreen: PinScreen
@@ -114,6 +114,11 @@ class MainActivity : AppCompatActivity() {
     // True when PhairPlayService auto-opened us for an incoming sender, so we know to hand the
     // screen back when that session ends. A manual launch leaves this false.
     private var openedBySender = false
+    /**
+     * Set when Back ended the session with action=STOP_STREAM, so the stream-end action skips the
+     * exit exactly once. See [onBackPressed].
+     */
+    private var stopRequestedByUser = false
 
     /** Cached from settings — the session-end path is synchronous and cannot await DataStore. */
     private var streamEndAction = com.phairplay.settings.StreamEndAction.STAY_IN_APP
@@ -128,7 +133,11 @@ class MainActivity : AppCompatActivity() {
             Timber.d("MainActivity: bound to PhairPlayService")
 
             // Wire the streaming Surface so the service can pass it to VideoDecoder
-            service?.setVideoSurfaceProvider { getVideoSurface() }
+            service?.setVideoSurfaceProvider { slot -> getVideoSurface(slot) }
+            // Per tile, not global: two mirrors have two aspect ratios, and StreamStats has one.
+            service?.setVideoSizeSink { slot, w, h ->
+                runOnUiThread { multiScreen.tileAt(slot)?.setVideoSize(w, h) }
+            }
             // Put the SurfaceView on screen as soon as a sender opens the socket, before we know
             // what kind of session it is. A SurfaceView has no Surface until it is visible, and by
             // the time CONNECTED arrives the sender has already sent its opening IDR.
@@ -136,6 +145,7 @@ class MainActivity : AppCompatActivity() {
 
             // Show/hide the full-screen overlay for video streams and photos.
             observeOverlayState()
+            observeMirrorTiles()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -156,9 +166,9 @@ class MainActivity : AppCompatActivity() {
         openedBySender = intent?.getBooleanExtra(EXTRA_OPENED_BY_SENDER, false) == true
         bindViews()
         setupOverlayScreens()
-        setupNavigation()
 
         applyNowPlayingSettings()
+        maybeCheckForUpdate()
 
         // Start the service immediately so it's running before any sender discovers us
         ServiceController.start(this)
@@ -170,7 +180,7 @@ class MainActivity : AppCompatActivity() {
             lifecycleScope.launch {
                 val settings = SettingsRepository(this@MainActivity).settingsFlow.first()
                 if (settings.onboardingComplete) {
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                     requestNotificationPermission()
                 } else {
                     showOnboarding()
@@ -195,12 +205,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun showOnboarding() {
         onboardingVisible = true
-        navPanelVisible(false)
         val fragment = OnboardingFragment().also { f ->
             f.onFinished = {
                 onboardingVisible = false
-                navPanelVisible(true)
-                navigateTo(HomeFragment(), navItemHome)
+                navigateTo(HomeFragment())
                 requestNotificationPermission()
                 // The receivers started in onCreate, seconds before onboarding wrote the user's
                 // answers, so they are still running on pre-onboarding defaults — a chosen PIN
@@ -213,8 +221,7 @@ class MainActivity : AppCompatActivity() {
                 // page: it asks the user to pick up a second device, so it does not belong in the
                 // middle of a sequence they are trying to get through.
                 showHomeKitSetup(startAtCode = false) {
-                    navPanelVisible(true)
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                 }
             }
         }
@@ -235,7 +242,6 @@ class MainActivity : AppCompatActivity() {
      */
     fun showHomeKitSetup(startAtCode: Boolean, onDone: (() -> Unit)? = null) {
         onboardingVisible = true
-        navPanelVisible(false)
         val fragment = HomeKitSetupFragment().also { f ->
             f.startAtCode = startAtCode
             f.onSetEnabled = { enabled ->
@@ -250,8 +256,7 @@ class MainActivity : AppCompatActivity() {
                 if (onDone != null) {
                     onDone()
                 } else {
-                    navPanelVisible(true)
-                    navigateTo(HomeFragment(), navItemHome)
+                    navigateTo(HomeFragment())
                 }
             }
         }
@@ -260,11 +265,6 @@ class MainActivity : AppCompatActivity() {
             .commit()
     }
 
-    private fun navPanelVisible(visible: Boolean) {
-        val v = if (visible) View.VISIBLE else View.GONE
-        navItemHome.visibility = v
-        navItemSettings.visibility = v
-    }
 
     /**
      * launchMode="singleTop" means an auto-open while we're already running is delivered here
@@ -416,6 +416,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     @Deprecated("Deprecated in Java")
+    /**
+     * Never delegates to `super.onBackPressed()`, and the lint suppression says so on purpose.
+     *
+     * The default implementation finishes the Activity. That is exactly the behaviour this method
+     * exists to replace: what Back does here is a user setting, and only EXIT_APP is allowed to
+     * quit. Every other branch either handles the press or backgrounds the task, so there is no
+     * path where the platform default is the right answer.
+     */
+    @android.annotation.SuppressLint("MissingSuperCall")
     override fun onBackPressed() {
         // Back dismisses the pairing code first. The PIN overlay sits on top of everything and only
         // cleared when the sender finished, failed, or hit the lockout — so a sender that gave up
@@ -426,6 +435,15 @@ class MainActivity : AppCompatActivity() {
             service?.cancelPinPairing()
             currentPin = null
             updateOverlay()
+            return
+        }
+
+        // Back leaves Settings for Home. With the nav panel gone this is the only way back, so it
+        // has to come before the backAction branch below -- otherwise Back inside Settings would
+        // stop the stream or quit the app, depending on a preference that is about the *stream*
+        // and has nothing to say about which screen you are reading.
+        if (selectedNavIndex == 1 && currentPin == null && streamingContainer.visibility != View.VISIBLE) {
+            navigateTo(HomeFragment())
             return
         }
 
@@ -458,21 +476,51 @@ class MainActivity : AppCompatActivity() {
                     // user is deliberately here and stopping the stream — so leaving anyway a few
                     // seconds later read as the app quitting on its own.
                     openedBySender = false
+                    // AND SUPPRESS THE STREAM-END ACTION FOR THIS ONE STOP.
+                    //
+                    // Two different settings were fighting. Back=STOP_STREAM ends the session, and
+                    // ending a session runs the stream-end handler, which leaves the app when
+                    // "when the stream ends" is set to Exit — so Back stopped the stream and then
+                    // quit anyway, which is precisely what STOP_STREAM exists not to do. Setting
+                    // openedBySender was supposed to cover this, but the leaving decision stopped
+                    // consulting it when STAY_IN_APP became a real setting, so that line had been
+                    // doing nothing.
+                    //
+                    // The two questions are genuinely different: "what should happen when the
+                    // SENDER finishes" versus "what should happen when I press Back". Someone
+                    // pressing Back is standing in front of the TV and has just said where they
+                    // want to be, so the sender-finished rule does not get to override them.
+                    stopRequestedByUser = true
                     service?.endCurrentSession()
                 }
             }
             return
         }
-        // No stream on screen. Only EXIT_APP has anything left to do — the other two have already
-        // happened by the time you are back on the waiting screen.
+        // No stream on screen.
         if (backAction == BackAction.EXIT_APP) {
             Timber.d("Back with action=EXIT_APP — stopping service and finishing task")
             ServiceController.stop(this)
             finishAndRemoveTask()
             return
         }
-        @Suppress("DEPRECATION")
-        super.onBackPressed()
+
+        // ONLY EXIT_APP MAY QUIT. This used to fall through to super.onBackPressed(), which finishes
+        // the Activity — so Back ended the stream as asked, and then the very next press quit the
+        // app anyway. That is the "I chose 'just end the stream' and it still kicks me out" report,
+        // and it survived the first fix because that one only stopped the stream-END action from
+        // leaving; nothing stopped Back itself from finishing the task a moment later.
+        //
+        // Go to Home if we are anywhere else, and background the task if we are already there.
+        // moveTaskToBack rather than finish(): the receiver keeps running and the Activity stays
+        // alive, so a sender connecting brings the same instance straight back with its Surface
+        // already made — finishing would destroy it and reintroduce the cold-start black screen.
+        if (selectedNavIndex != 0) {
+            Timber.d("Back with no stream — returning to Home")
+            navigateTo(HomeFragment())
+            return
+        }
+        Timber.d("Back on Home, action=$backAction — backgrounding, receiver stays up")
+        moveTaskToBack(true)
     }
 
     override fun onDestroy() {
@@ -483,8 +531,6 @@ class MainActivity : AppCompatActivity() {
     // ─── View Setup ──────────────────────────────────────────────────────────
 
     private fun bindViews() {
-        navItemHome       = findViewById(R.id.nav_item_home)
-        navItemSettings   = findViewById(R.id.nav_item_settings)
         contentContainer  = findViewById(R.id.content_container)
         streamingContainer = findViewById(R.id.streaming_container)
     }
@@ -494,7 +540,12 @@ class MainActivity : AppCompatActivity() {
      * streaming_container. Created eagerly so the Surface is ready before streaming starts.
      */
     private fun setupOverlayScreens() {
-        streamingScreen = StreamingScreen(this)
+        // Tile 0 IS the StreamingScreen every single-sender path already used. Taking it from the
+        // layout rather than constructing a second one means the ordinary one-sender case runs on
+        // exactly the code that works today; the extra tiles sit hidden beside it, laid out so
+        // their Surfaces exist before anyone needs them.
+        multiScreen = MultiScreenLayout(this)
+        streamingScreen = multiScreen.primary
         photoScreen = PhotoScreen(this)
         nowPlayingScreen = NowPlayingScreen(this).also {
             it.onPlayPauseClick = { nowPlayingScreen.togglePause() }
@@ -509,7 +560,7 @@ class MainActivity : AppCompatActivity() {
             }
             it.onPipClick = { enterPip("mirror controls button") }
         }
-        streamingContainer.addView(streamingScreen)
+        streamingContainer.addView(multiScreen)
         streamingContainer.addView(photoScreen)
         streamingContainer.addView(nowPlayingScreen)
         streamingContainer.addView(pinScreen)
@@ -597,64 +648,79 @@ class MainActivity : AppCompatActivity() {
     private fun setOverlayOwnsInput(owns: Boolean) {
         contentContainer.descendantFocusability =
             if (owns) FrameLayout.FOCUS_BLOCK_DESCENDANTS else FrameLayout.FOCUS_AFTER_DESCENDANTS
-        navItemHome.isFocusable = !owns
-        navItemSettings.isFocusable = !owns
         // Swallow stray touches so nothing beneath the full-screen overlay is clickable either.
         streamingContainer.isClickable = owns
     }
 
-    /**
-     * Sets up click listeners for the navigation panel items.
-     * Also updates the visual selected state (text color) of the active item.
-     */
-    private fun setupNavigation() {
-        navItemHome.setOnClickListener {
-            if (selectedNavIndex != 0) {
-                navigateTo(HomeFragment(), navItemHome)
-            }
-        }
-        navItemSettings.setOnClickListener {
-            if (selectedNavIndex != 1) {
-                navigateTo(SettingsFragment(), navItemSettings)
-            }
-        }
-
-        // Set initial selected state
-        setNavSelected(navItemHome, true)
-        setNavSelected(navItemSettings, false)
-    }
 
     /**
-     * Replaces the content_container fragment with [fragment] and updates
-     * the nav panel selection highlight.
+     * Swaps the fragment in content_container.
      *
-     * @param fragment  The Fragment to show in the content area.
-     * @param navItem   The nav panel TextView that was clicked (for highlight update).
+     * [selectedNavIndex] is kept because the streaming overlay restores whichever screen you were
+     * on when a stream ends; there is no longer a highlight to update.
      */
-    private fun navigateTo(fragment: Fragment, navItem: TextView) {
-        // Update nav highlight
-        setNavSelected(navItemHome, navItem == navItemHome)
-        setNavSelected(navItemSettings, navItem == navItemSettings)
-        selectedNavIndex = if (navItem == navItemHome) 0 else 1
-
-        // Replace fragment
+    private fun navigateTo(fragment: Fragment) {
+        selectedNavIndex = if (fragment is HomeFragment) 0 else 1
         supportFragmentManager.beginTransaction()
+            .setCustomAnimations(
+                R.anim.fragment_enter, R.anim.fragment_exit,
+                R.anim.fragment_pop_enter, R.anim.fragment_pop_exit,
+            )
             .replace(R.id.content_container, fragment)
             .commit()
     }
 
     /**
-     * Updates the nav panel item's visual state.
+     * Background update check, at most once per [UPDATE_CHECK_INTERVAL_MS].
      *
-     * @param item     The nav item TextView.
-     * @param selected True if this item is currently active.
+     * CHECKS AND NOTHING ELSE. It records what it found and stops; downloading and installing stay
+     * behind the button in Settings, because a sideloaded receiver that replaces itself on someone's
+     * television unprompted is not a thing this app should do. The result surfaces as a line in
+     * Settings rather than a dialog, so it can never interrupt a stream.
+     *
+     * A failure is stored as "no update", not surfaced. The manual check is the one that owes the
+     * user an explanation; a background poll that cannot reach GitHub should be silent and try again
+     * later.
      */
-    private fun setNavSelected(item: TextView, selected: Boolean) {
-        item.isSelected = selected
-        item.setTextColor(
-            getColor(if (selected) R.color.text_primary else R.color.nav_item_normal)
-        )
+    private fun maybeCheckForUpdate() {
+        lifecycleScope.launch {
+            val repo = SettingsRepository(this@MainActivity)
+            val settings = repo.settingsFlow.first()
+            if (!settings.autoUpdateCheck) return@launch
+            val since = System.currentTimeMillis() - settings.lastUpdateCheckAtMs
+            if (since in 0 until UPDATE_CHECK_INTERVAL_MS) return@launch
+
+            val result = if (settings.betaUpdates) {
+                com.phairplay.util.UpdateChecker.checkBeta(BuildConfig.GIT_SHA, BuildConfig.FLAVOR)
+            } else {
+                com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            }
+            val tag = when (result) {
+                is com.phairplay.util.UpdateChecker.Result.Available -> {
+                    Logger.i("Update available: ${result.tag}")
+                    result.tag
+                }
+                is com.phairplay.util.UpdateChecker.Result.UpToDate -> {
+                    Logger.i("Update check: up to date (${result.tag})")
+                    ""
+                }
+                is com.phairplay.util.UpdateChecker.Result.Failed -> {
+                    Logger.i("Background update check failed: ${result.reason}")
+                    ""
+                }
+            }
+            repo.update {
+                it.copy(lastUpdateCheckAtMs = System.currentTimeMillis(), pendingUpdateTag = tag)
+            }
+        }
     }
+
+    /** Opens Settings from Home. Back returns, via [onBackPressed]. */
+    fun openSettings() {
+        if (selectedNavIndex != 1) navigateTo(SettingsFragment())
+    }
+
+
 
     /**
      * Shows the full-screen streaming overlay (called by PhairPlayService
@@ -741,7 +807,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** Returns the SurfaceView Surface for the VideoDecoder. */
-    fun getVideoSurface() = streamingScreen.getSurface()
+    /**
+     * The Surface for a mirroring [slot]. Slot 0 is the primary tile and is what every
+     * single-stream path asks for, so its behaviour is unchanged.
+     */
+    fun getVideoSurface(slot: Int = 0) = multiScreen.surfaceFor(slot)
 
     /**
      * Routes TV-remote media keys to the AirPlay sender (DACP reverse control) while audio-only or a
@@ -990,7 +1060,8 @@ class MainActivity : AppCompatActivity() {
                 backAction = settings.backAction
                 pipEnabled = settings.pipEnabled
                 refreshPipParams()
-                nowPlayingScreen.setBeatPulse(settings.beatPulse)
+                nowPlayingScreen.setBeatPulse(settings.beatPulse, settings.fieldPulse)
+                nowPlayingScreen.setOrbSpeed(settings.orbSpeed)
                 nowPlayingScreen.setBackdropTheme(settings.backdropTheme)
                 // Cached for the same reason as backAction: the session-end path is synchronous.
                 streamEndAction = settings.streamEndAction
@@ -1061,6 +1132,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     companion object {
+        /** How often the background check may run. Six hours; a receiver is not a store client. */
+        private const val UPDATE_CHECK_INTERVAL_MS = 6L * 60 * 60 * 1000
         /** How long Menu must be held to open the credits instead of moving the card. */
         private const val MENU_LONG_PRESS_MS = 600L
 
@@ -1127,6 +1200,24 @@ class MainActivity : AppCompatActivity() {
      * [repeatOnLifecycle] suspends the collection at STOP and restarts it at START, which is what
      * the old doc comment on this method already claimed was happening.
      */
+    /**
+     * Lays out one tile per mirroring sender.
+     *
+     * Only the COUNT is driven from here. Which Surface each session decodes into is settled far
+     * earlier, by the slot the SessionRegistry hands out — so a tile appearing is a consequence of a
+     * session existing, never the thing that grants it one.
+     */
+    private fun observeMirrorTiles() {
+        val svc = service ?: return
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                svc.activeMirrorSlots.collect { slots ->
+                    multiScreen.showTiles(slots)
+                }
+            }
+        }
+    }
+
     private fun observeOverlayState() {
         val svc = service ?: return
         // CANCEL THE PREVIOUS SET FIRST. onStart() binds every time, so onServiceConnected fires
@@ -1275,12 +1366,25 @@ class MainActivity : AppCompatActivity() {
     private fun trackSessionEnd(sessionActive: Boolean) {
         if (sessionActive) {
             hadActiveSession = true
+            // A new session clears the flag: it belongs to the stop the user just asked for, not to
+            // whatever the next sender does.
+            stopRequestedByUser = false
             // A session started (or restarted) — cancel any pending exit.
             sessionEndHandler.removeCallbacks(returnToPreviousApp)
             return
         }
         if (!hadActiveSession) return
         hadActiveSession = false
+
+        // The user ended this one themselves with Back, having chosen "stop the stream" — so they
+        // asked to stay. The stream-end action answers a different question (what to do when the
+        // SENDER finishes) and must not override an explicit instruction. See [onBackPressed].
+        if (stopRequestedByUser) {
+            stopRequestedByUser = false
+            Timber.d("Stream ended by user request — staying put, ignoring streamEndAction")
+            sessionEndHandler.removeCallbacks(returnToPreviousApp)
+            return
+        }
 
         // Leaving used to require openedBySender, so a manual launch sat on the waiting screen
         // forever after the stream ended. That is now the STAY_IN_APP setting rather than an
@@ -1289,8 +1393,25 @@ class MainActivity : AppCompatActivity() {
         // a few seconds after every stream that had opened it -- which is every stream started from
         // a phone. That was the old unconditional behaviour wearing a setting's name; if the user
         // has not asked to leave, we do not leave.
-        val leaving = streamEndAction == StreamEndAction.EXIT_APP
-        if (!leaving) return
+        // THE BACK SETTING HAS THE LAST WORD.
+        //
+        // These are two settings answering different questions — what to do when the SENDER
+        // finishes, versus what Back does — and they can contradict each other. A user whose Back
+        // action is "stop the stream and stay" has said plainly that they want to remain in
+        // PhairPlay; honouring "exit on stream end" then quits the app the moment they stop
+        // AirPlay on the phone, which is the same "it still kicks me out" from the other direction.
+        //
+        // Only when BOTH say leave does the app leave. Choosing to stay is the stronger statement:
+        // exiting against it is unrecoverable from the sofa, while staying against it costs one
+        // Home press.
+        val leaving = streamEndAction == StreamEndAction.EXIT_APP &&
+            backAction == BackAction.EXIT_APP
+        if (!leaving) {
+            if (streamEndAction == StreamEndAction.EXIT_APP) {
+                Timber.d("Stream ended: exit-on-end is set, but Back is $backAction — staying")
+            }
+            return
+        }
 
         // Still not instant, and deliberately so. Switching from screen mirroring to AirPlay video
         // tears the first session down and opens a second a beat later; leaving on that gap made

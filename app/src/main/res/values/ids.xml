@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Holds a card's previous ProtocolState on the view itself, so ProtocolCardAnimator can tell
+         a real transition from a StateFlow re-emitting the value it already had. On the view
+         rather than in a map so a re-bound card cannot inherit another card's history. -->
+    <item name="tag_protocol_state" type="id" />
+</resources>

@@ -127,7 +127,16 @@ class StreamingScreen @JvmOverloads constructor(
      *
      * @return The rendering Surface, or null if not yet available.
      */
-    fun getSurface(): Surface? = surface
+    /**
+     * The Surface to decode into, or null when there isn't a usable one.
+     *
+     * The validity check is not paranoia. A SurfaceView's Surface is destroyed whenever the view
+     * stops being VISIBLE, and the object we hold stays non-null afterwards — so returning it
+     * blind hands MediaCodec a Surface with no native window behind it. That is not an exception
+     * you can catch: it surfaces as "Could not find corresponding native window for surface" and
+     * takes the process down. A null here makes the caller wait for a real one instead.
+     */
+    fun getSurface(): Surface? = surface?.takeIf { it.isValid }
 
 
 
@@ -136,9 +145,30 @@ class StreamingScreen @JvmOverloads constructor(
      * stretching it to fill 16:9. Without this, a portrait phone stream is squashed horizontally.
      * Falls back to filling the container when the size isn't known yet.
      */
+    /**
+     * This tile's own decoded size, or 0 until its decoder reports one.
+     *
+     * NOT StreamStats. That is a single global written by every decoder, so with two mirrors the
+     * second sender's size landed on the first sender's tile: an iPhone leaving a fullscreen video
+     * changed its aspect, wrote the global, and the Mac beside it was re-fitted to the iPhone's
+     * shape and squashed. Aspect fit is per tile because aspect is per stream.
+     */
+    private var tileVideoW = 0
+    private var tileVideoH = 0
+
+    /** Reports the size decoded for THIS tile. Triggers a re-fit. */
+    fun setVideoSize(w: Int, h: Int) {
+        if (w <= 0 || h <= 0 || (w == tileVideoW && h == tileVideoH)) return
+        tileVideoW = w
+        tileVideoH = h
+        invalidateAspectFit()
+    }
+
     private fun applyAspectFit() {
-        val vw = StreamStats.videoWidth
-        val vh = StreamStats.videoHeight
+        // Falls back to the global while this tile has no size of its own, which is the AirPlay URL
+        // video and DLNA path — those are single-stream and cannot collide.
+        val vw = if (tileVideoW > 0) tileVideoW else StreamStats.videoWidth
+        val vh = if (tileVideoH > 0) tileVideoH else StreamStats.videoHeight
         val cw = width
         val ch = height
         val (targetW, targetH) = if (vw <= 0 || vh <= 0 || cw <= 0 || ch <= 0) {

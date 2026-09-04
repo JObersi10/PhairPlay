@@ -94,7 +94,7 @@ class SenderNameExtractionTest {
         var captured: SessionDescription? = null
         val handler = TestableRtspHandler(
             onStreamingStarted = { session -> captured = session },
-            onStreamingStopped = {}
+            onStreamingStopped = { _, _ -> }
         )
 
         val announceHeaders = buildMap {

@@ -63,8 +63,8 @@ class AudioStreamServer(
      * [targetDepthFrames].
      */
     private val trackBufferMs: Int = TARGET_BUFFER_MS,
-    /** Additional delay applied to the beat callback only — see AppSettings.beatDelayMs. */
-    private val beatDelayMs: Long = 0,
+    /** Delay applied to the beat callback only — see AudioRoute.BLUETOOTH_COMPENSATION_MS. */
+    beatDelayMs: Long = 0,
     /** Called ~10x/sec with RMS energy 0..1 for beat-reactive background. */
     val onEnergy: (Float) -> Unit = {},
     /**
@@ -210,12 +210,35 @@ class AudioStreamServer(
     /** Slow per-band average the swell is measured against. Zero until the first window seeds it. */
     private val bandBase = DoubleArray(3)
 
-    /** Long-run average of each band's OUTPUT, used to even the three up against one another. */
-    private val bandAvg = FloatArray(3) { BAND_AVG_TARGET }
-
-    /** What the orbs actually see: [bandLevel] after the cross-band evening-up. */
-    private val bandOut = FloatArray(3)
+    /** What the orbs see. One value per band, 0..1, order [bass, vocal, treble]. */
     private val bandLevel = FloatArray(3)
+
+    /**
+     * Band energy accumulated since the last window boundary, plus the sample count behind it.
+     *
+     * Sums of squares rather than levels: see the note at the top of [updateBands]. Mid and side
+     * are held apart because the vocal figure is a difference of their two ROOTS, which cannot be
+     * reconstructed once they have been added together.
+     */
+    /**
+     * Per-band adaptive swell ceiling: the largest rise above baseline seen recently.
+     *
+     * Seeded at the floor rather than zero, so the first window of a track cannot divide by a
+     * near-zero ceiling and read full scale.
+     */
+
+    /** Per-interval extremes for the band log — see the note at the log site. */
+    private val logMin = FloatArray(3) { Float.MAX_VALUE }
+    private val logMax = FloatArray(3)
+
+    /** Windows seen per band, for the baseline warm-up in [updateBands]. */
+    private val bandWindows = IntArray(3)
+
+    private var winBass = 0.0
+    private var winVocalMid = 0.0
+    private var winVocalSide = 0.0
+    private var winTreble = 0.0
+    private var winSamples = 0
     private val history = DoubleArray(100)
     private var historyIdx = 0
     private var lastOnsetMs = 0L
@@ -498,8 +521,9 @@ class AudioStreamServer(
     private fun playAlacFrame(frame: ByteArray) {
         val pcm = alac?.decode(frame) ?: return
         if (firstPcm) { Logger.i("Audio: first decoded ALAC PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
-        audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+        if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
         emitEnergy(pcm)
+        offerForIdentification(pcm)
     }
 
     /** True if this RTP sequence was already processed (a redundant retransmission). */
@@ -536,8 +560,9 @@ class AudioStreamServer(
             if (firstPcm) { Logger.i("Audio: first decoded PCM (${pcm.size}B) → AudioTrack"); firstPcm = false }
             // Blocking write paces playback to the audio clock and drops no PCM. Safe here because
             // this runs on the dedicated playback thread, not the socket-receive thread.
-            audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
+            if (outputEnabled) audioTrack?.write(pcm, 0, pcm.size, AudioTrack.WRITE_BLOCKING)
             emitEnergy(pcm)
+            offerForIdentification(pcm)
             mc.releaseOutputBuffer(outIdx, false)
             outIdx = mc.dequeueOutputBuffer(info, 0)
         }
@@ -552,6 +577,17 @@ class AudioStreamServer(
      * to keep only bass, measures energy in short windows, and fires when a window jumps well above
      * the recent running mean. The result is a punch that decays, which is what reads as a beat.
      */
+    /**
+     * Feeds the fingerprinter, which is a no-op unless it has been armed.
+     *
+     * Called next to [emitEnergy] from both decoder paths rather than inside it: the two do
+     * unrelated work on the same bytes, and burying a network-bound feature inside the function
+     * named "emit energy" is how it becomes impossible to find later.
+     */
+    private fun offerForIdentification(pcm: ByteArray) {
+        com.phairplay.media.shazam.TrackIdentifier.offer(pcm, sampleRate, channels)
+    }
+
     private fun emitEnergy(pcm: ByteArray) {
         // Window energy, mono, low-passed to ~130Hz with a one-pole filter. The same pass also runs
         // the three-band bank below, so the PCM is walked once rather than four times.
@@ -623,13 +659,13 @@ class AudioStreamServer(
         // because a wide stereo pad can hold more energy in side than in mid, and "negative vocal"
         // is not a thing. On a mono source side is silent and this degrades to a plain band-pass,
         // which is the right fallback rather than a special case.
-        val vocal = (Math.sqrt(sumVocalMid / count) - Math.sqrt(sumVocalSide / count))
-            .coerceAtLeast(0.0) / 32768.0
-        updateBands(
-            Math.sqrt(sumBass / count) / 32768.0,
-            vocal,
-            Math.sqrt(sumTreble / count) / 32768.0,
-        )
+        //
+        // ENERGIES, NOT LEVELS, AND SUMMED RATHER THAN AVERAGED. The three band figures are
+        // accumulated across blocks and only turned into RMS at the window boundary in
+        // [updateBands]. Averaging three already-rooted RMS values is not the RMS of the three
+        // blocks, and the vocal figure in particular cannot be averaged at all: it is a difference
+        // of two roots, so mid and side have to stay separate until the window closes.
+        updateBands(sumBass, sumVocalMid, sumVocalSide, sumTreble, count)
 
         // Running mean/variance over roughly the last second of windows.
         history[historyIdx % history.size] = level
@@ -689,18 +725,111 @@ class AudioStreamServer(
      * Against a slow baseline, "at its own average" means ZERO. It takes a genuine kick to light
      * up and the orb settles between hits, which is the thing that reads as being on the beat.
      */
-    private fun updateBands(bass: Double, mid: Double, treble: Double) {
+    private fun updateBands(
+        bassEnergy: Double,
+        vocalMidEnergy: Double,
+        vocalSideEnergy: Double,
+        trebleEnergy: Double,
+        samples: Int,
+    ) {
+        // ── Accumulate until the window closes ──────────────────────────────────────────────────
+        //
+        // THE WHOLE STATE MACHINE BELOW RUNS ONCE PER WINDOW, NOT ONCE PER PCM BLOCK, and that is
+        // the single most important thing about this function.
+        //
+        // It used to run per block -- roughly 100 times a second, one call per ~10ms of audio --
+        // while three of its four rate-dependent constants were documented, and tuned, against the
+        // ~30/sec emission rate. Their own comments said so: BAND_BASE_FOLLOW claimed "~1.5s at the
+        // ~30/sec emission rate" and BAND_AVG_FOLLOW claimed "~30/sec", and neither ran at 30/sec.
+        // Only BAND_PEAK_DECAY documented the real rate.
+        //
+        // Every one of those errors runs in the direction that removes the thump:
+        //
+        //   - the baseline followed at 0.02 per BLOCK, so it settled in ~0.5s rather than ~1.5s.
+        //     A baseline that fast chases the music it is meant to be measured against, so a kick
+        //     lifts the reference almost as fast as it lifts the band and the swell it produces is
+        //     a fraction of what it should be. This is the "not thumpy" complaint, arithmetically.
+        //   - the release ran at 0.11 per BLOCK, decaying three times faster than intended, so the
+        //     glow snapped off after a hit instead of trailing it. That trail IS the thump.
+        //   - the reference peak fell ~0.95/sec instead of ~0.99/sec.
+        //
+        // Accumulating and running the state once per window makes every constant mean what its
+        // comment says. Nothing below needed re-tuning afterwards, which is the check that this was
+        // a rate bug and not a taste question.
+        winBass += bassEnergy
+        winVocalMid += vocalMidEnergy
+        winVocalSide += vocalSideEnergy
+        winTreble += trebleEnergy
+        winSamples += samples
+
+        val now = System.currentTimeMillis()
+        if (lastBandEmitMs != 0L && now - lastBandEmitMs < BAND_EMIT_INTERVAL_MS) return
+        lastBandEmitMs = now
+        val n = winSamples
+        if (n == 0) return
+
         val raw = RAW_BANDS
-        raw[0] = bass; raw[1] = mid; raw[2] = treble
+        raw[0] = Math.sqrt(winBass / n) / 32768.0
+        // Centre-dominant energy in the vocal band: what is in mid and NOT in side. Floored at zero
+        // because a wide stereo pad can hold more energy in side than in mid, and "negative vocal"
+        // is not a thing. On a mono source side is silent and this degrades to a plain band-pass,
+        // which is the right fallback rather than a special case.
+        raw[1] = (Math.sqrt(winVocalMid / n) - Math.sqrt(winVocalSide / n))
+            .coerceAtLeast(0.0) / 32768.0
+        raw[2] = Math.sqrt(winTreble / n) / 32768.0
+        winBass = 0.0; winVocalMid = 0.0; winVocalSide = 0.0; winTreble = 0.0; winSamples = 0
+
         for (b in 0 until 3) {
             // ~1.5s follow. Seeded on the first window rather than from zero: starting at zero
             // makes the first second of every track one enormous false swell.
+            // WARM-UP: 1/n for the first windows, then the fixed rate.
+            //
+            // An EMA seeded from a single sample is biased toward that sample, and at 0.02 it takes
+            // ~1.5s to shake it off — which is the backdrop visibly needing a moment to settle at
+            // the start of a track. Weighting the k-th window by 1/k makes the baseline the true
+            // running mean of everything seen so far, so it is correct from the second window
+            // instead of merely approaching correct; once 1/k falls below the fixed rate the two
+            // are the same thing and it carries on as before.
+            //
+            // No new constant and no guessed ramp: 1/k IS the unbiased mean, and the crossover
+            // happens on its own at k = 1/BAND_BASE_FOLLOW.
+            bandWindows[b]++
+            val warm = 1.0 / bandWindows[b]
             if (bandBase[b] <= 0.0) bandBase[b] = raw[b].coerceAtLeast(BAND_BASE_FLOOR)
-            else bandBase[b] += BAND_BASE_FOLLOW * (raw[b] - bandBase[b])
+            else bandBase[b] += Math.max(BAND_BASE_FOLLOW, warm) * (raw[b] - bandBase[b])
             val base = bandBase[b].coerceAtLeast(BAND_BASE_FLOOR)
             // Headroom matters. Divide by a tight ceiling and ordinary hits clip flat at 1 again,
             // which is the very thing the baseline was introduced to stop.
-            val swell = ((raw[b] / base) - 1.0).coerceIn(0.0, BAND_EXCESS_MAX) / BAND_EXCESS_MAX
+            // PER BAND, not one figure for all three. Bass swings hardest above its own baseline, so
+            // it needs headroom to avoid pinning; treble and vocals move far less and were being
+            // asked to clear the same bar, which left both of them dim on material that plainly had
+            // cymbals and singing in it.
+            // A FIXED CEILING, and the adaptive one is not coming back in this form.
+            //
+            // It was tried three ways — the instantaneous peak, then a slow one-sided follower,
+            // then a beat-peak hold with headroom — and every version ended the same way: lively
+            // for a minute, then flat. That is not a tuning failure, it is what the construction
+            // does. A ceiling that tracks the music divides the music by itself, so the longer a
+            // track plays the more its loud parts define "normal" and the less anything can stand
+            // out. Slower adaptation only postpones it, which is exactly what each fix bought.
+            //
+            // Divide by a constant and a loud passage stays loud.
+            //
+            // The constants are read off the measurement rather than guessed: a kick rises about
+            // 0.35 above its own 1.5s baseline, so a ceiling near 0.45 puts an ordinary hit around
+            // 0.8 and lets a genuinely big one clip at 1.0 — which is what a thump should do. The
+            // original 1.15 is what pinned bass to the bottom third of its range and started all
+            // of this.
+            val excessRaw = ((raw[b] / base) - 1.0).coerceAtLeast(0.0)
+            val excess = (excessRaw / BAND_EXCESS_MAX[b]).coerceIn(0.0, 1.0)
+            // The gate lives HERE, on the swell, and it is PER BAND.
+            //
+            // There used to be a second gate after the vocal presence term as well, re-expanding an
+            // already-expanded signal against one shared 0.06 floor. Two gates in series is not a
+            // deeper gate, it is a compressor: the second one re-normalises whatever the first
+            // produced, so the quiet end is lifted back toward the loud end and the distance
+            // between an ordinary hit and a big one shrinks. One gate, on the swell, per band.
+            val swell = ((excess - BAND_GATE[b]) / (1.0 - BAND_GATE[b])).coerceIn(0.0, 1.0)
             // ASYMMETRIC reference peak: jump straight to a new loudest, fall away very slowly.
             //
             // A symmetric decay makes the AGC fight itself. A transient sets a high reference, the
@@ -731,57 +860,61 @@ class AudioStreamServer(
             // then re-expanded, and it contributes rather less than the swell it competes with.
             val gated = ((presence - BAND_PRESENCE_GATE) / (1.0 - BAND_PRESENCE_GATE))
                 .coerceIn(0.0, 1.0)
-            val combined =
-                if (b == BAND_VOCAL) Math.max(swell, gated * BAND_PRESENCE_WEIGHT) else swell
-            // Gate, then re-expand what is left to the full 0..1 range, so removing the noise floor
-            // costs no headroom at the top.
-            val norm = ((combined - BAND_NOISE_FLOOR) / (1.0 - BAND_NOISE_FLOOR)).coerceIn(0.0, 1.0)
-            val shaped = Math.pow(norm, BAND_CURVE).toFloat()
+            // NO SHAPING CURVE. This was `Math.pow(norm, 0.9)`, a gamma lift of the quiet end.
+            //
+            // It is gone because it fights the dynamics the stages above just measured: raising a
+            // level to a power below 1 lifts small values proportionally more than large ones,
+            // which is by definition a reduction in the distance between a soft hit and a hard one.
+            // The baseline swell exists to FIND that distance. Gamma 1 -- no curve at all -- keeps
+            // it, and the per-band gate and excess ceiling already set the range the curve was
+            // brought in to fix.
+            val norm =
+                Math.max(swell, gated * BAND_PRESENCE_WEIGHT[b])
             // Envelope follower, fast up and slow down -- how a VU meter behaves, and how a glow
-            // should. A raw per-block figure is far too twitchy to drive anything visual: it is
-            // measured over ~10ms of audio, so it chatters at a rate the eye reads as noise. Rising
-            // quickly keeps the hit on the beat; falling slowly is what makes the decay look smooth.
-            val follow = if (shaped > bandLevel[b]) BAND_ATTACK else BAND_RELEASE
-            bandLevel[b] += (shaped - bandLevel[b]) * follow
-
-            // AND FINALLY, MAKE THE THREE COMPARABLE TO EACH OTHER.
-            //
-            // Everything above normalises each band against ITSELF, which makes each one honest in
-            // isolation and says nothing about how they compare. On the device that came out as
-            // vocals averaging 0.39 against bass 0.24 and treble 0.18 -- so the middle orb simply
-            // glowed harder than its neighbours all the time, whatever the music was doing. Three
-            // orbs that are individually correct and visibly mismatched is worse than three that
-            // are approximate and even, because the eye reads the brightest one as the important
-            // one and it is the same one every time.
-            //
-            // A slow gain per band pulls each one's long-run average toward a common target. The
-            // averaging window is tens of seconds, far longer than any beat, so this cannot flatten
-            // a hit or chase the music; it only corrects the standing offset between the three.
-            // Clamped hard, because a band that is genuinely silent for a while must not have its
-            // noise floor amplified into a glow while it waits.
-            bandAvg[b] += BAND_AVG_FOLLOW * (bandLevel[b] - bandAvg[b])
-            val gain = (BAND_AVG_TARGET / Math.max(bandAvg[b], BAND_AVG_FLOOR))
-                .coerceIn(BAND_GAIN_MIN, BAND_GAIN_MAX)
-            bandOut[b] = (bandLevel[b] * gain).coerceIn(0f, 1f)
+            // should. Rising quickly keeps the hit on the beat; falling slowly is what makes the
+            // decay look smooth, and the slow fall is most of what reads as "thump".
+            val follow = if (norm > bandLevel[b]) BAND_ATTACK else BAND_RELEASE
+            bandLevel[b] += (norm.toFloat() - bandLevel[b]) * follow
         }
+        // NO CROSS-BAND LEVELLING.
+        //
+        // A slow gain per band used to pull each one's long-run average toward a shared target, to
+        // stop the vocal orb averaging brighter than its neighbours. It is deleted, because it is a
+        // compressor with a very long time constant and it does to the three bands exactly what a
+        // compressor does to a mix: a band that thumps hard has a higher long-run average, so it
+        // gets a lower gain, so it thumps less. It cannot flatten a single hit -- the window is tens
+        // of seconds -- but it flattens the difference between a loud passage and a quiet one, and
+        // over a track that is the dynamic range the orbs are there to show.
+        //
+        // Each band is normalised against ITSELF and nothing else. If the three read visibly
+        // mismatched again, the honest fix is per-band excess ceilings, which is what
+        // BAND_EXCESS_MAX already is -- not a feedback loop that reaches back and undoes them.
+
         // Periodic proof that the bank is alive and separating. "Are the orbs actually reacting?" is
         // not answerable by watching them -- a slow orb on a quiet passage looks identical to a dead
         // one. Three numbers a couple of times a second settle it: if they move independently the
         // orbs are following the music, and if one sits at 0.00 that band is the thing to fix.
-        val now = System.currentTimeMillis()
+        // MIN AND MAX OVER THE INTERVAL, not the instantaneous value.
+        //
+        // This logged one window's levels every two seconds, which at ~30 windows a second samples
+        // one frame in sixty. That cannot show a beat: a snapshot lands wherever it lands in the
+        // envelope, so a band that swings 0.0-1.0 on every kick and one that sits flat at 0.5 both
+        // print an unremarkable middling number. Several rounds of tuning were read off exactly
+        // that aliased view. The SWING is the thing being tuned, so the swing is what gets printed.
+        for (b in 0 until 3) {
+            if (bandLevel[b] < logMin[b]) logMin[b] = bandLevel[b]
+            if (bandLevel[b] > logMax[b]) logMax[b] = bandLevel[b]
+        }
         if (now - lastBandLogMs > BAND_LOG_INTERVAL_MS) {
             lastBandLogMs = now
             Logger.i(
-                "Bands bass=%.2f vocal=%.2f treble=%.2f".format(bandOut[0], bandOut[1], bandOut[2])
+                "Bands bass=%.2f-%.2f vocal=%.2f-%.2f treble=%.2f-%.2f".format(
+                    logMin[0], logMax[0], logMin[1], logMax[1], logMin[2], logMax[2],
+                )
             )
+            for (b in 0 until 3) { logMin[b] = Float.MAX_VALUE; logMax[b] = 0f }
         }
-        // Rate-limited. This fired once per PCM BLOCK -- around 100 times a second -- so it was
-        // posting 100 runnables a second onto the main thread to animate something that redraws at
-        // 60fps, and the smoothing constants downstream were tuned for a far slower callback. 30/sec
-        // is more than the display can show.
-        if (now - lastBandEmitMs < BAND_EMIT_INTERVAL_MS) return
-        lastBandEmitMs = now
-        val snapshot = floatArrayOf(bandOut[0], bandOut[1], bandOut[2])
+        val snapshot = floatArrayOf(bandLevel[0], bandLevel[1], bandLevel[2])
         val delay = beatEmitDelayMs()
         if (delay <= 0L) energyHandler.post { onBands(snapshot) }
         else energyHandler.postDelayed({ onBands(snapshot) }, delay)
@@ -789,6 +922,7 @@ class AudioStreamServer(
 
     private val RAW_BANDS = DoubleArray(3)
     private var lastBandLogMs = 0L
+    @Volatile private var lastDelayLogMs = 0L
     private var lastBandEmitMs = 0L
 
 
@@ -846,6 +980,34 @@ class AudioStreamServer(
         // A prime that timed out with nothing in the queue means the sender opened the stream and
         // sent no audio. Starting playback from empty guarantees an immediate underrun, so say so
         // rather than pretending the buffer is at its target.
+        if (frameQueue.isEmpty()) {
+            // NOTHING YET IS NOT THE SAME AS NOTHING COMING, and starting anyway is the worst of
+            // the three options.
+            //
+            // The deadline exists so a sender that opens a stream and never sends cannot stall this
+            // thread forever. But an EMPTY queue at the deadline was being treated as "begin
+            // playback", which starts AudioTrack with nothing to give it — an underrun on the first
+            // buffer by construction, heard as the stream being choppy for its first second.
+            //
+            // Measured on the device: the deadline fired at +725ms and the first PCM arrived 4ms
+            // later. The sender was simply slow to start, and we gave up immediately before it
+            // spoke. Waiting costs nothing when there is no audio to play, so wait for the FIRST
+            // frame on a longer bound, then take a short top-up so playback still begins with a
+            // little depth rather than on the very packet that ended the wait.
+            val firstDeadline = System.currentTimeMillis() + FIRST_FRAME_TIMEOUT_MS
+            while (running && frameQueue.isEmpty() && System.currentTimeMillis() < firstDeadline) {
+                Thread.sleep(5)
+            }
+            if (frameQueue.isNotEmpty()) {
+                val topUp = System.currentTimeMillis() + PRIME_TOP_UP_MS
+                while (running && frameQueue.size < targetDepthFrames &&
+                       System.currentTimeMillis() < topUp) {
+                    Thread.sleep(5)
+                }
+                Logger.i("Audio: sender was slow to start — primed ${frameQueue.size} frames " +
+                    "after waiting for the first packet")
+            }
+        }
         if (frameQueue.isEmpty()) {
             Logger.w("Audio: prime timed out with an empty queue — sender opened the stream but sent nothing")
             return
@@ -982,6 +1144,27 @@ class AudioStreamServer(
      * Shared by [emitDelayed] and the band emission: both describe the same PCM, so they must be
      * delayed by the same amount or the orbs would react on a different beat from the pulse.
      */
+    /**
+     * Live, because the output can change under a running stream: connecting a Bluetooth speaker
+     * mid-track makes the sound genuinely later, and the visuals have to follow within the session
+     * rather than at the next connect. Safe to move at any moment — unlike [extraDelayMs], which is
+     * pre-buffered as silence at stream start and cannot change without a gap in the audio.
+     */
+    @Volatile private var beatDelayMs: Long = beatDelayMs
+
+    /** Applies a new visual trim to a running stream. See [com.phairplay.media.AudioRouteMonitor]. */
+    fun setBeatDelayMs(ms: Long) { beatDelayMs = ms.coerceAtLeast(0L) }
+
+    /**
+     * The output AudioTrack is genuinely writing to, or null before the track exists.
+     *
+     * Authoritative in a way that scanning connected devices is not: the Fire TV reports HDMI and
+     * its built-in speaker as permanently connected, so "which of these is playing" is otherwise an
+     * inference from Android's routing policy rather than an observation.
+     */
+    fun routedDevice(): android.media.AudioDeviceInfo? =
+        runCatching { audioTrack?.routedDevice }.getOrNull()
+
     private fun beatEmitDelayMs(): Long {
         // OUR queue only. AudioTrack's own holding is [outputLatencyMs] below and must not be
         // counted twice.
@@ -999,7 +1182,38 @@ class AudioStreamServer(
         // at 14-40 packets: at 352 frames each that is 110-320ms of pure, self-inflicted lag, and
         // it drifts with the queue. What is genuinely still ahead of this PCM is what AudioTrack
         // has not played yet, and nothing else.
-        return extraDelayMs + beatDelayMs + outputLatencyMs()
+        // MINUS THE TIME THE ORB SPRING TAKES TO REACH ITS PEAK.
+        //
+        // Everything above lines the EMISSION up with the moment the audio is heard, which is
+        // correct and still leaves the orbs visibly behind the beat — because a level handed to the
+        // backdrop is not a picture yet. It goes into an under-damped spring, and that spring's
+        // first peak is what the eye reads as the hit landing.
+        //
+        // That time is arithmetic, not taste: pi / (omega * sqrt(1 - zeta^2)). DynamicBackground's
+        // ORB_STIFFNESS 400 and ORB_DAMPING 24 give omega 20 and zeta 0.6, so the peak arrives
+        // ~196ms after the level does, every time, on top of a delay that was already correct.
+        //
+        // Compensating for output latency and then adding an uncompensated 196ms of visual rise
+        // is why the orbs read as late "after a beat drop". The target is when the orb PEAKS, not
+        // when the number is emitted, so the spring's own rise comes back off the total.
+        val out = outputLatencyMs()
+        val total = (extraDelayMs + beatDelayMs + out - ORB_SPRING_PEAK_MS).coerceAtLeast(0L)
+        // PRINTED, BECAUSE "THE VISUALS ARE OUT" DOES NOT SAY WHICH WAY.
+        //
+        // Four terms compose this and one of them can silently be zero: outputLatencyMs() returns 0
+        // whenever getTimestamp() fails, which is exactly the case on some routes — and CLAUDE.md
+        // already records that the timestamp stops at the HAL, so the Bluetooth link's own latency
+        // was never in here to begin with. A total of 219ms and a total of 469ms are both
+        // "compensating 350ms" as far as the existing log is concerned, and they look completely
+        // different on screen. Once a second is often enough to see which one is happening.
+        val now = System.currentTimeMillis()
+        if (now - lastDelayLogMs > DELAY_LOG_INTERVAL_MS) {
+            lastDelayLogMs = now
+            Logger.i("Beat delay ${total}ms = route ${beatDelayMs}ms + user ${extraDelayMs}ms " +
+                "+ track ${out}ms - spring ${ORB_SPRING_PEAK_MS}ms" +
+                (if (out == 0L) " (track latency unavailable on this route)" else ""))
+        }
+        return total
     }
 
     /**
@@ -1039,6 +1253,27 @@ class AudioStreamServer(
     }
 
     /** Sets playback volume from the sender's AirPlay volume (−30 dB … 0 dB, or ≤ −144 = mute). */
+    /**
+     * Whether this sender's PCM reaches the speakers.
+     *
+     * Several senders can have a live audio stream at once, and there is one AudioTrack. A passive
+     * server still receives, decrypts, decodes and reports whether it is playing — which is exactly
+     * what the ownership rules need in order to notice that the sender you are listening to has
+     * stopped and this one has not. It simply does not write, and never allocates an AudioTrack.
+     *
+     * Deliberately NOT "stop the other server". A stopped server loses its ports, and the sender
+     * connected to those ports will not come back for new ones — which is why ownership decided at
+     * SETUP could never be handed back.
+     */
+    @Volatile
+    var outputEnabled: Boolean = true
+        set(value) {
+            if (field == value) return
+            field = value
+            if (!value) runCatching { audioTrack?.pause(); audioTrack?.flush() }
+            else runCatching { audioTrack?.play() }
+        }
+
     fun setVolume(airplayVolume: Float) {
         // dB -> AMPLITUDE, not a straight line through the dB range.
         //
@@ -1163,6 +1398,19 @@ class AudioStreamServer(
 
         private const val PRIME_TIMEOUT_MS = 700L
 
+        /**
+         * How long to keep waiting when the prime deadline passes with NOTHING received.
+         *
+         * Longer than [PRIME_TIMEOUT_MS] on purpose: at this point the alternative is starting
+         * playback with an empty buffer, which is a guaranteed underrun, so waiting is strictly
+         * better right up until the sender is genuinely dead. Three seconds distinguishes "slow to
+         * start" from "opened the stream and left".
+         */
+        private const val FIRST_FRAME_TIMEOUT_MS = 3_000L
+
+        /** Short grace after the first packet, so playback starts with depth rather than on it. */
+        private const val PRIME_TOP_UP_MS = 150L
+
         /** One health line a second — frequent enough to see a glitch, quiet enough to read. */
         private const val HEALTH_LOG_INTERVAL_MS = 1_000L
 
@@ -1186,8 +1434,8 @@ class AudioStreamServer(
         private const val LP_ALPHA = 0.018
         /** How far above the running mean a window must sit to count as a beat. */
         /**
-         * Band AGC: how fast a band's reference peak falls when nothing louder arrives. PER CALL,
-         * and updateBands runs once per PCM block — roughly 100 times a second.
+         * Band AGC: how fast a band's reference peak falls when nothing louder arrives. PER
+         * WINDOW — [updateBands] runs its state machine ~30 times a second, not per PCM block.
          *
          * This has now been wrong in BOTH directions, which is worth recording because the two
          * failures look nothing alike on screen. At 0.985 the reference fell by 0.22 every second,
@@ -1197,35 +1445,46 @@ class AudioStreamServer(
          * normalising against that peak: the log then showed bass living at 0.10–0.30 and the orbs
          * barely grew at all.
          *
-         * 0.9995 is ~0.95 per second — the reference tracks the last few seconds of music, which is
-         * the timescale a listener judges "loud" against.
+         * 0.9997 per window is ~0.99 per second — the reference tracks the last few seconds of
+         * music, which is the timescale a listener judges "loud" against.
+         *
+         * RAISED from 0.9995 when the state machine moved from per-block to per-window. Per block
+         * that figure was ~0.95/sec; kept as-is at a third of the call rate it would have become
+         * ~0.98/sec, a different filter. 0.9997 preserves the behaviour the old value was tuned to.
          */
-        private const val BAND_PEAK_DECAY = 0.9995
+        private const val BAND_PEAK_DECAY = 0.9997
         /** Floor for the reference peak, so silence normalises to 0 instead of dividing by ~0. */
         private const val BAND_PEAK_FLOOR = 1e-4
 
         /**
-         * Shaping exponent, just under 1.
+         * Noise gate on the swell, PER BAND. Ordered [bass, vocal, treble].
          *
-         * 1.5 was chosen to fight the pinned-at-1.0 symptom, but it EXPANDS the top of the range by
-         * crushing the bottom — and once the AGC bug above was fixed, the bottom was where the music
-         * actually lived. A measured 0.34 came out as 0.20, so the curve was removing most of the
-         * movement the filter bank had just found. Slightly below 1 lifts the quiet end instead,
-         * which is the correction that was wanted all along; the AGC and the noise gate handle range.
+         * Room tone and codec noise otherwise keep a band a few percent off zero forever, which
+         * reads as a track that has stopped still glowing. Per band because the floors are not the
+         * same: bass carries the most rumble and needs the highest gate, treble the least.
+         *
+         * This replaces a single shared 0.06 floor that was applied as a SECOND expansion stage,
+         * after the vocal presence term rather than on the swell. See the note in [updateBands]:
+         * two expansions in series compress the range between them, which is the opposite of what
+         * a gate is for.
+         *
+         * There is no shaping exponent any more either. `Math.pow(norm, 0.9)` used to follow this,
+         * and a gamma below 1 lifts small values proportionally more than large ones — it shrinks
+         * the distance between a soft hit and a hard one, which is the distance the baseline swell
+         * exists to measure. Gamma 1, i.e. no curve, is what the orbs are tuned against now.
          */
-        private const val BAND_CURVE = 0.9
-
-        /**
-         * Fraction of the reference peak treated as silence. Room tone and codec noise otherwise
-         * keep a band a few percent off zero forever, which the expansion curve then lifts back into
-         * visible glow on a track that has stopped.
-         */
-        private const val BAND_NOISE_FLOOR = 0.06
+        private val BAND_GATE = doubleArrayOf(0.06, 0.05, 0.04)
 
         /** Index of the vocal band -- the one that also gets an absolute presence term. */
         private const val BAND_VOCAL = 1
 
-        /** Baseline EMA coefficient, ~1.5s at the ~30/sec emission rate. */
+        /**
+         * Baseline EMA coefficient, ~1.5s at the ~30/sec window rate.
+         *
+         * The value is unchanged; what changed is that it is finally applied at the rate this
+         * comment always claimed. Run per PCM block it settled in ~0.5s, fast enough to chase the
+         * music it is the reference for, which is most of why the orbs stopped thumping.
+         */
         private const val BAND_BASE_FOLLOW = 0.02
 
         /** Keeps the baseline off zero so silence cannot divide its way to a full-scale swell. */
@@ -1234,17 +1493,108 @@ class AudioStreamServer(
         /**
          * How far above its own average a band has to rise to read as full scale.
          *
-         * Generous on purpose. At ~0.65 every ordinary hit reaches the top and clips flat, which
-         * is the pinned look this whole scheme exists to avoid; a bit over 1.0 puts normal hits in
-         * the middle of the range and leaves the top for the genuinely big ones.
+         * LOWERED from 1.15/0.85/0.62, which is what pinned bass to 0.13-0.36 and never let it out
+         * of the bottom third of its range. Those were chosen to stop hits clipping flat, before it
+         * was measured that an ordinary kick only rises ~0.35 above its own baseline — so they were
+         * roughly three times too generous for real material and clipping was never the risk.
+         *
+         * These are the sensitivity dials now that the ceiling is fixed again. LOWER = more
+         * sensitive. If a band pins at 1.00 through whole windows, raise its number; if it never
+         * reaches the top on a real hit, lower it.
          */
-        private const val BAND_EXCESS_MAX = 1.1
+        private val BAND_EXCESS_MAX = doubleArrayOf(0.45, 0.40, 0.35)
 
-        /** How much of the vocal band's absolute presence counts, before swell is added on top. */
-        private const val BAND_PRESENCE_WEIGHT = 0.40
 
-        /** How loud centre content has to be, against the band's own peak, before it counts at all. */
-        private const val BAND_PRESENCE_GATE = 0.55
+
+        /**
+         * How fast the ceiling adapts, per window. Slow on the way up, slower on the way down.
+         *
+         * Attack is ~0.5s: fast enough to find a new track's level within a bar or two, slow enough
+         * that a single transient cannot redefine full scale — which is exactly what went wrong
+         * when the ceiling took the instantaneous maximum. Release is gentler still, because a
+         * ceiling that drops through a quiet passage makes the next soft note read as a hit.
+         */
+        /**
+         * Per-beat peak hold, ~0.5s. Long enough to span the gap between beats down to ~120 BPM so
+         * the hold does not collapse between them, short enough that it follows a change of section
+         * rather than a whole track.
+         */
+        /**
+         * Time for the orb spring's first peak, in ms — pi / (omega * sqrt(1 - zeta^2)) for
+         * DynamicBackground's ORB_STIFFNESS 900 / ORB_DAMPING 36 (omega 30, zeta 0.6).
+         *
+         * Duplicated from the view deliberately rather than plumbed through: it is a property of
+         * the visual, the audio path cannot ask for it, and a wrong value here shows up as the
+         * orbs being early or late rather than as anything breaking. If the spring is ever
+         * retuned, this has to move with it — that is the cost of the duplication and it is
+         * written here so the next person finds it.
+         */
+        private const val ORB_SPRING_PEAK_MS = 131L
+
+
+
+        /**
+         * How much of the vocal band's absolute presence counts, before swell is added on top.
+         *
+         * **This was 0.40, and at 0.40 the presence term could not do anything.** The vocal level is
+         * `max(swell, gated * WEIGHT)`, and `swell` reaches a full 1.0 on any hit — so a term capped
+         * at 0.40 loses that comparison every single time the music has a beat, which is always. The
+         * vocal orb was therefore driven by swell alone: it tracked the rhythm and stayed dark
+         * through held notes, which is the opposite of what an orb watching the singer is for.
+         *
+         * At 0.9 a strong, sustained centre vocal could carry the orb on its own — and on dense
+         * material it did nothing else. THE WEIGHT IS A FLOOR: the output is
+         * `max(swell, presence * weight)` and presence is ~1 whenever the band is near its own
+         * recent peak, which on rock is continuously. Measured: vocal ran 0.94-1.00 and 0.69-1.00
+         * window after window, pinned by its own presence term rather than by the music. Exactly
+         * the failure bass had at 0.80, in the band where it is hardest to notice because a vocal
+         * orb being lit looks plausible.
+         *
+         * 0.55 still carries a held note over the gate on its own and leaves the top half of the
+         * range to the swell. Treble comes down with it for the same reason — distorted guitar is
+         * as continuous as a voice.
+         *
+         * NOW APPLIED TO EVERY BAND, not just the vocal, because pure swell has a failure that only
+         * shows on loud music: it measures a rise above the band's OWN 1.5s baseline, and during a
+         * sustained loud section the baseline catches up. `raw / base - 1` then falls back toward
+         * zero while the music is at its biggest, so the orbs were SMALLEST exactly when the track
+         * was densest -- reported as "they shrink with a lot of audio", and correct arithmetic doing
+         * precisely the wrong thing.
+         *
+         * The presence term is the absolute half of the answer: it is the band against its own
+         * recent PEAK, which does not run away during a loud passage, so a dense section keeps the
+         * orbs open while the swell still supplies the punch on top.
+         *
+         * THE WEIGHT IS A FLOOR, WHICH IS WHY BASS AND TREBLE TAKE HALF OF WHAT THE VOCAL DOES.
+         * The output is `max(swell, presence * weight)`, so during any loud passage — where
+         * presence is ~1 by definition — the weight is simply the lowest value the band can report.
+         * At 0.80 that pinned bass to 0.85-1.00 with whole windows reading a flat 1.00-1.00: the
+         * orbs stopped shrinking and started saturating, which is the same loss of dynamics from
+         * the other end. At 0.50 a loud section holds the orbs half open and leaves the upper half
+         * of the range for the swell, which is the part that carries the beat. The vocal keeps 0.90
+         * because a held note has no swell at all and the presence term is the only thing lighting
+         * it — that is the case the term was introduced for.
+         *
+         * BASS TAKES THE LEAST OF ALL, and the reason is what bass IS rather than a preference.
+         * Presence is the band against its own recent peak, and bass in most music is close to
+         * continuous — a kick pattern, a sustained sub — so it sits near its own peak nearly all the
+         * time and the weight becomes a permanent floor. Measured at 0.50: bass held a floor of
+         * 0.44-0.51 window after window while the vocal, being intermittent, dropped to 0.09-0.29.
+         * The bass orb was simply bigger than the vocal orb whatever the music did, which is the
+         * "bass is amplified, it maxes out more than the vocal orb" report. At 0.32 its floor sits
+         * below the vocal's typical level, so the two are comparable again and bass gets its size
+         * from the beat rather than from being bass.
+         */
+        private val BAND_PRESENCE_WEIGHT = doubleArrayOf(0.32, 0.55, 0.32)
+
+        /**
+         * How loud centre content has to be, against the band's own peak, before it counts at all.
+         *
+         * 0.55 asked the voice to reach 55% of its own recent peak before the orb registered
+         * anything, which most of a sung phrase never does — only the belted notes cleared it. The
+         * gate is meant to reject room tone and bleed, not ordinary singing.
+         */
+        private const val BAND_PRESENCE_GATE = 0.35
 
         /**
          * Vocal band-pass corners.
@@ -1256,25 +1606,49 @@ class AudioStreamServer(
         private const val VOCAL_LOW_HZ = 500.0
         private const val VOCAL_HIGH_HZ = 3400.0
         private const val BAND_LOG_INTERVAL_MS = 2000L
+        private const val DELAY_LOG_INTERVAL_MS = 5000L
         private const val BAND_EMIT_INTERVAL_MS = 33L
 
-        /** Envelope follower, per call at ~100 calls/sec. Fast attack, slow release. */
-        private const val BAND_ATTACK = 0.42f
-        private const val BAND_RELEASE = 0.11f
-
-        // ── Cross-band levelling ────────────────────────────────────────────────────────────────
-        /** Averaging speed, ~30/sec. Deliberately tens of seconds: it must not track the music. */
-        private const val BAND_AVG_FOLLOW = 0.0015f
-
-        /** The long-run level every band is nudged toward. */
-        private const val BAND_AVG_TARGET = 0.28f
-
-        /** Stops a silent band dividing its way to a huge gain. */
-        private const val BAND_AVG_FLOOR = 0.05f
-
-        /** Correction limits. Wide enough to close a 2x mismatch, tight enough to keep silence dark. */
-        private const val BAND_GAIN_MIN = 0.6f
-        private const val BAND_GAIN_MAX = 1.8f
+        /**
+         * Envelope follower, PER WINDOW at ~30/sec. Fast attack, slow release.
+         *
+         * A THUMP IS AN EDGE. Attack was 0.42, a rise time constant of ~79ms and ~130ms to reach
+         * 90% — against a kick drum whose audible transient is 20-50ms. The visual therefore rose
+         * about three times slower than the sound that caused it, and a slow rise does not read as
+         * a hit at all; it reads as a glow swelling, which is exactly the report. At 0.85 the level
+         * is essentially at the target within two windows, so what reaches the spring is a step,
+         * and the spring's own under-damped overshoot becomes the flare rather than being spent
+         * smoothing an input that was already smooth.
+         *
+         * Release matters as much and in the opposite direction. At 0.11 the decay constant is
+         * ~300ms, so at 120 BPM — a 500ms beat period — the level never returned near zero between
+         * hits and every band sat in a permanent mid-range haze. Measured: bass spent a whole
+         * playback sitting between 0.32 and 0.73 and rarely left it. 0.20 is ~165ms, which clears
+         * comfortably between beats while still trailing the hit rather than snapping off with it.
+         *
+         * Both are still slower than the smoothing downstream, so nothing here is a step function
+         * by the time it reaches a pixel.
+         *
+         * PUSHED FURTHER, TOWARD A METER AND AWAY FROM AN ENVELOPE. 0.85/0.20 still integrated
+         * visibly: a run of loud windows piled up faster than the release could drain, so a dense
+         * passage read as one long swell rather than as separate hits — "it adds up". Attack 0.92 is
+         * within a single window of the target, and release 0.38 is a ~75ms decay, short enough that
+         * consecutive beats stay separated instead of merging. The reference here is a live spectrum
+         * meter, the kind on a car stereo, and a meter integrates almost nothing on purpose: it
+         * shows the signal now, not a smoothed history of it.
+         *
+         * THE RELEASE THEN WENT TOO FAR THE OTHER WAY. At 0.38 (~75ms) the fall was as quick as the
+         * rise, and an envelope that is symmetric is not a thump — it is a flicker. What a hit
+         * should look like is fast start, smooth end: the attack carries the impact and the decay
+         * carries the weight, which is also how the sound itself behaves.
+         *
+         * 0.22 is a ~135ms decay. It is still well inside a beat period at any normal tempo, so
+         * consecutive hits stay separate and nothing piles up, but the orb now falls away from a
+         * hit instead of snapping off it. Attack and release are deliberately far apart — that
+         * ratio IS the shape, and moving them together loses it in one direction or the other.
+         */
+        private const val BAND_ATTACK = 0.92f
+        private const val BAND_RELEASE = 0.22f
 
         // ── Onset detection ─────────────────────────────────────────────────────────────────────
         //

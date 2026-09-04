@@ -195,21 +195,86 @@ data class AppSettings(
      * sensible default. Uses MusicBrainz + the Cover Art Archive — see CoverArtFinder for why those.
      */
     val artworkLookup: Boolean = false,
+    /** Identify the track by fingerprinting the audio when the sender names none. Off by default:
+     *  it sends a fingerprint of what is playing to Shazam, which is the user's call, not ours. */
+    val identifyTracks: Boolean = false,
+    /** Seconds between re-identifications while nameless audio plays. See [IDENTIFY_INTERVAL_CHOICES]. */
+    val identifyIntervalSec: Int = DEFAULT_IDENTIFY_INTERVAL_SEC,
 
     /** What to do when a stream ends. */
     val streamEndAction: StreamEndAction = StreamEndAction.STAY_IN_APP,
 
-    /** Beat Pulse strength: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane. */
+    /**
+     * Beat Pulse for the PROJECTOR orbs: 0 = Calm, 1 = Normal, 2 = Strong, 3 = Insane.
+     *
+     * Separate from [fieldPulse] because the two backdrops answer to the same music through
+     * different geometry — three bounded orbs on black against four screen-sized blobs blended over
+     * each other — so a value that looks right on one is wrong on the other. A single dial could
+     * only ever suit whichever backdrop it was last tuned against.
+     */
     val beatPulse: Int = 0,
 
+    /** Beat Pulse for the DYNAMIC blob field. Same scale, its own value — see [beatPulse]. */
+    val fieldPulse: Int = 0,
+
     /**
-     * Extra delay applied to the beat animation only, on top of [audioDelayMs], in milliseconds.
+     * Serve more than one sender at a time, showing each on its own tile.
      *
-     * A Bluetooth speaker adds its own output latency that the AudioTrack timestamp cannot see, so
-     * the sound the user hears lags the sound we measured. Trimming [audioDelayMs] to compensate
-     * would desync the audio itself; this shifts the visuals alone.
+     * Off by default, and deliberately so. At capacity 1 the receiver behaves exactly as it always
+     * has — one sender served, everyone else refused immediately — so turning this on is the only
+     * way to reach the multi-session paths. The ceiling is the hardware's concurrent H.264 decoder
+     * count, not this flag; see `DecoderCapacity` and `docs/MULTI_SCREEN.md`.
      */
-    val beatDelayMs: Int = 0,
+    val multiScreen: Boolean = false,
+
+    /**
+     * Offer the rolling `dev` prerelease instead of the last tagged release.
+     *
+     * Off by default. The dev channel is republished on every push to `main`, is compared by commit
+     * rather than version, and is exactly as finished as `main` happens to be at that moment.
+     */
+    val betaUpdates: Boolean = false,
+
+    /**
+     * Check for a new build in the background, at most once every few hours.
+     *
+     * CHECKS ONLY. It never downloads and never installs — a sideloaded receiver silently replacing
+     * itself on someone's television is not a thing this app does. The result is a line in Settings,
+     * not a dialog that interrupts a stream.
+     */
+    val autoUpdateCheck: Boolean = true,
+
+    /** When the last automatic check ran, so it does not repeat on every launch. */
+    val lastUpdateCheckAtMs: Long = 0L,
+
+    /** Tag of an update the background check found and the user has not acted on. Blank if none. */
+    val pendingUpdateTag: String = "",
+
+    /**
+     * How fast the projector orbs drift around each other: 0 = Slow, 1 = Normal, 2 = Fast.
+     *
+     * Separate from [beatPulse], which is how hard they react to the music. One is the tempo of the
+     * composition and the other is its amplitude, and wanting big lazy orbs (or small frantic ones)
+     * is a perfectly ordinary preference that a single dial cannot express.
+     */
+    val orbSpeed: Int = 1,
+
+    /**
+     * Name of the output currently playing, or blank before the first detection.
+     *
+     * Runtime state in a persisted store, which is a fair objection — but Settings has to be able to
+     * say that a Bluetooth speaker is being compensated for, and routing it through the settings
+     * flow means the row updates itself when a speaker connects with the screen already open.
+     */
+    val currentAudioRoute: String = "",
+
+    /**
+     * Milliseconds of visual delay the app is applying automatically for the current output.
+     *
+     * Reported so Settings can say so; not settable, and not what the user's Audio delay dial holds.
+     * Zero on every route except Bluetooth.
+     */
+    val currentRouteCompensationMs: Int = 0,
 
     // ─── First run ─────────────────────────────────────────────────────────
     /** False until the user has been through (or skipped) the onboarding flow. */
@@ -266,6 +331,28 @@ data class AppSettings(
     companion object {
         /** The default settings instance used on first launch. */
         val DEFAULT = AppSettings()
+
+        /**
+         * How often the fingerprinter re-checks what is playing.
+         *
+         * 12 is "continuously": one capture is twelve seconds, so at that setting the next one
+         * starts as the last finishes. It is offered because a stream that changes song often is
+         * otherwise wrong for up to a minute -- but it is five lookups a minute at an endpoint with
+         * no contract, which is the fastest way to get a client refused, so it is not the default.
+         */
+        val IDENTIFY_INTERVAL_CHOICES = listOf(12, 15, 30, 60)
+
+        const val DEFAULT_IDENTIFY_INTERVAL_SEC = 30
+
+        /**
+         * The floor used while the device is in power-save mode.
+         *
+         * Fingerprinting is a burst of FFTs plus a network round trip; doing it every twelve or
+         * fifteen seconds is exactly the kind of background work power-save exists to stop. The
+         * setting is not overwritten -- it is only clamped while saving -- so turning power-save off
+         * restores whatever was chosen.
+         */
+        const val LOW_POWER_IDENTIFY_INTERVAL_SEC = 30
 
         /** Default AudioTrack buffer, in ms — see [audioBufferMs]. */
         const val DEFAULT_AUDIO_BUFFER_MS = 100

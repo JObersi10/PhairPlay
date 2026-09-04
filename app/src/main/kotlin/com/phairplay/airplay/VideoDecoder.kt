@@ -28,10 +28,29 @@ import com.phairplay.util.Logger
  *   decoder.decodeNalUnit(nalUnitBytes)                    // call for each video chunk
  *   decoder.release()                                       // call when done
  */
-class VideoDecoder(private val outputSurface: Surface) {
+class VideoDecoder(
+    private val outputSurface: Surface,
+    /**
+     * Reports the decoded size to whoever owns this decoder's tile. StreamStats is still written
+     * for the debug HUD, but it is global and therefore useless for per-tile aspect fit.
+     */
+    private val onOutputSize: ((width: Int, height: Int) -> Unit)? = null,
+) {
 
     // The underlying hardware decoder — null until initialize() is called
     private var mediaCodec: MediaCodec? = null
+
+    /**
+     * Frames this decoder refused, ever.
+     *
+     * Counted rather than only logged because a rejected frame breaks the reference chain exactly
+     * as a dropped one does — the caller has to know, so it can wait for the next IDR instead of
+     * feeding predicted frames onto a reference that was never accepted. Without this, a stream
+     * reporting `dropped=0` could still be visibly smearing and nothing said why.
+     */
+    @Volatile
+    var decodeErrorCount: Int = 0
+        private set
 
     // Track whether the decoder has been initialized (to prevent double-init)
     @Volatile
@@ -183,9 +202,11 @@ class VideoDecoder(private val outputSurface: Surface) {
         } catch (e: IllegalStateException) {
             // MediaCodec is now in the error state and cannot recover — flag for recreation.
             Logger.e("VideoDecoder entered error state — will recreate", e)
+            decodeErrorCount++
             isHealthy = false
         } catch (e: Exception) {
             Logger.e("Error decoding NAL unit", e)
+            decodeErrorCount++
         }
     }
 
@@ -240,6 +261,7 @@ class VideoDecoder(private val outputSurface: Surface) {
             StreamStats.videoPadWidth = padW
             StreamStats.videoPadHeight = padH
             Logger.i("Video output size ${w}x$h (buffer ${padW}x$padH)")
+            runCatching { onOutputSize?.invoke(w, h) }
         }
     }
 

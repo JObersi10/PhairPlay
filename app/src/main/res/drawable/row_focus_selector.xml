@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    row_focus_selector.xml — background for a settings row or a shortcut.
+
+    An unfocused row keeps a faint surface so it does not read as unfinished, but only the focused
+    row gets a real one. In a list of thirty, giving every row a full card means the focused one has
+    to compete with twenty-nine others for attention.
+
+    Focus is signalled three ways on purpose, because a TV may be viewed in a bright room, at an
+    angle, or by someone who cannot easily separate blue from grey:
+      1. the surface brightens and warms toward the accent,
+      2. an accent ring is drawn around it,
+      3. the row lifts (elevation, from FocusMotion).
+    Colour alone is never the only cue.
+-->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <item android:state_focused="true">
+        <layer-list>
+            <item>
+                <shape android:shape="rectangle">
+                    <gradient
+                        android:type="linear"
+                        android:angle="270"
+                        android:startColor="@color/surface_focused_top"
+                        android:endColor="@color/surface_focused_bottom" />
+                    <corners android:radius="@dimen/row_corner_radius" />
+                </shape>
+            </item>
+            <item android:inset="@dimen/focus_ring_inset">
+                <shape android:shape="rectangle">
+                    <stroke android:width="@dimen/focus_ring_width" android:color="@color/accent" />
+                    <corners android:radius="@dimen/row_corner_radius" />
+                    <solid android:color="@android:color/transparent" />
+                </shape>
+            </item>
+        </layer-list>
+    </item>
+
+    <item android:state_pressed="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/row_pressed" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+    <!-- Selected but focus has moved to the other column: keeps the user's place visible. -->
+    <item android:state_selected="true">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/accent_dim" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/row_resting" />
+            <corners android:radius="@dimen/row_corner_radius" />
+        </shape>
+    </item>
+
+</selector>

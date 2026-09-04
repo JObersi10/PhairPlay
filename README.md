@@ -1,378 +1,157 @@
-# PhairPlay
+<p align="center">
+  <img src="images/banner.svg" alt="PhairPlay" width="100%">
+</p>
 
-> Based on [PhairPlay by mazer666](https://github.com/mazer666/PhairPlay) — all credit for the original AirPlay receiver goes to them. This fork adds synced lyrics, a progress bar, diagnostic server, and UI improvements.
+<p align="center">
+  <a href="https://github.com/JObersi10/PhairPlay/releases/latest"><img alt="Download APK" src="https://img.shields.io/badge/download-latest%20APK-4C9AFF?style=flat-square"></a>
+  <a href="https://github.com/JObersi10/PhairPlay/releases"><img alt="All releases" src="https://img.shields.io/github/v/release/JObersi10/PhairPlay?style=flat-square&color=5AC8FA"></a>
+  <img alt="Status" src="https://img.shields.io/badge/status-active-30D158?style=flat-square">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Fire%20TV%20%C2%B7%20Android%20TV%20%C2%B7%20Google%20TV-7C6CFF?style=flat-square">
+  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-8A93A6?style=flat-square"></a>
+</p>
 
-PhairPlay is a free, open-source, ad-free AirPlay 2 receiver for Android TV and Fire TV. It lets your macOS or iOS/iPadOS device mirror its screen and audio directly to your TV — no Apple TV required.
-
-```
- macOS (Monterey+)            Android TV / Fire TV
- iOS / iPadOS (16+)           ┌──────────────────────┐
- ┌────────────────┐  AirPlay  │                      │
- │  [Your Screen] │ ────────► │  [Your TV Screen]    │
- │                │           │                      │
- └────────────────┘           └──────────────────────┘
-      Click AirPlay →              PhairPlay
-      Select your TV →             (this app)
-      Done. ✓
-```
-
----
-
-## Permissions (read this first)
-
-PhairPlay streams fine with no extra permissions. A few optional ones unlock behaviour people ask
-about constantly, so they are up here rather than buried.
-
-### ADB debugging is only needed for setup
-
-Turn it on to grant the permissions below and to sideload, then it can go back off. It is **not**
-used at runtime.
-
-<details>
-<summary>Why the app does not drive the remote through adb (tested, does not work)</summary>
-
-`adb shell input keyevent` reaches the real input pipeline, which is exactly what the HomeKit remote
-needs to move focus in apps that manage focus themselves. PhairPlay contains a full adb client that
-connects to the device's own daemon on `127.0.0.1:5555` to do this.
-
-**Fire OS refuses it.** adbd accepts the TCP connection and then closes it before the handshake
-begins — the app never gets to send a byte, let alone offer a key, so no "Allow debugging?" prompt
-ever appears. That is an adbd/SELinux policy decision about local app connections, and no amount of
-protocol work gets around it. The client is left in place because it costs nothing (one refused
-socket per process, then it stops trying) and it would work on a device that permits it.
-
-What remains is the accessibility service, which moves focus by asking nodes to focus themselves.
-That works in apps that expose a focus graph and does nothing in apps that draw their own UI.
-
-</details>
-
-### The one command
-
-On Fire TV, **accessibility cannot be enabled from the on-device Settings menu** — Fire OS does not
-list third-party accessibility services there. adb is the only route. This grants both permissions:
-
-```bash
-adb shell settings put secure enabled_accessibility_services com.phairplay.firetv/com.phairplay.service.PhairPlayAccessibilityService && adb shell settings put secure accessibility_enabled 1 && adb shell dpm set-active-admin com.phairplay.firetv/com.phairplay.service.PhairPlayDeviceAdmin
-```
-
-Connect adb first: enable **Settings → My Fire TV → Developer Options → ADB Debugging**, find the IP
-under **Settings → My Fire TV → About → Network**, then:
-
-```bash
-adb connect 192.168.1.50:5555
-```
-
-> **Device admin blocks uninstall.** While it is granted, `adb uninstall` fails with
-> `DELETE_FAILED_DEVICE_POLICY_MANAGER`, and `dpm remove-active-admin` will NOT undo it — that only
-> accepts test-only admins. Use **Settings → Permissions → Turn the display off → Revoke** in the
-> app. Note you rarely need to uninstall anyway: `adb install -r` replaces in place.
-
-### What each one buys
-
-| Permission | Without it | With it |
-|---|---|---|
-| **Accessibility** | The HomeKit/iPhone remote only works while PhairPlay is on screen | Back and Home work system-wide |
-| **Device admin** | HomeKit "off" ends the session but leaves the TV awake | HomeKit "off" blanks the display |
-
-> **Fire TV caveat on the remote:** even with accessibility granted, **arrow keys will not navigate
-> other apps on Fire TV.** `GLOBAL_ACTION_DPAD_*` requires Android 13 (API 33) and Fire OS is built
-> on Android 9/11. Below that, the only tool is accessibility node manipulation, which apps drawing
-> custom focus (Netflix, the Fire TV launcher) ignore. Back and Home use `GLOBAL_ACTION_BACK`/`HOME`,
-> which have existed since API 16, so those do work. Injecting real D-pad events needs
-> `INJECT_EVENTS`, a signature-level permission no sideloaded app can hold.
-
-### Turning them off
-
-Accessibility:
-
-```bash
-adb shell settings put secure enabled_accessibility_services ""
-```
-
-Device admin: **Settings → Permissions → Turn the display off → Revoke** in the app.
-
----
-
-## What works, what doesn't
-
-### ✅ Works
-
-| Feature | Notes |
-|---|---|
-| **Screen mirroring** (iPhone, iPad, Mac) | H.264 over AirPlay 2. A/V sync ~100 ms. |
-| **AirPlay audio** from iOS / iPadOS | ALAC realtime + AirPlay 2 buffered. |
-| **FairPlay v3** | Key decryption via `libplayfair`. This is the mirroring path. |
-| **HomeKit** pairing and control | Non-transient pairing: SRP, Curve25519, ChaCha20-Poly1305. Power, volume, mute, inputs, remote keys. |
-| **HomeKit inputs → app shortcuts** | Map inputs to any installed app and switch from the Home app. |
-| **Now Playing** | Metadata, artwork, synced lyrics, progress bar. |
-| **DACP + MediaRemote** reverse remote | Transport control back to the sender. |
-| **DLNA / UPnP** MediaRenderer | Including GENA eventing. |
-| **RSA (`rsaaeskey`) audio** | The legacy ANNOUNCE/SDP path. |
-| **mDNS service publication** | `_airplay._tcp` and `_raop._tcp`. |
-| **RTCP sender reports** | Sender-clock skew and loss, reported as diagnostics. |
-
-### 🚧 Working on it
-
-| Feature | State |
-|---|---|
-| **Miracast** | Google TV only, and RTSP control plane only — MPEG-TS decode is not done. Compiled out of Fire TV builds. |
-| **PTP** | Now listening on 319/320 and feeding `PtpClock`. Runs alongside NTP, which stays the fallback. Not yet validated against a real grandmaster. |
-| **Multi-room / output latency compensation** | `MultiRoomGroup` exists; not validated against a second receiver. |
-| **`AudioPlayer` (legacy RAOP)** | Has no jitter buffer, unlike the AirPlay 2 path. |
-| **Settings screen** | Outgrown a hand-written layout; being moved to a recycling list. |
-
-### ❌ Doesn't work
-
-| Feature | Why |
-|---|---|
-| **macOS Music.app audio (FairPlay v2)** | **Not fixable.** See below. |
-| **Opus** | Not implemented. ALAC, AAC-LC, AAC-ELD and PCM are. |
-| **HomeKit transient pairing** (bit 48) | Not implemented; only non-transient. A controller that asks for it is now logged, so it is at least visible whether anything wants it. |
-| **RFC 2198 RTP redundancy** | Duplicate suppression for macOS's `redundantAudio` exists, but true RED payload parsing does not. |
-| **HDMI-CEC volume** | `HdmiControlManager` is `@SystemApi` — unavailable to normal apps. |
-| **System-wide key injection without accessibility** | `INJECT_EVENTS` is signature-level. |
-
----
-
-### Why macOS Music.app doesn't work
-
-Streaming from **Music.app on a Mac** connects, shows metadata, and responds to transport
-controls — but the audio itself is garbage. This is a hard wall, not a bug awaiting a fix.
-
-Music.app negotiates FairPlay **v2** and requests modes **0** and **1**. FairPlay v2 phase 1 answers
-each mode with a different 142-byte constant, and only the **mode 2** table has ever been published.
-PhairPlay answers every mode with it, so the handshake completes and the sender hands over a wrapped
-key that unwraps to a plausible-looking 16 bytes that is simply wrong — hence ~5 of 24 ALAC frames
-decoding before the stream is muted.
-
-The missing tables are not recoverable from source:
-
-- **shairport-sync** carries four tables, but they are FairPlay **v3** — byte-for-byte identical to
-  the four PhairPlay already has. It rejects v2 outright.
-- **joerg-krause/shairplay @ fairplay_v2** does exactly what PhairPlay does: one mode-2 capture with
-  the mode byte patched.
-- **Requiem** and similar tools decrypt FairPlay-protected *files* using `CoreFP`. That is
-  file-at-rest DRM, unrelated to the `/fp-setup` streaming handshake.
-
-The obvious workaround also fails. Advertising `et=0,1` (RSA only) to push Music.app onto the RSA
-path — which PhairPlay implements correctly — does not make it fall back; it reads the receiver as
-unusable and hangs up after `OPTIONS`, before `ANNOUNCE`. Advertising FairPlay is also what screen
-mirroring depends on, so dropping it would trade a working feature for a broken one.
-
-Recovering v2 modes 0/1/3 requires capturing them from real Apple hardware. They will not be
-invented here.
-
-**Everything else on a Mac works** — mirroring, and system-audio AirPlay from Control Center. It is
-specifically Music.app's own AirPlay output that is affected.
-
----
-
-## Current Status — v1.0.0-beta.1
-
-PhairPlay is available as a signed beta release. Download the APK directly from the [GitHub Releases page](https://github.com/JObersi10/PhairPlay/releases). CI publishes a rolling `latest-debug` release with both flavour APKs on every push to `main`.
-
-Implemented end-to-end: mDNS advertising, RTSP handshake, HomeKit-style pairing, FairPlay v3 key decryption, H.264 mirroring, AAC-ELD/AAC-LC/ALAC audio, NTP A/V sync, and DACP reverse remote. Real-device validation with macOS and iOS senders is the current focus.
-
-DLNA/UPnP MediaRenderer works, including GENA eventing. Google Cast has been **removed** — see below.
-
-Miracast is now **Google TV only**. It advertises and implements its RTSP control plane there, but
-MPEG-TS media decode is still not done. It is compiled out of Fire TV builds entirely: Fire OS keeps
-Wi-Fi Direct behind Amazon's own display stack, so a sender would find the receiver and then time
-out — and offering it cost a runtime location prompt on Android 12 and below for a feature that was
-never going to connect.
+Turn a Fire TV, Android TV or Google TV into an AirPlay 2 receiver. Mirror an iPhone, iPad or Mac to
+the television, or send it music and get a full-screen Now Playing display driven by the audio
+itself. Free, open source, no ads, no account.
 
 ## Features
 
-### AirPlay 2 (fully implemented)
-- Screen mirroring from macOS 12+ and iOS/iPadOS 16+ — H.264 hardware decode
-- FairPlay session decryption (fp-setup v2/v3 + legacy rsaaeskey) via native libplayfair
-- HomeKit-style pairing (Ed25519/X25519) and legacy SRP PIN pairing
-- Mirroring audio: AAC-ELD, AAC-LC, ALAC — with independent A/V start/stop
-- System audio streaming (ALAC, unencrypted) — reliable path for app audio
-- AirPlay video URL mode (`/play` content) + transport controls (play/pause/scrub) — the TV fetches
-  and plays the stream itself, so AirPlaying from YouTube or Safari arrives at source quality
-  instead of as a re-encode of the phone's screen
-- Now-playing metadata (DMAP) with album artwork overlay
-- DACP reverse remote — TV remote controls the sender's playback
-- NTP timing and UDP audio retransmit (packet-loss recovery)
-- AirPlay photo receiver — JPEG/PNG from iOS Photos app displayed full-screen
-- Access-control lockout after repeated failed pairing attempts
+**Screen mirroring** from iPhone, iPad and macOS, with hardware H.264 decoding.
 
-### App & Platform
-- Android TV / Fire TV app shell with foreground service and status UI
-- Mirror audio toggle and PIN-auth toggle in Settings
-- Works on Google TV (Android 10+) and Fire TV (Android 7+)
-- DLNA/UPnP MediaRenderer (AVTransport, RenderingControl, ConnectionManager) with GENA eventing
-- Miracast Wi-Fi Direct / WFD advertisement and RTSP control-plane (Google TV builds only)
-- Zero ads, zero analytics, zero internet required
-- Open source — Apache 2.0 license
+**AirPlay video** — YouTube, Safari and similar apps hand over the stream itself rather than a
+mirror of the screen, so playback runs at full quality without the phone re-encoding anything.
 
-## What PhairPlay Does NOT Do
+**AirPlay audio**, with a Now Playing screen built around the music: artwork, title, artist, a
+progress bar taken from the audio clock rather than wall time, and a backdrop that moves with what
+is playing. Projector mode replaces it with three orbs, one each for bass, voice and treble.
 
-- **FairPlay DRM content** (Netflix, Disney+, Apple TV+) — Apple DRM; not decryptable by any open-source receiver
-- **macOS Music app audio (FairPlay v2)** — the Music app FairPlay-encrypts everything it sends over
-  AirPlay, including local library files, and our FairPlay **v2** key derivation produces a stream key
-  that does not decrypt: every ALAC frame fails and the decode-health guard mutes the output rather
-  than emitting static. This is *not* an Apple Music DRM limitation — a local file fails identically.
-  The FairPlay **v3** path used by screen mirroring and Safari is correct. Workaround: set the Mac's
-  system audio output to the TV instead of using Music's own AirPlay picker (unencrypted ALAC, works)
-- **Buffered audio playback** (AirPlay 2 type 103) — accepted but not played back yet
-- **Cloud/remote streaming** — local network only
-- **Miracast media playback** — control plane is ready; MPEG-TS decode is not implemented
-- **Miracast on Fire TV** — compiled out; Fire OS does not expose a Wi-Fi Direct stack that can
-  complete a WFD session
-- **Google Cast** — removed, and not coming back. Port 8009 is permanently held by
-  `com.amazon.cast.sink` on Fire TV, and a receiver must answer Google's `DeviceAuthMessage` with a
-  certificate chain signed by a Google CA that cannot be obtained for an open-source project.
+**Multi-screen** — more than one sender at once, side by side. How many depends on the device, and
+PhairPlay works it out by asking the decoder rather than guessing: throughput is budgeted in pixels
+per second and each sender is charged for the resolution it actually negotiated.
 
----
+**Automatic Bluetooth A/V sync.** A Bluetooth speaker adds roughly 350 ms that Android will not
+report, so the picture and the visuals are held back to meet it. Connect a speaker and everything
+slides back; disconnect and it snaps forward. There is nothing to tune.
 
-## Requirements
+**Identifies what is playing when the sender does not say.** A browser tab or a game streams bare
+audio with no title attached, which normally leaves the screen showing nothing but the device name.
+Switch this on and PhairPlay listens for twelve seconds and asks Shazam. Off by default, and it
+sends a fingerprint rather than the audio.
 
-**On your TV:**
-- Google TV (Android 10+) or Amazon Fire TV (Android 7+)
-- Connected to the same Wi-Fi network as your Mac
-- Sideloading enabled (for Fire TV) or ADB enabled (for Google TV)
+**Control the sender from your TV remote** — play, pause, skip, and hold left or right to scrub.
 
-**On your Mac:**
-- macOS 12 (Monterey) or later
-- Connected to the same Wi-Fi network as your TV
+**DLNA / UPnP MediaRenderer** for VLC, Plex and BubbleUPnP, and **Miracast** for Android and Windows.
 
-**Network:**
-- Both devices on the same subnet (common home router setup works)
-- Multicast/mDNS must not be blocked (most home routers are fine)
-- 5 GHz Wi-Fi or Ethernet strongly recommended for best performance
+**A background service**, so the TV stays discoverable after you leave the app.
 
----
+Not supported: Google Cast — port 8009 is permanently held by Amazon's own receiver, and the
+handshake requires a Google-signed certificate that cannot be obtained. Audio from the macOS Music
+app is also unavailable; it uses FairPlay v2, whose key derivation is not publicly known.
+
+## Screenshots
+
+<p align="center">
+  <img src="images/home.png" alt="PhairPlay home screen, showing the receiver name, its status, and cards for each protocol" width="100%">
+</p>
 
 ## Installation
 
-### Option A: Download a Release APK (easiest)
+PhairPlay is sideloaded — it is not in the Amazon Appstore.
 
-Go to the [Releases page](https://github.com/JObersi10/PhairPlay/releases) and download the APK for your device:
+Download the APK for your device from
+[Releases](https://github.com/JObersi10/PhairPlay/releases/latest). There are two builds and they
+are **not** interchangeable:
 
-| APK | Device |
-|-----|--------|
-| `PhairPlay-vX.Y.Z-googletv.apk` | Google TV, Android TV (Android 10+) |
-| `PhairPlay-vX.Y.Z-firetv.apk` | Amazon Fire TV (Android 7.1+) |
+- `PhairPlay-x.y.z-firetv.apk` — Fire TV (Android 7.1 and up)
+- `PhairPlay-x.y.z-googletv.apk` — Android TV and Google TV (Android 10 and up)
 
-Then install it via ADB (see the Sideloading Guide below) or a sideloading app like *Downloader* on Fire TV.
+Install it with Downloader, Send files to TV, or over ADB:
 
-### Option B: Build from Source
+```bash
+adb connect <tv-ip>:5555
+adb install -r PhairPlay-x.y.z-firetv.apk
+```
 
-1. **Install prerequisites**
-   ```bash
-   # Install Android Studio from https://developer.android.com/studio
-   # Install JDK 17 or later
-   ```
+Then open PhairPlay, and pick the TV from Control Centre → Screen Mirroring on an iPhone or iPad, or
+from the AirPlay menu on a Mac.
 
-2. **Clone the repository**
-   ```bash
-   git clone https://github.com/JObersi10/PhairPlay.git
-   cd PhairPlay
-   ```
+Some features need permissions the installer cannot grant on your behalf — the remote's focus ring,
+turning the display off, and Miracast's location requirement. [docs/PERMISSIONS.md](docs/PERMISSIONS.md)
+explains what each one is for and what breaks without it.
 
-3. **Build the APK**
-   ```bash
-   # For Google TV:
-   ./gradlew assembleGoogletvDebug
+## Development
 
-   # For Fire TV:
-   ./gradlew assembleFiretvDebug
-   ```
-   The APK will be in `app/build/outputs/apk/`.
+Requires JDK 17 and the Android SDK.
 
-   To run the same local checks used by CI before testing on a TV:
-   ```bash
-   ./gradlew :test-runner:test
-   ./gradlew :app:lintGoogletvDebug :app:lintFiretvDebug \
-     :app:assembleGoogletvDebug :app:assembleFiretvDebug
-   ```
+```bash
+./gradlew :app:assembleFiretvDebug     # Fire TV
+./gradlew :app:assembleGoogletvDebug   # Android TV / Google TV
+```
 
-4. **Install via ADB**
-   ```bash
-   # Enable ADB on your TV first (see below)
-   adb connect <TV-IP-ADDRESS>
+Run everything CI runs before pushing:
 
-   # Google TV:
-   adb install app/build/outputs/apk/googletv/debug/app-googletv-debug.apk
+```bash
+./gradlew :test-runner:test :app:lintFiretvDebug :app:assembleFiretvDebug \
+          :app:lintGoogletvDebug :app:assembleGoogletvDebug
+```
 
-   # Fire TV:
-   adb install app/build/outputs/apk/firetv/debug/app-firetv-debug.apk
-   ```
+A running receiver serves a diagnostic dump on port 8001 and a live tail on 8002, which is usually
+faster than logcat:
 
----
+```bash
+curl -s http://<tv-ip>:8001/
+```
 
-## Sideloading Guide
+### Documentation
 
-### Google TV (e.g., Chromecast with Google TV)
+| Document | What it covers |
+| --- | --- |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the receivers, the service and the UI fit together |
+| [FEATURES.md](docs/FEATURES.md) | The current feature list in detail |
+| [SETTINGS.md](docs/SETTINGS.md) | Every setting, what it does, and when to change it |
+| [MULTI_SCREEN.md](docs/MULTI_SCREEN.md) | Multi-sender design, and the decoder limits that bound it |
+| [PROJECTOR_MODE.md](docs/PROJECTOR_MODE.md) | The band analysis and orb rendering, as a porting guide |
+| [TRACK_IDENTIFICATION.md](docs/TRACK_IDENTIFICATION.md) | Fingerprinting audio the sender never named |
+| [UPDATE_CHECKER.md](docs/UPDATE_CHECKER.md) | In-app updates — read before touching that code |
+| [PROTOCOL_RESOURCES.md](docs/PROTOCOL_RESOURCES.md) | External references, and which are known dead ends |
+| [PERMISSIONS.md](docs/PERMISSIONS.md) | What each permission is for |
+| [TESTING.md](docs/TESTING.md) | Test layout and what is covered |
+| [CONTRIBUTING.md](docs/CONTRIBUTING.md) | Conventions and how to submit changes |
 
-1. Go to **Settings → System → About → Android TV OS build** and click it 7 times to enable Developer Options.
-2. Go to **Settings → System → Developer Options** and enable **USB debugging**.
-3. Note your TV's IP address from **Settings → Network & Internet**.
-4. On your Mac/PC, run:
-   ```bash
-   adb connect <TV-IP>
-   adb install app-googletv-debug.apk
-   ```
-5. Launch PhairPlay from your app list.
+## Credits
 
-### Fire TV (Fire TV Stick, Fire TV Cube, etc.)
+PhairPlay stands on a lot of protocol reverse-engineering done by other people.
 
-1. Go to **Settings → My Fire TV → About** and click **Build** 7 times to enable Developer Options.
-2. Go to **Settings → My Fire TV → Developer Options** and enable:
-   - **ADB debugging** → ON
-   - **Apps from Unknown Sources** → ON
-3. Note your Fire TV's IP address from **Settings → My Fire TV → About → Network**.
-4. On your Mac/PC, run:
-   ```bash
-   adb connect <FireTV-IP>
-   adb install app-firetv-debug.apk
-   ```
-5. Launch PhairPlay from **Apps → Your Apps & Games**.
+- [PlayFair](https://github.com/EstebanKubata/playfair) by EstebanKubata, obtained via
+  [RPiPlay](https://github.com/FD-/RPiPlay) — the FairPlay handshake. GPL-3.0, and the reason this
+  project is GPL-3.0.
+- [Apple's ALAC decoder](https://github.com/macosforge/alac) — Apache-2.0.
+- [RPiPlay](https://github.com/FD-/RPiPlay), [UxPlay](https://github.com/FDH2/UxPlay),
+  [shairport-sync](https://github.com/mikebrady/shairport-sync) and
+  [pyatv](https://github.com/postlund/pyatv) as protocol references. No code was copied from them.
 
-## How to Use
-
-1. Launch PhairPlay on your TV. You will see the Waiting Screen with your TV's name.
-2. On your Mac, click the **AirPlay** icon in the menu bar (or go to **System Preferences → Displays → AirPlay Display**).
-3. Select your TV from the list (it should appear as your TV's name).
-4. Your Mac's screen will appear on the TV instantly.
-5. To stop: click the AirPlay icon on your Mac and select "Turn Off AirPlay Mirroring", or just quit PhairPlay on the TV.
-
----
-
-## Known Limitations
-
-- **Beta software** — the AirPlay 2 stack is complete but real-device validation with various macOS/iOS senders is ongoing. Please report issues.
-- **The macOS Music app's own AirPlay is silent.** Music FairPlay-encrypts everything it sends, local files included, and our FairPlay v2 key derivation is wrong — so the audio decodes to nothing and is muted deliberately. Route the Mac's **system audio output** to the TV instead (works fine). Not a DRM limitation; a real bug on our side.
-- **FairPlay-protected video** (Netflix, Disney+, Apple TV+) cannot be mirrored — this is Apple's DRM, not a PhairPlay limitation.
-- **Buffered audio (AirPlay 2 type 103)** is accepted but not yet played back.
-- **Miracast** — Google TV builds only, and even there the RTSP control plane works but MPEG-TS media decode is future work. Fire TV builds omit it.
-- If your router has **AP isolation** or **multicast filtering** enabled, PhairPlay may not appear in the AirPlay menu. Disable these settings on your router.
-- On very busy 2.4 GHz Wi-Fi networks, you may experience latency above 100 ms. Use 5 GHz or Ethernet for best results.
-- **PIN auth is optional.** When disabled (default), any device on the same network can mirror to the TV. Enable PIN auth in Settings if you're on a shared network.
-
-For real-device failures, run `tools/collect-device-logs.sh` before restarting the app. It captures package state, memory, CPU, and filtered PhairPlay logs into `device-test-logs/`.
-
----
-
-## Contributing
-
-Contributions are welcome! Please read [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) before submitting a pull request.
-
-Key points:
-- Follow the coding rules in CONTRIBUTING.md (file size ≤400 lines soft / ≤550 lines hard max, class comments, test coverage)
-- All PRs require passing CI (build + tests + lint)
-- Discuss major changes in a GitHub Issue first
+Full attribution, including runtime dependencies, is in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE) for details.
+GPL-3.0-or-later. See [LICENSE](LICENSE).
 
----
+The project bundles PlayFair, which is GPL-3.0, and distributes it compiled into the app — so the
+whole work is GPL-3.0. Apache-2.0 is one-way compatible into GPLv3, which is why Apple's ALAC
+decoder keeps its own licence headers inside a GPLv3 work.
 
-## Acknowledgments
+## Disclaimer
 
-- [openairplay/airplay-spec](https://github.com/openairplay/airplay-spec) — Community-maintained AirPlay protocol documentation
-- [UxPlay](https://github.com/FDH2/UxPlay) — Open-source AirPlay mirror server (reference implementation)
-- [RPiPlay](https://github.com/FD-/RPiPlay) — AirPlay mirroring for Raspberry Pi (reference implementation)
+PhairPlay is not affiliated with, endorsed by, or connected to Apple Inc. AirPlay is a trademark of
+Apple Inc. This is an independent implementation built from public documentation and open-source
+reverse-engineering work, and it neither contains nor requires any Apple software.
+
+It is a receiver only. It does not circumvent DRM, and it cannot play protected content.
+
+## About
+
+Built for a Fire TV Stick sitting under a television, which is a specific and unforgiving target: a
+modest decoder, a remote with a D-pad and no pointer, and a viewer three metres away. Most of the
+decisions in here follow from that, and the reasoning behind the surprising ones is written down in
+`docs/` rather than lost to the commit log.

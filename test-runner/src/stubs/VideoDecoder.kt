@@ -15,7 +15,7 @@ import com.phairplay.util.Logger
  * Instance methods are no-ops because no JVM test exercises the hardware-decode path.
  */
 @Suppress("UNUSED_PARAMETER")
-class VideoDecoder(outputSurface: Any?) {
+class VideoDecoder(outputSurface: Any?, onOutputSize: ((Int, Int) -> Unit)? = null) {
 
     // Matches the real VideoDecoder API used by MirrorStreamServer (self-heal flag).
     var isHealthy = true
@@ -28,6 +28,7 @@ class VideoDecoder(outputSurface: Any?) {
      */
     fun setOutputSurface(surface: Any?): Boolean = false
 
+    val decodeErrorCount: Int = 0
     fun release() {}
 
     companion object {

@@ -1,85 +1,101 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    fragment_home.xml — HomeFragment layout (Google TV Streamer style).
+    fragment_home.xml — the receiver, at rest.
 
-    Layout:
-    ┌──────────────────────────────────────────────────────────┐
-    │  "Ready for connections"           [●] Service Running   │
-    │                                                          │
-    │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
-    │  │  📺 AirPlay │ │  📡 Miracast│ │  🔵 DLNA    │       │
-    │  │  ●Running   │ │  ●Running   │ │  ●Running   │       │
-    │  │  Waiting... │ │  Waiting... │ │  Waiting... │       │
-    │  └─────────────┘ └─────────────┘ └─────────────┘       │
-    │                                                          │
-    │  ┌──────────┐  ┌──────────┐  ┌──────────┐              │
-    │  │  ▶ Start │  │  ■ Stop  │  │  ↺ Restart│             │
-    │  └──────────┘  └──────────┘  └──────────┘              │
-    └──────────────────────────────────────────────────────────┘
+    Hierarchy, top to bottom: what this app is, what to pick on your phone, whether it is listening,
+    what can reach it, and only then the controls. The device name is the anchor because it is the
+    one thing a user genuinely has to read.
+
+    The receiver field sits BEHIND the hero text rather than beside it, so the panel reads as a
+    surface that is lit from within rather than as a card with a graphic in it. Text sits on top at
+    full contrast; the field never rises above ~40% alpha in its brightest state.
+
+    Controls are not four equal buttons. The service is normally already running, so Start/Stop are
+    contextual and Restart/Settings carry the row — see HomeFragment.applyControlHierarchy.
 -->
-<ScrollView
+<androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/background_dark"
-    android:fillViewport="true">
+    android:background="@drawable/app_background"
+    android:paddingHorizontal="@dimen/screen_margin_horizontal"
+    android:paddingVertical="@dimen/screen_margin_vertical"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
-    <LinearLayout
-        android:layout_width="match_parent"
+    <TextView
+        android:id="@+id/text_page_title"
+        android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="32dp">
+        android:text="@string/app_name"
+        android:textColor="@color/text_secondary"
+        android:textSize="@dimen/text_section"
+        android:textAllCaps="true"
+        android:letterSpacing="0.18"
+        android:fontFamily="sans-serif-medium"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
 
-        <!-- ── Header row ──────────────────────────────────────────────── -->
+    <!-- ── The receiver panel ───────────────────────────────── -->
+    <FrameLayout
+        android:id="@+id/receiver_panel"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:background="@drawable/card_surface"
+        android:layout_marginTop="@dimen/space_md"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/text_page_title">
+
+        <!-- Behind the text, deliberately. Not a decoration beside it. -->
+        <com.phairplay.ui.ReceiverFieldView
+            android:id="@+id/receiver_field"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:importantForAccessibility="no" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:baselineAligned="false"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:layout_marginBottom="32dp">
+            android:orientation="vertical"
+            android:padding="@dimen/space_lg">
 
-            <LinearLayout
-                android:layout_width="0dp"
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
+                android:text="@string/home_pick_this"
+                android:textColor="@color/text_secondary"
+                android:textSize="@dimen/text_section"
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:fontFamily="sans-serif-medium" />
 
-                <TextView
-                    android:id="@+id/text_page_title"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/home_title"
-                    android:textColor="@color/text_primary"
-                    android:textSize="32sp"
-                    android:fontFamily="sans-serif-light" />
+            <TextView
+                android:id="@+id/text_device_name"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:textColor="@color/text_primary"
+                android:textSize="@dimen/text_display"
+                android:fontFamily="sans-serif-light"
+                android:letterSpacing="-0.02"
+                android:singleLine="true"
+                android:ellipsize="end" />
 
-                <TextView
-                    android:id="@+id/text_device_name"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginTop="4dp"
-                    android:textColor="@color/text_secondary"
-                    android:textSize="16sp" />
-            </LinearLayout>
-
-            <!-- Global service state badge -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:background="@drawable/focus_ring_selector"
-                android:paddingHorizontal="16dp"
-                android:paddingVertical="10dp">
+                android:layout_marginTop="@dimen/space_sm">
 
                 <View
                     android:id="@+id/dot_service_state"
-                    android:layout_width="10dp"
-                    android:layout_height="10dp"
+                    android:layout_width="9dp"
+                    android:layout_height="9dp"
                     android:background="@drawable/status_dot"
-                    android:layout_marginEnd="8dp" />
+                    android:layout_marginEnd="@dimen/space_sm" />
 
                 <TextView
                     android:id="@+id/text_service_state"
@@ -87,114 +103,120 @@
                     android:layout_height="wrap_content"
                     android:text="@string/service_state_stopped"
                     android:textColor="@color/text_secondary"
-                    android:textSize="16sp" />
+                    android:textSize="@dimen/text_body" />
             </LinearLayout>
-        </LinearLayout>
 
-        <!-- ── Section: Protocol status cards ────────────────────────── -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/section_protocols"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp"
-            android:textAllCaps="true"
-            android:letterSpacing="0.1"
-            android:layout_marginBottom="12dp" />
-
-        <LinearLayout
-            android:id="@+id/protocol_cards_row"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:baselineAligned="false"
-            android:orientation="horizontal"
-            android:layout_marginBottom="40dp">
-
-            <!-- AirPlay card -->
-            <include
-                android:id="@+id/card_airplay"
-                layout="@layout/card_protocol_status"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="12dp" />
-
-            <!-- Miracast card -->
-            <include
-                android:id="@+id/card_miracast"
-                layout="@layout/card_protocol_status"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:layout_marginEnd="12dp" />
-
-            <!-- DLNA card -->
-            <include
-                android:id="@+id/card_dlna"
-                layout="@layout/card_protocol_status"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1" />
-
-        </LinearLayout>
-
-        <!-- ── Section: Service controls ──────────────────────────────── -->
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/section_controls"
-            android:textColor="@color/text_secondary"
-            android:textSize="14sp"
-            android:textAllCaps="true"
-            android:letterSpacing="0.1"
-            android:layout_marginBottom="12dp" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:baselineAligned="false"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/btn_start"
+            <!-- Last connected. GONE until there is one, rather than showing an empty label. -->
+            <TextView
+                android:id="@+id/text_last_sender"
                 android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:layout_marginEnd="12dp"
-                android:paddingHorizontal="24dp"
-                android:text="@string/action_start"
-                android:textColor="@color/text_primary"
-                android:textSize="18sp"
-                android:background="@drawable/btn_control_selector"
-                android:focusable="true"
-                android:nextFocusRight="@id/btn_stop" />
-
-            <Button
-                android:id="@+id/btn_stop"
-                android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:layout_marginEnd="12dp"
-                android:paddingHorizontal="24dp"
-                android:text="@string/action_stop"
-                android:textColor="@color/text_primary"
-                android:textSize="18sp"
-                android:background="@drawable/btn_control_selector"
-                android:focusable="true"
-                android:nextFocusLeft="@id/btn_start"
-                android:nextFocusRight="@id/btn_restart" />
-
-            <Button
-                android:id="@+id/btn_restart"
-                android:layout_width="wrap_content"
-                android:layout_height="56dp"
-                android:paddingHorizontal="24dp"
-                android:text="@string/action_restart"
-                android:textColor="@color/text_primary"
-                android:textSize="18sp"
-                android:background="@drawable/btn_control_selector"
-                android:focusable="true"
-                android:nextFocusLeft="@id/btn_stop" />
-
+                android:layout_height="wrap_content"
+                android:layout_marginTop="@dimen/space_xs"
+                android:textColor="@color/text_tertiary"
+                android:textSize="@dimen/text_caption"
+                android:visibility="gone" />
         </LinearLayout>
+    </FrameLayout>
 
+    <!-- ── Protocols ────────────────────────────────────────── -->
+    <LinearLayout
+        android:id="@+id/protocol_cards_row"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:orientation="horizontal"
+        android:layout_marginTop="@dimen/space_lg"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/receiver_panel">
+
+        <include
+            android:id="@+id/card_airplay"
+            layout="@layout/card_protocol_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="@dimen/space_md" />
+
+        <include
+            android:id="@+id/card_miracast"
+            layout="@layout/card_protocol_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="@dimen/space_md" />
+
+        <include
+            android:id="@+id/card_dlna"
+            layout="@layout/card_protocol_status"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1" />
     </LinearLayout>
-</ScrollView>
+
+    <!-- ── Controls ─────────────────────────────────────────── -->
+    <LinearLayout
+        android:id="@+id/controls_row"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:baselineAligned="false"
+        android:orientation="horizontal"
+        android:layout_marginTop="@dimen/space_lg"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/protocol_cards_row">
+
+        <Button
+            android:id="@+id/btn_start"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginEnd="@dimen/space_md"
+            android:paddingHorizontal="@dimen/space_lg"
+            android:text="@string/action_start"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/text_body"
+            android:background="@drawable/btn_primary_selector"
+            android:focusable="true" />
+
+        <Button
+            android:id="@+id/btn_restart"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginEnd="@dimen/space_md"
+            android:paddingHorizontal="@dimen/space_lg"
+            android:text="@string/action_restart"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/text_body"
+            android:background="@drawable/btn_control_selector"
+            android:focusable="true" />
+
+        <Button
+            android:id="@+id/btn_settings"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:layout_marginEnd="@dimen/space_md"
+            android:paddingHorizontal="@dimen/space_lg"
+            android:text="@string/nav_settings"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/text_body"
+            android:background="@drawable/btn_control_selector"
+            android:focusable="true" />
+
+        <!-- Quiet by design: stopping the receiver is rarely what someone came here to do. -->
+        <Button
+            android:id="@+id/btn_stop"
+            android:layout_width="wrap_content"
+            android:layout_height="44dp"
+            android:paddingHorizontal="@dimen/space_lg"
+            android:text="@string/action_stop"
+            android:textColor="@color/text_secondary"
+            android:textSize="@dimen/text_body"
+            android:background="@drawable/btn_quiet_selector"
+            android:focusable="true" />
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout>

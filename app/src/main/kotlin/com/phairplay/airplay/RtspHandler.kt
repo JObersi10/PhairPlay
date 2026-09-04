@@ -30,10 +30,27 @@ open class RtspHandler(
     private val context: android.content.Context,
     private val displayWidth: Int = 1920,
     private val displayHeight: Int = 1080,
+    /**
+     * The screen size to advertise to the sender asking RIGHT NOW, which is not always the one
+     * configured.
+     *
+     * A sender picks its encode resolution from what /info advertises, and it picks ONCE, before
+     * anything on this side knows whether it will fit. So a 1440p Mac arriving behind a phone that
+     * has already taken the frame budget could only ever be refused — measured on the device as
+     * "needs 221M px/s, only 27M left of 248M". Telling senders a smaller number instead lets them
+     * encode something that fits, which is the only point at which the decision can still be made.
+     *
+     * Defaults to the configured size, so a single sender is unaffected.
+     */
+    private val displaySizeFor: () -> Pair<Int, Int> = { displayWidth to displayHeight },
     private val audioEnabled: Boolean = false,
     private val videoSurfaceProvider: () -> android.view.Surface?,
     private val onStreamingStarted: (session: SessionDescription) -> Unit,
-    private val onStreamingStopped: () -> Unit,
+    /**
+     * One sender's session ended. [slot] is its tile; [remainingSessions] is how many other senders
+     * are still connected, so the receiver can tell "this one left" from "everything is over".
+     */
+    private val onStreamingStopped: (slot: Int, remainingSessions: Int) -> Unit,
     private val onPhotoReceived: (bytes: ByteArray, imageType: PhotoImageType) -> Unit = { _, _ -> },
     private val onPhotoCleared: () -> Unit = {},
     /** MediaRemote commands the sender advertised as enabled (see `updateMRSupportedCommands`). */
@@ -42,24 +59,33 @@ open class RtspHandler(
      * AirPlay 2 mirror SETUP msg 1: supply decrypted AES key + pairing secret + the sender's
      * address and timing port (so the receiver can start NTP). Returns (eventPort, timingPort).
      */
+    /**
+     * [slot] is the tile this sender owns, from [SessionRegistry]. Everything downstream that can
+     * exist more than once — the mirror server, its decoder, the Surface it draws into — is
+     * addressed by it. It is stable for the life of the connection.
+     */
     private val onMirrorSetupKeys: (
-        aesKey: ByteArray, ecdhSecret: ByteArray, aesIv: ByteArray,
+        slot: Int, aesKey: ByteArray, ecdhSecret: ByteArray, aesIv: ByteArray,
         remoteAddress: java.net.InetAddress, senderTimingPort: Int
-    ) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
+    ) -> Pair<Int, Int> = { _, _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror SETUP: start the video data server (type 110); returns its data port. */
-    private val onMirrorStreamStart: (streamConnectionId: Long) -> Int = { 0 },
+    private val onMirrorStreamStart: (slot: Int, streamConnectionId: Long) -> Int = { _, _ -> 0 },
     /** AirPlay 2 SETUP: start the audio server (type 96; ct 8 AAC-ELD mirror / 4 AAC-LC / 2 ALAC). spf = samples/frame. */
-    private val onMirrorAudioStart: (sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _ -> 0 to 0 },
+    private val onMirrorAudioStart: (slot: Int, sampleRate: Int, channels: Int, codecType: Int, framesPerPacket: Int, latencyMinSamples: Int) -> Pair<Int, Int> = { _, _, _, _, _, _ -> 0 to 0 },
     /** AirPlay 2 mirror TEARDOWN of just the audio stream (type 96) — stop audio, keep video. */
-    private val onMirrorAudioStop: () -> Unit = {},
+    private val onMirrorAudioStop: (slot: Int) -> Unit = {},
     /** AirPlay 2 mirror TEARDOWN of just the video stream (type 110) — stop video, keep audio. */
-    private val onMirrorVideoStop: () -> Unit = {},
+    private val onMirrorVideoStop: (slot: Int) -> Unit = {},
     /** AirPlay 2 buffered audio-only SETUP (type 103, Apple Music → TV); returns the TCP data port. */
     private val onBufferedAudioStart: () -> Int = { 0 },
     /** Stops the buffered audio-only stream (type 103 TEARDOWN). */
     private val onBufferedAudioStop: () -> Unit = {},
     /** Sender volume change (AirPlay dB: −30…0, or ≤ −144 = mute) via SET_PARAMETER. */
-    private val onVolume: (Float) -> Unit = {},
+    /**
+     * The sender set its volume. [slot] matters: reaching for the volume on a device is the
+     * clearest statement a user can make about which one they want to hear.
+     */
+    private val onVolume: (slot: Int, volume: Float) -> Unit = { _, _ -> },
     /** Now-playing track metadata (DMAP) from SET_PARAMETER — any field may be null. */
     private val onNowPlayingMetadata: (title: String?, artist: String?, album: String?, genre: String?, composer: String?, year: Int?, durationMs: Long?) -> Unit = { _, _, _, _, _, _, _ -> },
     /** Album artwork (JPEG/PNG bytes) from SET_PARAMETER; empty bytes = artwork cleared. */
@@ -106,7 +132,16 @@ open class RtspHandler(
      * sender's next one — seconds of black screen, which is why the first connect "didn't grab"
      * and a reconnect (warm Activity) did.
      */
-    private val onSenderApproaching: () -> Unit = {}
+    private val onSenderApproaching: () -> Unit = {},
+    /**
+     * How many senders may be served at once.
+     *
+     * 1 is the shipped default and reproduces the original policy exactly. Anything higher requires
+     * the caller to have checked the hardware can decode that many streams — see `DecoderCapacity`
+     * — because admitting a sender the decoder cannot serve gives it a session that never shows a
+     * picture, which is worse than the immediate refusal it would otherwise have got.
+     */
+    private val maxSessions: Int = 1,
 ) {
 
     // ─── Legacy AirPlay SRP PIN pairing (only used when pinAuthEnabled) ───────
@@ -117,17 +152,96 @@ open class RtspHandler(
     @Volatile private var pinPaired = false
 
     /** Last volume the sender set (AirPlay dB); returned to GET_PARAMETER volume queries. */
-    @Volatile private var currentVolume: Float = 0f
+    private var currentVolume: Float
+        get() = client.currentVolume
+        set(v) { client.currentVolume = v }
 
     private var serverSocket: ServerSocket? = null
 
-    @Volatile
-    private var activeClient: Socket? = null
+    /**
+     * The senders currently being served. Capacity 1 is the shipped policy and is what every
+     * other field on this class still assumes — `currentSession`, `pairingSession`, `fairPlay`
+     * and `isMirrorSession` are all handler-wide, so a second admitted sender would overwrite the
+     * first one's handshake. Raising [SessionRegistry.capacity] is safe only after those become
+     * per-connection; `docs/MULTI_SCREEN.md` tracks that work.
+     */
+    private val sessions = SessionRegistry(capacity = maxSessions)
+
+    // ─── Per-connection state ────────────────────────────────────────────────
+    /**
+     * Everything that belongs to ONE sender's control connection.
+     *
+     * These used to be plain fields on the handler, shared by every connection — which is why the
+     * receiver could only ever serve one sender. `handleClient` reset `pairingSession` and
+     * `fairPlay` on entry, so a second sender arriving mid-handshake wiped the first one's keys and
+     * *both* sessions then failed, the first with a decryption error pointing nowhere near the
+     * cause. Nothing about that was recoverable by raising the session capacity; the state had to
+     * stop being shared first.
+     *
+     * Deliberately NOT in here: [group] (SETPEERS/SETRATEANCHORTIME arrive around SETUP and a
+     * per-connection object would be rebuilt underneath them), and `legacyPin` / `pinPaired`
+     * (macOS runs the PIN handshake across SEPARATE TCP connections, so those must outlive any one
+     * of them). Both are documented at their declarations.
+     */
+    private class ClientState {
+        var currentCSeq: Int = 0
+        var currentVolume: Float = 0f
+        var currentSession: SessionDescription? = null
+        var pairingSession: PairingSession? = null
+        var fairPlay: FairPlay? = null
+        var currentRemoteAddress: java.net.InetAddress? = null
+        var currentLocalAddress: java.net.InetAddress? = null
+        var isMirrorSession = false
+        val activeStreamTypes = mutableSetOf<Int>()
+        var setupCount = 0
+        var pendingDeviceName: String? = null
+        var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
+        var lastLoggedNpTitle: String? = null
+        var lastLoggedNpArtist: String? = null
+        var connectStartMs = 0L
+
+        /**
+         * The tile this connection owns. Set once, from the registry, when the connection is
+         * accepted; 0 whenever only one sender is possible, which keeps every single-sender path
+         * addressing exactly the same slot it always has.
+         */
+        var slot = 0
+        /** The connection this state belongs to, so the session policy can act on it. */
+        var socket: Socket? = null
+    }
+
+    /**
+     * The state of whichever connection the calling thread is serving.
+     *
+     * Thread-scoped rather than passed as a parameter, and that is a deliberate trade. Threading a
+     * `ClientState` argument through `routeRequest` and every handler below it would be the more
+     * explicit design; it would also be a sixty-odd call-site change to code that currently works,
+     * made without the ability to test two senders against it. Binding it to the thread keeps the
+     * diff to the declarations and leaves every call site — and therefore every existing behaviour
+     * — untouched.
+     *
+     * **This is only correct because `handleClient` is a plain blocking function.** It is launched
+     * once per connection with `scope.launch(Dispatchers.IO) { handleClient(socket) }` and contains
+     * no suspension points, so it occupies exactly one thread from first byte to last. If it ever
+     * becomes a `suspend fun`, or gains a `withContext`, the coroutine may resume on a different
+     * thread and each half will silently see a different (empty) state. Keep it blocking, or move
+     * to explicit parameter passing.
+     *
+     * The IO dispatcher reuses threads, so [handleClient] must `remove()` this on the way out or
+     * the next connection to land on that thread inherits the last one's half-finished handshake.
+     * That removal is also what replaces the old "reset pairingSession and fairPlay on entry": a
+     * fresh connection now gets a fresh object structurally instead of by remembering to clear it.
+     */
+    private val clientState = ThreadLocal.withInitial { ClientState() }
+    private val client: ClientState get() = clientState.get()
+
 
     @Volatile
     private var running = false
 
-    private var currentCSeq: Int = 0
+    private var currentCSeq: Int
+        get() = client.currentCSeq
+        set(v) { client.currentCSeq = v }
 
     /**
      * Group membership and the shared playback anchor, from SETPEERS / SETRATEANCHORTIME.
@@ -137,40 +251,76 @@ open class RtspHandler(
      */
     val group = com.phairplay.airplay.handshake.MultiRoomGroup()
 
-    @Volatile
-    private var currentSession: SessionDescription? = null
+    private var currentSession: SessionDescription?
+        get() = client.currentSession
+        set(v) { client.currentSession = v }
 
     /** Per-connection AirPlay pairing state (pair-setup / pair-verify). */
-    @Volatile
-    private var pairingSession: PairingSession? = null
+    private var pairingSession: PairingSession?
+        get() = client.pairingSession
+        set(v) { client.pairingSession = v }
 
     /** Per-connection FairPlay state (fp-setup handshake + stream-key decrypt). */
-    @Volatile
-    private var fairPlay: FairPlay? = null
+    private var fairPlay: FairPlay?
+        get() = client.fairPlay
+        set(v) { client.fairPlay = v }
 
     /** Remote (sender) address of the active control connection — needed for AirPlay 2 NTP. */
-    @Volatile
-    private var currentRemoteAddress: java.net.InetAddress? = null
+    private var currentRemoteAddress: java.net.InetAddress?
+        get() = client.currentRemoteAddress
+        set(v) { client.currentRemoteAddress = v }
 
     /** Our own address on the socket the sender is talking to — goes into the Apple-Response blob. */
-    private var currentLocalAddress: java.net.InetAddress? = null
+    private var currentLocalAddress: java.net.InetAddress?
+        get() = client.currentLocalAddress
+        set(v) { client.currentLocalAddress = v }
 
     /** True once an AirPlay 2 mirroring SETUP has run on this connection (no ANNOUNCE/SDP). */
-    @Volatile
-    private var isMirrorSession = false
+    /**
+     * Applies the one-audio-session policy, and ends this session if it loses.
+     *
+     * Enforced HERE rather than at admission because admission happens at `accept()`, where nothing
+     * yet says whether the connection is a mirror or an audio session — see
+     * [SessionRegistry.claimType]. The cost of deciding late is that the loser has already completed
+     * pair-verify by the time it is refused, which is why it gets an explicit close rather than a
+     * silent stream omission: a sender handed a SETUP reply with a stream missing waits for data
+     * that never comes.
+     */
+    private fun claimSessionType(kind: SessionRegistry.Kind): Boolean {
+        val socket = client.socket ?: return true
+        if (sessions.claimType(socket, kind)) return true
+        Logger.w("Refusing $kind session from ${socket.inetAddress?.hostAddress} — " +
+            "already serving ${sessions.kindOf(sessions.snapshot().firstOrNull { it != socket } ?: socket)}")
+        runCatching { socket.close() }
+        return false
+    }
+
+    private var isMirrorSession: Boolean
+        get() = client.isMirrorSession
+        set(v) { client.isMirrorSession = v }
 
     /** Consumes the RTCP Sender Reports arriving on the interleaved control channel. */
     private val senderReports = SenderReportTracker()
 
     /** Mirror stream types currently active (96 = audio, 110 = video). Drives TEARDOWN routing.
      *  `protected` so tests can seed it without driving the full FairPlay SETUP handshake. */
-    protected val activeStreamTypes = mutableSetOf<Int>()
+    protected val activeStreamTypes: MutableSet<Int> get() = client.activeStreamTypes
 
-    private var setupCount = 0
-    private var pendingDeviceName: String? = null
-    private var pendingDeviceType: SenderDeviceType = SenderDeviceType.UNKNOWN
-    private var lastLoggedNpTitle: String? = null
-    private var lastLoggedNpArtist: String? = null
+    private var setupCount: Int
+        get() = client.setupCount
+        set(v) { client.setupCount = v }
+    private var pendingDeviceName: String?
+        get() = client.pendingDeviceName
+        set(v) { client.pendingDeviceName = v }
+    private var pendingDeviceType: SenderDeviceType
+        get() = client.pendingDeviceType
+        set(v) { client.pendingDeviceType = v }
+    private var lastLoggedNpTitle: String?
+        get() = client.lastLoggedNpTitle
+        set(v) { client.lastLoggedNpTitle = v }
+    private var lastLoggedNpArtist: String?
+        get() = client.lastLoggedNpArtist
+        set(v) { client.lastLoggedNpArtist = v }
 
     private val requestReader = RtspRequestReader(
         maxMessageBytes = MAX_MESSAGE_BYTES,
@@ -203,28 +353,28 @@ open class RtspHandler(
      * ends the session the way a sender expects, while the server keeps listening.
      */
     /** Milestone timing for connect diagnosis: how long each handshake leg takes. */
-    private var connectStartMs = 0L
+    private var connectStartMs: Long
+        get() = client.connectStartMs
+        set(v) { client.connectStartMs = v }
     private fun stamp(what: String) {
         if (connectStartMs == 0L) return
         Logger.i("Connect timing: $what +${System.currentTimeMillis() - connectStartMs}ms")
     }
 
     fun disconnectActiveClient() {
-        val client = activeClient ?: return
+        if (sessions.isEmpty()) return
         Logger.i("Dropping active RTSP client on user request")
-        runCatching { client.close() }
-        activeClient = null
+        sessions.closeAll()
     }
 
     fun stop() {
         running = false
         try {
-            activeClient?.close()
+            sessions.closeAll()
             serverSocket?.close()
         } catch (e: Exception) {
             Logger.e("Error closing RTSP sockets (non-fatal)", e)
         }
-        activeClient = null
         serverSocket = null
         Logger.i("RTSP handler stopped")
     }
@@ -277,22 +427,25 @@ open class RtspHandler(
                 // what makes the one-sender-at-a-time policy below actually work: the newcomer
                 // gets an immediate 503 instead of being left hanging, and its next attempt
                 // succeeds the moment the first sender goes away.
-                val current = activeClient
-                if (current != null && !current.isClosed) {
-                    Logger.w("Rejecting second client ${clientSocket.inetAddress.hostAddress} — already streaming")
+                if (!sessions.admit(clientSocket)) {
+                    Logger.w("Rejecting client ${clientSocket.inetAddress.hostAddress} — " +
+                             "at capacity (${sessions.size()}/${sessions.capacity})")
                     runCatching { sendServiceUnavailable(clientSocket) }
                     runCatching { clientSocket.close() }
                     continue
                 }
 
-                connectStartMs = System.currentTimeMillis()
+                val acceptedAtMs = System.currentTimeMillis()
                 Logger.i("New client connected: ${clientSocket.inetAddress.hostAddress}")
                 // Only for a sender we are actually going to serve. Firing this for a rejected
                 // connection would put the video surface up for a session that never happens.
                 runCatching { onSenderApproaching() }
 
-                activeClient = clientSocket
-                scope.launch(Dispatchers.IO) { handleClient(clientSocket) }
+                // The accept time is PASSED IN, not stored in a field. Connection state is scoped
+                // to the thread that serves the connection, and this is the accept loop's thread —
+                // writing connectStartMs here would stamp the accept loop's own state object and
+                // leave the client's at zero, silently disabling the connect timing log.
+                scope.launch(Dispatchers.IO) { handleClient(clientSocket, acceptedAtMs) }
             }
         } catch (e: Exception) {
             if (running) {
@@ -303,10 +456,16 @@ open class RtspHandler(
         }
     }
 
-    private fun handleClient(socket: Socket) {
+    private fun handleClient(socket: Socket, acceptedAtMs: Long = System.currentTimeMillis()) {
         val inputStream = socket.getInputStream()
         val outputStream = socket.getOutputStream()
 
+        // A fresh ClientState is created for this thread on first touch; clear anything a previous
+        // connection on this same pooled thread left behind before we do.
+        clientState.remove()
+        connectStartMs = acceptedAtMs
+        client.slot = sessions.slotOf(socket).coerceAtLeast(0)
+        client.socket = socket
         // Fresh pairing + FairPlay state for each control connection.
         pairingSession = PairingSession(PairingKeys.get(context))
         fairPlay = FairPlay()
@@ -369,14 +528,13 @@ open class RtspHandler(
             // coroutine, a newcomer can be accepted in the window between this socket erroring and
             // this block running; clearing unconditionally would hand that newcomer's slot away and
             // let a third connection in behind it.
-            if (activeClient === socket) activeClient = null
-            currentSession = null
-            pairingSession = null
-            fairPlay = null
-            isMirrorSession = false
-            activeStreamTypes.clear()
-            setupCount = 0
-            onStreamingStopped()
+            val slot = client.slot
+            sessions.release(socket)
+            onStreamingStopped(slot, sessions.size())
+            // Hand the pooled thread back with nothing on it. The individual field clears that used
+            // to be here are now implied: the whole state object goes, so a field added later
+            // cannot be forgotten in this list.
+            clientState.remove()
         }
     }
 
@@ -812,7 +970,13 @@ open class RtspHandler(
         return RtspResponse(
             statusCode = 200,
             statusMessage = "OK",
-            bodyBytes = InfoResponder.build(context, displayWidth, displayHeight, pinRequired = pinAuthEnabled),
+            bodyBytes = displaySizeFor().let { (w, h) ->
+                if (w != displayWidth || h != displayHeight) {
+                    Logger.i("GET /info advertising ${w}x$h (reduced from ${displayWidth}x$displayHeight " +
+                        "— multi-screen is on)")
+                }
+                InfoResponder.build(context, w, h, pinRequired = pinAuthEnabled)
+            },
             contentType = "application/x-apple-binary-plist",
             protocol = request.responseProtocol()
         )
@@ -1014,7 +1178,8 @@ open class RtspHandler(
             val aesIv = (req["eiv"] as? ByteArray) ?: ByteArray(16)
             val senderTimingPort = (req["timingPort"] as? Long)?.toInt() ?: 0
             val remoteAddr = currentRemoteAddress ?: error("mirror SETUP without remote address")
-            val (eventPort, timingPort) = onMirrorSetupKeys(aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
+            val (eventPort, timingPort) =
+                onMirrorSetupKeys(client.slot, aesKey, ecdhSecret, aesIv, remoteAddr, senderTimingPort)
             response["eventPort"] = eventPort.toLong()
             response["timingPort"] = timingPort.toLong()
             Logger.i("mirror SETUP keys OK — eventPort=$eventPort timingPort=$timingPort (sender timing $senderTimingPort)")
@@ -1026,8 +1191,33 @@ open class RtspHandler(
                 val stream = s as? Map<*, *> ?: return@mapNotNull null
                 when ((stream["type"] as? Long)?.toInt()) {
                     110 -> {
+                        // A video stream is what makes this MIRRORING rather than audio. It cannot
+                        // be decided at SETUP-plist level: a Mac sending audio only still uses the
+                        // mirror handshake and still reports isMirrorSession, so the stream list is
+                        // the first honest signal of which of the two this session is.
+                        if (!claimSessionType(SessionRegistry.Kind.MIRROR)) {
+                            return@mapNotNull null
+                        }
                         val scid = (stream["streamConnectionID"] as? Long) ?: 0L
-                        val dataPort = onMirrorStreamStart(scid)
+                        val dataPort = onMirrorStreamStart(client.slot, scid)
+                        // PORT 0 IS A REFUSAL, AND IT HAS TO LOOK LIKE ONE.
+                        //
+                        // onMirrorStreamStart returns 0 when it cannot serve this tile — the
+                        // decoder frame budget is the usual reason, e.g. a 2560x1440 Mac arriving
+                        // behind a phone that has already taken most of it. Answering 200 with
+                        // `dataPort: 0` told the sender its stream was set up and then pointed it at
+                        // nothing, so mirroring "connected" and ended a moment later with no error
+                        // anywhere on either side. Measured on the device: a Mac needing 221M px/s
+                        // against 27M remaining, accepted, then gone.
+                        //
+                        // Dropping the stream from the reply instead means the sender gets a
+                        // response with no video stream in it, which is a state it already handles —
+                        // the same shape as any other stream it asked for and did not get.
+                        if (dataPort <= 0) {
+                            Logger.w("mirror stream type=110 REFUSED (no capacity) — " +
+                                "omitting it from the SETUP reply so the sender sees the failure")
+                            return@mapNotNull null
+                        }
                         activeStreamTypes.add(110)
                         Logger.i("mirror stream type=110 streamConnectionID=$scid dataPort=$dataPort")
                         mapOf("type" to 110L, "dataPort" to dataPort.toLong())
@@ -1048,7 +1238,13 @@ open class RtspHandler(
                         // How far behind the sender's own timeline it expects us to play. Ignoring it
                         // made playback run ahead of the phone (audio led its on-screen lyrics).
                         val latencyMin = (stream["latencyMin"] as? Long)?.toInt() ?: DEFAULT_LATENCY_SAMPLES
-                        val (dataPort, controlPort) = onMirrorAudioStart(sr, ch, ct, spf, latencyMin)
+                        // Audio only claims the session when no video stream has claimed it first:
+                        // a mirror carries its own audio, and that audio must not be mistaken for a
+                        // separate audio-only sender competing for the speakers.
+                        if (110 !in activeStreamTypes && !claimSessionType(SessionRegistry.Kind.AUDIO)) {
+                            return@mapNotNull null
+                        }
+                        val (dataPort, controlPort) = onMirrorAudioStart(client.slot, sr, ch, ct, spf, latencyMin)
                         activeStreamTypes.add(96)
                         currentSession?.let { onSenderInfoChanged(it.senderName, it.senderDeviceType) }
                         Logger.i("audio stream type=96 (ct=$ct ${sr}Hz x$ch spf=$spf) dataPort=$dataPort controlPort=$controlPort")
@@ -1288,8 +1484,8 @@ open class RtspHandler(
             // gave up, which looked like the receiver killing itself the instant audio started.
             // When the sender really is finished it closes the socket, and that path already does
             // the full cleanup.
-            if (streamTypes.contains(96)) { onMirrorAudioStop(); activeStreamTypes.remove(96) }
-            if (streamTypes.contains(110)) { onMirrorVideoStop(); activeStreamTypes.remove(110) }
+            if (streamTypes.contains(96)) { onMirrorAudioStop(client.slot); activeStreamTypes.remove(96) }
+            if (streamTypes.contains(110)) { onMirrorVideoStop(client.slot); activeStreamTypes.remove(110) }
             if (streamTypes.contains(103)) { onBufferedAudioStop(); activeStreamTypes.remove(103) }
             Logger.i("TEARDOWN streams=$streamTypes — stopped those, session continues (active=$activeStreamTypes)")
             return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
@@ -1297,7 +1493,9 @@ open class RtspHandler(
             Logger.i("TEARDOWN (session, body=${request.bodyBytes.size}B) — streaming stopping")
         }
         activeStreamTypes.clear()
-        onStreamingStopped()
+        // A TEARDOWN ends THIS session. The socket is still open at this point, so this sender is
+        // still counted — subtract it to report what will actually be left.
+        onStreamingStopped(client.slot, (sessions.size() - 1).coerceAtLeast(0))
         return RtspResponse(statusCode = 200, statusMessage = "OK", protocol = request.responseProtocol())
     }
 
@@ -1333,7 +1531,7 @@ open class RtspHandler(
             body.startsWith("volume") -> {
                 body.substringAfter(":").trim().toFloatOrNull()?.let { v ->
                     currentVolume = v
-                    onVolume(v)
+                    onVolume(client.slot, v)
                     Logger.i("SET_PARAMETER volume=$v")
                 }
             }

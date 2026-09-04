@@ -48,10 +48,47 @@ class MirrorStreamServer(
      * Not called for a deliberate [stop], which is the receiver's own doing and already handled.
      */
     private val onConnectionEnded: () -> Unit = {},
+    /** Decoded size for THIS session, so its tile can letterbox to its own aspect. */
+    private val onOutputSize: (width: Int, height: Int) -> Unit = { _, _ -> },
+    /**
+     * Asks the sender for a fresh IDR. Default no-op so the protocol tests can build one of these
+     * without an event channel.
+     *
+     * Every `awaitingKeyframe = true` below is a point at which the picture is broken until the
+     * sender's next IDR, and macOS emits roughly one per SESSION — so without this the wait is
+     * measured in seconds and shows as a black screen or a smear that will not clear. Nothing on
+     * this side can shorten it: the frames do not exist yet.
+     */
+    private val requestKeyFrame: (String) -> Unit = {},
 ) {
-    private sealed class Item
+    /** [queuedAtMs] is when the payload arrived, which is what [videoDelayMs] is measured from. */
+    private sealed class Item(val queuedAtMs: Long = System.currentTimeMillis())
     private class Config(val sps: ByteArray, val pps: ByteArray) : Item()
     private class Frame(val annexB: ByteArray) : Item()
+
+    /**
+     * Holds the picture back to meet audio that is arriving late — a Bluetooth speaker, which adds
+     * roughly [com.phairplay.settings.AudioRoute.BLUETOOTH_COMPENSATION_MS] that Android will not
+     * report. Zero on HDMI and on the built-in speakers.
+     *
+     * **Applied here, on the compressed frames, and NOT at the decoder's output.** Scheduling a
+     * future render time with `releaseOutputBuffer(index, timestampNs)` is the obvious way to delay
+     * video and it does not work on this path: the Surface's BufferQueue holds only about three
+     * frames, so a 350ms hold — twenty-one frames at 60fps — back-pressures the decoder within a
+     * few frames, the upstream queue saturates, and the stream degrades into dropped and corrupt
+     * frames. See the note in `VideoDecoder.releaseOutputBuffers`.
+     *
+     * Holding NAL units before they are decoded costs only memory, and very little of it: 350ms of
+     * a mirror stream is a couple of hundred KB, and the queue already has room for 1.5 seconds.
+     */
+    @Volatile private var videoDelayMs: Long = 0L
+
+    fun setVideoDelayMs(ms: Long) {
+        val next = ms.coerceIn(0L, MAX_VIDEO_DELAY_MS)
+        if (next == videoDelayMs) return
+        videoDelayMs = next
+        Logger.i("Mirror: video delayed ${next}ms to meet the audio output")
+    }
 
     private val cipher = MirrorCrypto.streamCipher(aesKey, ecdhSecret, streamConnectionId)
     private val serverSocket = ServerSocket(0)            // OS-assigned free port
@@ -85,6 +122,24 @@ class MirrorStreamServer(
     // Set by the reader thread when a frame is dropped under load; the decoder thread then skips
     // frames until the next keyframe (IDR) so it never decodes a reference-broken, corrupt stream.
     @Volatile private var awaitingKeyframe = false
+
+    // ─── Artifact forensics ──────────────────────────────────────────────────
+    // Smearing that persists until the picture is forced to change is ALWAYS a broken reference
+    // chain: a frame was decoded whose reference never arrived, and every predicted frame after it
+    // inherits the damage until the sender sends another IDR. The question is only ever which of
+    // three things broke the chain, and these three counters separate them:
+    //
+    //   framesDropped  — we discarded a frame, so the fault is ours (queue too small, decoder slow)
+    //   decodeErrors   — the decoder rejected a frame, so the fault is in what we fed it
+    //   keyframe gap   — neither, and the sender simply is not sending IDRs often enough to recover
+    //
+    // Without the last two, "dropped=0" looked like a clean bill of health while the picture was
+    // visibly broken. It only ruled out the first cause.
+    private var decodeErrors = 0
+    private var keyframesSeen = 0
+    private var lastKeyframeMs = 0L
+    private var longestKeyframeGapMs = 0L
+    private var framesSinceKeyframe = 0
 
     /** Caps the verbose unknown-payload dump so a long session doesn't flood the log buffer. */
     private var unknownTypeLogged = 0
@@ -155,7 +210,9 @@ class MirrorStreamServer(
                             // which we cannot influence — worth separating from our own setup cost.
                             Logger.i("Mirror timing: first video payload +${firstVideoAtMs - listenMs}ms after listen")
                         }
-                        val annexB = MirrorCrypto.avccToAnnexB(cipher.update(payload))
+                        // In-place: cipher.update() hands back a fresh array nothing else holds,
+                        // so the conversion can overwrite it instead of copying the frame twice.
+                        val annexB = MirrorCrypto.avccToAnnexBInPlace(cipher.update(payload))
                         if (annexB.isNotEmpty()) enqueue(Frame(annexB))
                     }
                     1 -> {
@@ -212,6 +269,7 @@ class MirrorStreamServer(
             queue.offer(item)
             framesDropped++
             awaitingKeyframe = true        // a frame was lost — resync the decoder at the next IDR
+            requestKeyFrame("frame dropped under load")
         }
         StreamStats.videoQueue = queue.size
         if (framesIn % 300 == 0) {
@@ -219,9 +277,15 @@ class MirrorStreamServer(
             StreamStats.videoFps = (300_000L / (now - lastStatMs).coerceAtLeast(1)).toInt()
             lastStatMs = now
             StreamStats.videoDropPct = framesDropped * 100 / framesIn
+            // Everything needed to tell the three artifact causes apart, in one line, because the
+            // ring buffer is small and this has to survive being read after the fact.
+            val sinceKeyframe = if (lastKeyframeMs == 0L) -1 else now - lastKeyframeMs
             Logger.i("Video stats: in=$framesIn dropped=$framesDropped " +
                 "(${StreamStats.videoDropPct}%) queue=${queue.size}/$QUEUE_CAPACITY ${StreamStats.videoFps}fps " +
+                "| decodeErr=$decodeErrors idr=$keyframesSeen last=${sinceKeyframe}ms " +
+                "worstGap=${longestKeyframeGapMs}ms sinceIdr=$framesSinceKeyframe " +
                 "→ ${surfaceLabel(configuredSurface)}")
+            longestKeyframeGapMs = 0L
         }
     }
 
@@ -236,11 +300,38 @@ class MirrorStreamServer(
         Logger.e("Mirror: failed to parse SPS/PPS", e); null
     }
 
+    /**
+     * Blocks until [item] is due, when the audio route calls for a video delay.
+     *
+     * Slept in short slices rather than one long sleep so a TEARDOWN is not left waiting out the
+     * full delay: `stop()` clears `running`, and the loop has to notice that promptly or the whole
+     * session teardown inherits the compensation as latency.
+     *
+     * Delays every item, including SPS/PPS, so the stream stays in the order the sender sent it.
+     */
+    private fun awaitPresentation(item: Item) {
+        val delay = videoDelayMs
+        if (delay <= 0L) return
+        val dueAt = item.queuedAtMs + delay
+        while (running) {
+            val remaining = dueAt - System.currentTimeMillis()
+            if (remaining <= 0L) return
+            try {
+                Thread.sleep(remaining.coerceAtMost(DELAY_SLICE_MS))
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                return
+            }
+        }
+    }
+
     // ─── Decoder thread: consume the queue; the only thread that touches the decoder ──────────
     private fun runDecoder() {
         try {
             while (running) {
                 val item = queue.poll(200, TimeUnit.MILLISECONDS) ?: continue
+                awaitPresentation(item)
+                if (!running) break
                 when (item) {
                     is Config -> configureDecoder(item.sps, item.pps)
                     is Frame -> decodeFrame(item.annexB)
@@ -288,8 +379,11 @@ class MirrorStreamServer(
         val pps = lastPps ?: return
         if (surface == null) return                            // backgrounded — wait for the surface to return
         val sc = MirrorCrypto.START_CODE
-        decoder = VideoDecoder(surface).also { it.initialize(sc + sps, sc + pps, width, height) }
+        decoder = VideoDecoder(surface, onOutputSize).also { it.initialize(sc + sps, sc + pps, width, height) }
         awaitingKeyframe = true                                // a fresh decoder must start at an IDR
+        // The cold-first-connect case: the sender sent its single IDR before this decoder existed,
+        // so waiting for the next one is the black screen. Ask instead of racing.
+        requestKeyFrame("decoder rebuilt")
         StreamStats.videoRes = "${width}x${height}"
         Logger.i("Mirror decoder (re)built for ${surfaceLabel(surface)} surface (sps=${sps.size}B pps=${pps.size}B)")
     }
@@ -337,15 +431,39 @@ class MirrorStreamServer(
             d.release(); decoder = null; configuredSurface = null; lastSps = null; lastPps = null
             return
         }
+        val keyframe = isKeyframe(annexB)
+        if (keyframe) {
+            val now = System.currentTimeMillis()
+            if (lastKeyframeMs != 0L) {
+                val gap = now - lastKeyframeMs
+                if (gap > longestKeyframeGapMs) longestKeyframeGapMs = gap
+            }
+            lastKeyframeMs = now
+            keyframesSeen++
+            framesSinceKeyframe = 0
+        } else {
+            framesSinceKeyframe++
+        }
+
         if (awaitingKeyframe) {
             // After a dropped frame the stream is reference-broken; skip until the next IDR so we
             // don't feed the decoder predicted frames with missing references (which smear/blocky).
-            if (!isKeyframe(annexB)) return
+            if (!keyframe) return
             awaitingKeyframe = false
-            Logger.i("Mirror: resynced on keyframe after a dropped frame")
+            Logger.i("Mirror: resynced on keyframe after $framesSinceKeyframe skipped frames")
         }
         if (framePtsUs == 0L) Logger.i("Mirror: first video frame fed to decoder (${annexB.size}B)")
+        val errorsBefore = d.decodeErrorCount
         d.decodeNalUnit(annexB, framePtsUs)
+        if (d.decodeErrorCount != errorsBefore) {
+            decodeErrors++
+            // A rejected frame breaks the chain exactly as a dropped one does, and until now
+            // nothing said so — the stream carried on feeding predicted frames onto a reference
+            // the decoder never accepted.
+            awaitingKeyframe = true
+            requestKeyFrame("decoder rejected a frame")
+            Logger.w("Mirror: decoder rejected a frame — asked the sender for an IDR to resync")
+        }
         framePtsUs += FRAME_INTERVAL_US
     }
 
@@ -446,7 +564,33 @@ class MirrorStreamServer(
         /** No video for this long means the sender is wedged or gone; drop the session. */
         private const val DEAD_SENDER_MS = 30_000
 
-        private const val QUEUE_CAPACITY = 90                  // ~1.5s @60fps before dropping
+        /**
+         * How far the decoder may fall behind before frames are dropped: ~1.5s at 60fps.
+         *
+         * This is a DROP MARGIN, and the A/V delay must not be paid for out of it. Holding frames
+         * for [MAX_VIDEO_DELAY_MS] raises steady-state occupancy by that many frames — measured at
+         * 20-22 of 90 with a 350ms delay, where it had been near zero — so without the extra room
+         * below, every millisecond of lip-sync compensation was a millisecond less slack before the
+         * queue overflowed. That matters more than the numbers suggest, because macOS emits
+         * keyframes sparsely: ONE dropped frame sets awaitingKeyframe and the picture then stays
+         * visibly broken until the sender happens to send the next IDR, which is the smearing that
+         * only clears when you force a redraw.
+         */
+        private const val DROP_MARGIN_FRAMES = 90
+
+        /** Room for the held frames themselves, on top of the margin. ~0.5s at 60fps. */
+        private const val DELAY_HEADROOM_FRAMES = 30
+
+        private const val QUEUE_CAPACITY = DROP_MARGIN_FRAMES + DELAY_HEADROOM_FRAMES
+
+        /**
+         * Ceiling on the route compensation this will honour, sized to [DELAY_HEADROOM_FRAMES] so
+         * the hold always fits in the room added for it.
+         */
+        private const val MAX_VIDEO_DELAY_MS = 500L
+
+        /** Sleep granularity while waiting out the delay, so teardown stays responsive. */
+        private const val DELAY_SLICE_MS = 25L
         private const val SURFACE_WAIT_TRIES = 3      // ~300ms, then decode off-screen instead
         private const val SURFACE_WAIT_MS = 100L
 

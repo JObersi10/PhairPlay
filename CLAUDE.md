@@ -64,7 +64,7 @@ permanent, not a workaround to remove later.
 
 ## Device
 
-- Fire TV at `192.168.0.11:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**
+- Fire TV at `192.168.1.246:5555` over ADB, API 30, **32-bit (`armeabi-v7a`)**, 1920x1080 at density 320 — so the layout canvas is **960x540dp**, which is far less room than most TV layouts assume
 - App ID `com.phairplay.firetv`
 - The SABRENT drive must be mounted first
 - Install with `adb install -r`. **Do not** `am start` afterwards — that is what
@@ -74,11 +74,48 @@ permanent, not a workaround to remove later.
 
 ## Diagnostics
 
-`curl -s http://192.168.0.11:8001/` — full dump. `:8002` — streaming tail.
+`curl -s http://192.168.1.246:8001/` — full dump. `:8002` — streaming tail. The dump now leads with the build SHA and the current audio route, re-derived per request (`DiagnosticServer.statusProvider`), because both used to scroll out of the ring buffer before anyone read it.
 
 The buffer only holds events since the app last started, and it is small. To
 capture something, reproduce **first**, then curl. An empty `grep` usually means
 the event never happened, not that the server is broken.
+
+## Licensing — the repo is GPL-3.0
+
+`app/src/main/cpp/playfair/` is EstebanKubata's PlayFair, obtained via RPiPlay, and it is
+**GPL-3.0**. It is compiled into `libplayfair.so` and distributed, so the whole work is
+GPL-3.0-or-later. The `LICENSE` file used to be Apache-2.0 (inherited byte-for-byte from the
+mazer666/PhairPlay upstream, which ships the same sources) and that was not a license the bundled
+code permits. Apache-2.0 is one-way compatible *into* GPLv3, so Apple's ALAC decoder keeps its own
+Apache-2.0 headers inside the GPLv3 work.
+
+Attribution lives in `THIRD_PARTY_NOTICES.md`. The PlayFair sources carry no upstream copyright
+header, so a provenance notice was added to each — do not strip them.
+
+## UI
+
+Views are plain `View`/`FrameLayout`, not Compose. There is a real design system now; use it rather
+than inventing numbers:
+
+- `values/dimens.xml` — the spacing and type scale. Everything picks from it.
+- `drawable/row_focus_selector.xml` — full-width list rows. `card_focus_selector.xml` — tiles.
+- `ui/FocusMotion.kt` — the focus lift. **`attach` scales, `attachFlat` does not.** Use `attachFlat`
+  for anything full-width: scaling a full-width row pushes its edges past the scroller, which clips
+  them, and the focused row then looks like the one that is cut off. `attach` unclips the whole
+  ancestor chain for the same reason.
+- `ui/ReceiverFieldView.kt` — the receiver motif on Home. Cached paints, one handler tick, stops on
+  detach. It reports **no intrinsic size**: as a `match_parent` child of a `wrap_content` parent the
+  default measurement claimed the entire screen and pushed everything else off the bottom.
+- `ui/ProtocolCardAnimator.kt` — animates card state transitions instead of swapping text.
+- `ui/Motion.kt` — reduced motion. Android has no `prefers-reduced-motion`; the signal is
+  `ANIMATOR_DURATION_SCALE`. ObjectAnimator/ViewPropertyAnimator honour it automatically, but a
+  hand-driven Handler loop does not, so check `Motion.animationsEnabled` in any custom loop.
+
+**Settings is one continuous scroller**; the left column jumps to a section, it does not swap panes.
+Every row keeps the id it had when the screen was a flat ScrollView, so `SettingsFragment`'s binding
+survives a re-layout. `docs/SETTINGS.md` documents every setting.
+
+The permanent Home/Settings nav panel is gone — Settings is a button on Home, Back returns.
 
 ## Architecture
 
@@ -95,7 +132,33 @@ the event never happened, not that the server is broken.
 - `NowPlayingScreen` — audio card: artwork crossfade, marquee text, MENU info
   panel, idle screensaver, debug HUD. Also used by DLNA playback
 - `DeviceVolumeController` — maps AirPlay dB to an Android stream volume
-- `DiagnosticServer` — `:8001` dump, `:8002` tail
+- `AudioRouteMonitor` — which output is playing (HDMI / speakers / a named Bluetooth sink). A
+  Bluetooth route silently adds 350ms of **visual** delay (`AudioRoute.BLUETOOTH_COMPENSATION_MS`),
+  derived from the route rather than stored, and invisible in Settings — the user's Audio delay is a
+  separate dial that still reads 0. Link latency is not measurable: `getTimestamp()` stops at the HAL
+- `SessionRegistry` — the capacity-bounded set of RTSP control connections, plus the audio/mirror
+  policy (`claimType`): **mirroring may be shared, audio may not, and the two do not mix.** That
+  policy is NOT enforced at `admit()`, and cannot be — admission happens at `accept()`, where nothing
+  on the wire yet says which kind the connection will be. It is claimed at stream SETUP instead.
+  **`isMirrorSession` is not the signal**: a Mac sending audio only still uses the mirror handshake
+  and still sets it, so the presence of a type-110 VIDEO stream is what makes a session a mirror.
+  Replacing the old
+  single `activeClient` field. **Capacity is 1 and must stay there** until `RtspHandler`'s
+  `currentSession` / `pairingSession` / `fairPlay` / `isMirrorSession` become per-connection: a
+  second admitted sender would wipe the first one's handshake and both would fail, the first with a
+  decryption error that looks nothing like its cause. `docs/MULTI_SCREEN.md` has the rest
+- `DecoderCapacity` — concurrent H.264 decoder instances, the ceiling on multi-screen. **Ask the
+  hardware decoder, not the max across all of them**: `c2.android.avc.decoder` advertises 32
+  because it is software and nothing in it is a fixed resource, so the naive max reported 32 on a
+  device that has 5. Measured on this Fire TV: **5 instances, `performance-point-1920x1080` = 120**,
+  so two 1080p60 mirrors fit. Shown in the `:8001` header as `decode:`
+- `DiagnosticServer` — `:8001` dump, `:8001/tail` stream. **The dump is byte-capped and prints from
+  the START of the session**, so once a session has run a while it shows the handshake and cuts off
+  before anything recent. For current events use `/tail`, not `/`
+- `media/shazam/` — names a track the sender streamed without naming. `ShazamSignature` is a port of
+  `shazamio-core`'s fingerprinting module **from its sources**; `PcmCapture` resamples to the mono
+  16kHz it is defined over; `ShazamClient` posts it. `docs/TRACK_IDENTIFICATION.md` has the rest, and
+  should be read before touching any constant in the port
 
 `docs/FEATURES.md` is the current feature list. `docs/UPDATE_CHECKER.md` covers the in-app
 GitHub-Releases updater — read it before touching that code, and before publishing a release:
@@ -103,6 +166,14 @@ three of its four bugs were silent, and one printed a log line that lied. Projec
 analysis and the Now Playing card are written up for
 reuse in `docs/PROJECTOR_MODE.md` — a from-scratch porting guide, including the
 constants that only look arbitrary until you have shipped the wrong one.
+
+**Bluetooth audio sink (phone streams to the TV over Bluetooth) is not possible** and was checked
+on the device, not assumed. `dumpsys bluetooth_manager` lists exactly four profiles — `GattService`,
+`A2dpService`, `HidHostService`, `AvrcpTargetService` — with no `A2dpSinkService`, and every paired
+device reports `A2DP_SINK=-1`. The stack is source-only. Two independent blockers: A2DP sink is a
+build-time option baked into the system image, and `BluetoothProfile.A2DP_SINK` is a `@SystemApi`
+needing signature-level `BLUETOOTH_PRIVILEGED` that a sideloaded app cannot hold. AirPlay and DLNA
+already cover "phone streams music to the TV", over Wi-Fi and without the codec penalty.
 
 Google Cast was removed entirely. Port 8009 is permanently held by
 `com.amazon.cast.sink`, and a receiver must answer `DeviceAuthMessage` with a
@@ -118,6 +189,14 @@ Google-CA-signed certificate chain that cannot be obtained. Don't reintroduce it
 | DLNA/UPnP MediaRenderer | 8200 | Working, including GENA eventing |
 
 ## Open bugs
+
+### Orbs look like they flash (projector mode)
+
+Reported repeatedly. Attributed to exponential easing, then to springs; both were changed and it is
+still reported. **Do not guess a third time — measure.** Untested suspect: the fingerprinter
+allocates ~2MB per re-check (`Array(256){FloatArray(1025)}` twice, plus the capture buffer), and a GC
+pause on this hardware looks exactly like orbs flashing. The ten-second test is to switch
+"Identify unknown tracks" off and watch; if it stops, pool those buffers.
 
 ### Cold first connect shows nothing (mirroring)
 
@@ -141,7 +220,7 @@ black SurfaceView up before anyone knows the session type. **Unverified.**
 If that is still not early enough, the next honest option is asking the sender for
 a keyframe rather than racing it.
 
-### The event channel is encrypted and we treat it as plaintext
+### The event channel — encrypted, implemented, and now used to ask for keyframes
 
 `AirPlay Documentation.html` (project folder, not the repo) is explicit: after SETUP the sender
 connects to the event port and **enables encryption**. Keys come from the pair-verify secret —
@@ -149,9 +228,56 @@ salt `Events-Salt`, info `Events-Write-Encryption-Key` (output) and `Events-Read
 (input), with the two reversed on the sender side. The channel is logically *receiver → sender*
 even though the sender opens the socket.
 
-Our handler reads raw bytes off that socket and replies in cleartext RTSP, so it has never parsed
-anything real. The doc also says the receiver is expected to `POST /command` with a
-`updateInfo` plist over this channel once RECORD completes, which we never send.
+`EventCipher` implements exactly that (ChaCha20-Poly1305, HKDF-SHA512), and `AirPlayReceiver`
+holds the cipher and output stream so the receiver can send on it. **This section used to say the
+channel was treated as plaintext; that is no longer true** — and believing it cost a round of
+investigation, because it made the keyframe fix below look like a rewrite when it was a small
+change.
+
+We still never send the `updateInfo` plist the doc expects after RECORD.
+
+### Asking the sender for a keyframe — `forceKeyFrame`
+
+macOS emits roughly **one IDR per mirroring session**. Every path that sets
+`MirrorStreamServer.awaitingKeyframe` — a dropped frame, a frame the decoder rejected, a decoder
+rebuilt against a new Surface — then waits for an IDR that may be many seconds away, and the
+picture is black or smeared for the whole wait. That is the cold-first-connect bug AND the artifact
+bug, and **nothing on this side of the socket can fix either**: the frames do not exist yet.
+
+Apple's own receiver SDK (the CarPlay Communication Plugin sources, same screen protocol) defines
+the lever in `AirPlayCommon.h`:
+
+```c
+/*  ForceKeyFrame: Tells the server to request a key frame from the sender.
+    Used when the decoder crashes, etc.  No request keys.  No response keys.  */
+#define kAirPlayCommand_ForceKeyFrame  "forceKeyFrame"
+```
+
+`AirPlayReceiverSessionForceKeyFrame()` builds `{type: "forceKeyFrame"}` — no params — and POSTs it
+to `/command` on the event client. `AirPlayReceiver.requestKeyFrame()` does the same, rate-limited
+to one per second because an encoder cannot beat that anyway.
+
+**This is enabled while the MediaRemote sends are not, and the difference is not confidence — it is
+that there is nothing here to guess.** MRP's two payload keys were invented by mirroring a
+sender→receiver message and appear in no implementation anywhere. This has a documented name and an
+empty body.
+
+**No open-source receiver does this.** UxPlay, RPiPlay and pyatv all wait passively; a GitHub search
+for `kAirPlayScreenOpCode_ForceKeyFrame` returns only copies of Apple's header. So there is no
+reference implementation to check against, and one thing is genuinely unsettled: Apple's receiver
+sends this through its HTTPClient (`HTTP/1.1`), while a Go implementation verified against real
+Apple hardware uses `RTSP/1.0` on the same socket. We send HTTP/1.1 and log the reply — **a sender
+that cannot parse the request line answers nothing at all**, so silence in the log is the signal to
+flip the token, not evidence that the command is wrong.
+
+There is also a second, unused route: the mirror data socket's own header has
+`kAirPlayScreenOpCode_ForceKeyFrame = 3` alongside the 0/1/2/5 we already handle. Nobody in open
+source has ever written one back up that socket, so whether senders read it is unknown. `/command`
+is the route with a real code path behind it.
+
+**RTCP FIR/PLI does not apply here** — mirroring video is not RTP-over-UDP at all, it is framed
+AVCC over plain TCP, so there is nothing for RTCP feedback to attach to. The RTCP-on-port+1
+references in the wild are the RAOP *audio* side.
 
 ### Remote play/pause/skip — SOLVED, and it was the advertised version all along
 
@@ -240,7 +366,12 @@ macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
 - **`leanback` marked `required="true"` filters the app off every non-TV device**,
   even after a successful `adb install`. It is declared `required="false"` with both
   `LEANBACK_LAUNCHER` and `LAUNCHER` categories so tablets get an icon too.
-- **A wedged Gradle daemon looks exactly like a slow build.** One sat at 230–312%
+- **A wedged Gradle daemon looks exactly like a slow build.** It happens again if the SABRENT
+  drive drops mid-build: the daemon holds its JDK, the SDK and the build output on a volume that
+  has vanished, and then spins forever. Seen at **945 minutes of CPU over 5h09m elapsed with an
+  empty log** — the tell is the log's mtime, not the CPU figure. The rebuild after `kill -9` took
+  4m13s.
+ One sat at 230–312%
   CPU for three hours and silently blocked every later invocation; `pkill -f
   GradleDaemon` did not take, `kill -9 <pid>` did. Check `ps aux | grep GradleDaemon`
   and its accumulated CPU time before believing a build is merely slow.
@@ -267,6 +398,33 @@ macOS Music app. v3 (mirroring/Safari) is fine. Separate RE job.
   EXIT_APP) replaced `backQuitsApp` + `backGoesHome`, which could both be on and described two
   different questions. `SettingsRepository` migrates the old keys on first read.
 
+- **The identification's own result comes back through `withIdentification`.** Both fields it fills
+  had the same bug in different forms: the TITLE, because `hasMetadata` read our own title as the
+  sender's and cleared everything (fixed with `identified`); and the ARTWORK, because
+  `info.artwork ?: identifiedArtwork` preferred our own PREVIOUS cover, which froze the first song's
+  art onto every song after it while the title updated correctly. Anything else merged in there needs
+  the same question asked: *whose value is this on a re-check?*
+- **`hasMetadata` cannot tell OUR title from the sender's.** It only means "has a title", so once an
+  identification is applied the value in `_nowPlaying` carries our own — and `withIdentification`
+  read that as the sender naming the track, cleared the result and cancelled the identifier. Only the
+  first song of a session was ever identified; **every match after it destroyed itself on arrival**.
+  `NowPlayingInfo.identified` is what distinguishes them, and the `&& !info.identified` guard is not
+  optional.
+- **An identified track has a name but no POSITION.** Fingerprinting joins a song partway through and
+  nothing says how far in, so the durationless clock-start in `NowPlayingScreen` must be skipped for
+  it — otherwise a counter runs from 0:00, wrong by however much already played, and reads as a
+  broken timer rather than an unknown one.
+- **`startReceivers()` samples settings ONCE** (`settingsFlow.first()`). That is right for anything
+  consulted only while BUILDING a receiver, and silently wrong for anything toggled during a session:
+  the switch shows as on, nothing happens, and nothing says why. `TrackIdentifier.enabled` had that
+  bug and now has its own collector. **`artworkLookup` still has the same shape** — if online cover
+  art ever "only works after a restart", that is the reason.
+- **A Bluetooth sink needs a bigger AudioTrack buffer than HDMI.** A2DP delivery is bursty and shares
+  an antenna with the Wi-Fi carrying the stream, so the 100ms default drains on any hiccup and
+  stutters. Floored at `AudioRoute.BLUETOOTH_MIN_BUFFER_MS` (250), which is what senders themselves
+  advertise (`latencyMin=11025` at 44100Hz). A floor, not an override. AudioTrack is sized once at
+  construction, so a speaker connecting mid-session does NOT resize it — unlike the visual
+  compensation, which is live.
 - **Sender name.** At `CONNECTED` the only name available is the RTSP User-Agent
   fallback ("AirPlay"). The real name arrives ~40 ms later in the now-playing
   plist, so `rememberSender` is called again from `onNowPlayingChanged`, and a
@@ -338,6 +496,12 @@ Run the whole matrix before pushing:
 
 `./gradlew app:testFiretvDebugUnitTest`. Both flavors must compile.
 
+**This task is NOT in the CI matrix above.** That gap is not free: all four `MdnsServiceTest` cases
+sat red for several commits, because CI runs `:test-runner:test` and nobody ran this locally. The
+failure was in the mocking, not the code — a relaxed mock answers `getString` with `""` rather than
+`null`, so `PairingKeys.load()` took the "already stored" path and tried to build an Ed25519 key
+from a zero-length seed. Run this task if you touch anything it covers; CI will not tell you.
+
 Tests encode intended behaviour, so a failing test after a change is a question,
 not an obstacle — `startOnBoot`'s default was wrong in the model and the test
 caught it. But device evidence outranks a test: the two TEARDOWN tests asserted
@@ -349,4 +513,17 @@ behaviour that demonstrably broke iOS, and were rewritten.
   surprising. The exFAT zeroing and the volume permission both needed it
 - Installing to the device is expected. Verify on-device rather than asking the
   user to check, and say plainly when something is still unverified
-- Never `am start` after install; never `pm clear` without saying so first
+- Never `am start` *as part of an install*. The user has since granted standing permission to drive
+  the Fire TV — launching (`monkey -p ... -c android.intent.category.LEANBACK_LAUNCHER 1`), key
+  injection and `exec-out screencap` are all fine for verifying a change. Say when you do it.
+- Never `pm clear` without saying so first
+- **The diagnostic server needs no drive.** `curl http://192.168.1.246:8001/` works whenever the TV
+  is up, so a missing SABRENT costs you the build and `adb` — not the logs. There is also a second
+  `adb` under `SideQuest/platform-tools`; it runs its own server and fails to authenticate against
+  the Fire TV, so always use `$ANDROID_HOME/platform-tools/adb`.
+- The SABRENT drive is often **attached but not mounted** after a reconnect: `diskutil list external`
+  shows it, `/Volumes` does not. `diskutil mount disk4s2` fixes it. Without it the wrapper fails with
+  "JAVA_HOME is set to an invalid directory", which reads like a config error and is not one.
+- `~/.gradle/caches` accumulates whole Gradle versions from *other* projects on this machine (Apple
+  Music TV). It reached 12 GB with 8.5 GB of it a version this project cannot use. Only `8.7` and the
+  matching wrapper dist are needed here.

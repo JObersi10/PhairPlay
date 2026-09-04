@@ -1,13 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Reusable toggle row for boolean settings (Switch + label + subtitle) -->
+<!-- Reusable toggle row for boolean settings (Switch + label + subtitle).
+     Shares row_focus_selector and row_height with the tappable rows in fragment_settings, so a
+     list of mixed row types reads as one list. It previously used focus_ring_selector, which
+     painted a permanent raised card: in a column of otherwise flat rows the toggles looked
+     highlighted at rest and competed with whichever row actually had focus. -->
 <LinearLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="72dp"
+    android:layout_height="wrap_content"
+            android:minHeight="@dimen/row_height"
+            android:paddingVertical="@dimen/space_sm"
     android:orientation="horizontal"
     android:gravity="center_vertical"
-    android:paddingHorizontal="16dp"
-    android:background="@drawable/focus_ring_selector"
+    android:paddingHorizontal="@dimen/row_padding_horizontal"
+    android:background="@drawable/row_focus_selector"
     android:focusable="true">
 
     <LinearLayout
@@ -21,14 +27,14 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="@color/text_primary"
-            android:textSize="18sp" />
+            android:textSize="@dimen/text_body" />
 
         <TextView
             android:id="@+id/text_setting_subtitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="@color/text_secondary"
-            android:textSize="13sp"
+            android:textSize="@dimen/text_secondary"
             android:visibility="gone" />
 
     </LinearLayout>

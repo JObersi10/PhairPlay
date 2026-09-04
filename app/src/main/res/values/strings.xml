@@ -18,7 +18,6 @@
     <!-- ── HomeFragment ────────────────────────────────────────── -->
     <string name="home_title">Ready for connections</string>
     <!-- %1$s = device name shown in sender pickers -->
-    <string name="home_device_visible_as">Visible as: %1$s</string>
 
     <!-- ── Protocol names ──────────────────────────────────────── -->
     <string name="protocol_airplay">AirPlay</string>
@@ -84,7 +83,7 @@
     <string name="setting_miracast_enabled">Miracast Receiver</string>
     <string name="setting_miracast_subtitle">Accept connections from Windows and Android</string>
     <string name="setting_homekit_enabled">HomeKit</string>
-    <string name="setting_homekit_subtitle">Add PhairPlay to the Home app as a TV. Lets you use the iPhone remote and Siri.</string>
+    <string name="setting_homekit_subtitle">Add to the Home app for iPhone remote and Siri.</string>
     <string name="setting_homekit_code">Pairing code: %1$s</string>
     <string name="setting_homekit_paired">Paired with your Home</string>
     <string name="setting_homekit_off">Turn HomeKit on to see the pairing code</string>
@@ -142,13 +141,24 @@
     <string name="setting_beat_pulse_normal">Normal</string>
     <string name="setting_beat_pulse_strong">Strong</string>
     <string name="setting_beat_pulse_insane">Insane</string>
+    <string name="setting_beta_updates">Beta updates</string>
+    <string name="setting_beta_updates_subtitle">Offer the rolling dev build from every push, not just tagged releases</string>
+    <string name="setting_multi_screen">Multi-screen</string>
+    <string name="setting_multi_screen_subtitle">Show more than one sender at once, side by side</string>
+    <string name="setting_orb_speed">Orb speed</string>
+    <string name="setting_orb_speed_subtitle">How fast the projector orbs drift around each other</string>
+    <string name="setting_orb_speed_slow">Slow</string>
+    <string name="setting_orb_speed_normal">Normal</string>
+    <string name="setting_orb_speed_fast">Fast</string>
     <string name="setting_audio_delay">Audio delay</string>
     <string name="setting_audio_delay_none">None</string>
     <string name="setting_audio_delay_subtitle">Hold audio back further if it runs ahead of the sender</string>
-    <string name="setting_beat_delay">Beat delay</string>
-    <string name="setting_beat_delay_subtitle">Shift the beat animation later to match a Bluetooth speaker</string>
+    <!-- Shown under Audio delay while a Bluetooth speaker is connected. It states a compensation
+         the app is already applying; it is not something the user sets. %1$s is the speaker name,
+         %2$d the milliseconds. -->
+    <string name="setting_audio_delay_bluetooth">%1$s detected \u2022 already compensating %2$d ms automatically</string>
     <string name="setting_pip">Picture-in-picture</string>
-    <string name="setting_pip_subtitle">Shrink mirrored video into a corner when you leave the app</string>
+    <string name="setting_pip_subtitle">Shrink video to a corner when you leave the app</string>
     <string name="setting_back_action">Back button</string>
     <string name="setting_back_action_subtitle">What happens when you press Back</string>
     <string name="back_action_stop_stream">Stop the stream</string>
@@ -168,8 +178,8 @@
     <string name="setting_version_value">%1$s \u00b7 %2$s</string>
     <string name="setting_update">Check for updates</string>
     <string name="setting_update_checking">Checking…</string>
-    <string name="setting_update_uptodate">Up to date (%1$s)</string>
-    <string name="setting_update_available">%1$s available</string>
+    <string name="setting_update_uptodate">Up to date — %1$s · %2$s</string>
+    <string name="setting_update_available">%1$s available — you have %2$s</string>
     <string name="setting_update_failed">Check failed</string>
     <string name="setting_update_no_asset">Release %1$s has no APK attached, so there is nothing to install from here.</string>
     <string name="setting_update_download_failed">Download failed. Nothing was installed.</string>
@@ -258,7 +268,7 @@
     <string name="protocol_detail_last_sender">Last: %1$s · %2$s</string>
     <string name="last_sender_just_now">just now</string>
     <string name="setting_remember_pin">Remember paired senders</string>
-    <string name="setting_remember_pin_subtitle">A sender that has entered the PIN once won\'t be asked again</string>
+    <string name="setting_remember_pin_subtitle">Ask each sender for the PIN only once</string>
     <string name="setting_forget_pairings">Forget paired senders</string>
     <string name="setting_input_apps">Home app shortcuts</string>
     <string name="setting_input_apps_none">None</string>
@@ -284,7 +294,7 @@
     <string name="time_remaining_format">-%1$s</string>
     <string name="audio_from_sender">Audio from %1$s</string>
     <string name="onboarding_step">STEP %1$d OF %2$d</string>
-    <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  Tail: http://%2$s:%4$s</string>
+    <string name="settings_version_logs">%1$s\nLogs: http://%2$s:%3$s  ·  live: /tail</string>
 
     <!-- Permissions section -->
     <string name="settings_section_permissions">Permissions</string>
@@ -293,20 +303,26 @@
     <string name="setting_perm_remote">Remote control outside PhairPlay</string>
     <string name="setting_perm_remote_granted">Granted. The remote can navigate outside PhairPlay — but Fire TV blocks the normal way to move the selection, so expect it to be unresponsive or to skip around on the home screen and in apps like Netflix. Root is the only way to make this reliable everywhere.</string>
     <string name="setting_remote">Remote control</string>
-    <string name="setting_remote_subtitle">Off by default. Works properly inside PhairPlay; unreliable elsewhere — see the permission notice below.</string>
+    <string name="setting_remote_subtitle">Reliable inside PhairPlay only. See Permissions.</string>
 
     <string name="setting_artwork_lookup">Find missing album art</string>
-    <string name="setting_artwork_lookup_subtitle">When a sender streams without cover art — most DLNA apps do — look one up by title using MusicBrainz and the Cover Art Archive. Track names are sent to those services while this is on.</string>
+    <string name="setting_artwork_lookup_subtitle">Look up missing cover art online. Sends track names to MusicBrainz.</string>
+    <string name="setting_identify_tracks">Identify unknown tracks</string>
+    <string name="setting_identify_tracks_subtitle">When a sender streams audio without naming it, listen for 12 seconds and ask Shazam what it is. Sends an audio fingerprint, not the audio.</string>
+    <string name="setting_identify_interval">Re-check what is playing</string>
+    <string name="setting_identify_interval_subtitle">How often to look the track up again. A stream with no metadata gives no track-change signal, so this is the only way the name keeps up with the music.</string>
+    <string name="setting_identify_interval_continuous">Continuously (12s)</string>
+    <string name="setting_identify_interval_seconds">Every %1$s</string>
     <string name="setting_backdrop">Backdrop</string>
     <string name="setting_backdrop_subtitle">What fills the screen behind the Now Playing card.</string>
     <string name="backdrop_dynamic">Dynamic</string>
     <string name="backdrop_dynamic_detail">Album colours across the whole screen, moving with the beat.</string>
     <string name="backdrop_projector">Projector</string>
-    <string name="backdrop_projector_detail">Three band orbs on true black, faded out on every side so a projected image has no visible edge.</string>
+    <string name="backdrop_projector_detail">Three orbs on true black, edges faded for projectors.</string>
     <string name="backdrop_black">Black</string>
     <string name="backdrop_black_detail">Plain black. No colour and nothing moving.</string>
     <string name="setting_stream_end">Exit when the stream ends</string>
-    <string name="setting_stream_end_subtitle">Leave for the Fire TV home screen as soon as the sender stops. Off keeps PhairPlay on screen, ready for the next stream.</string>
+    <string name="setting_stream_end_subtitle">Leave for the TV home screen when the sender stops</string>
     <string name="setting_perm_overlay">Show the remote\'s focus ring</string>
     <string name="setting_perm_overlay_granted">Granted. The remote draws its own highlight in apps that will not move theirs — the Fire TV launcher among them.</string>
     <string name="setting_perm_overlay_explanation">The Fire TV launcher refuses to move its highlight for the remote, so PhairPlay draws its own ring instead. Without this the remote still navigates and selects — you just cannot see where it is.</string>
@@ -317,4 +333,22 @@
     <string name="setting_perm_remote_adb">Fire TV does not list third-party accessibility services in its Settings menu, so this has to be granted over adb:\n\n%1$s\n\nEven once granted, expect the remote to be unresponsive or to skip around on the Fire TV home screen and in apps like Netflix. Fire TV blocks the way apps normally move the selection, so PhairPlay has to fake it with a drawn highlight and synthetic swipes. Inside PhairPlay the remote works properly. A rooted Fire TV can inject real button presses and is the only way to get this working everywhere.</string>
     <string name="setting_perm_sleep_explanation">Lets PhairPlay blank the display when you turn it off from the Home app. Nothing else uses this.</string>
     <string name="setting_perm_no_screen">This Fire TV has no screen for that permission. Grant it from a computer instead:\n\n%1$s</string>
+
+    <!-- Settings categories (left pane). These replaced the old settings_section_* headers:
+         the category name now labels the pane, so a separate in-pane header repeated it. -->
+    <!-- Settings sections, ordered the way someone actually arrives at them: how the TV is found,
+         how it lets senders in, then how a stream sounds, looks, and is controlled. -->
+    <string name="settings_cat_homekit">HomeKit &amp; Remote</string>
+    <string name="settings_cat_mirroring">Mirroring &amp; Audio</string>
+    <string name="settings_cat_connection">Connection &amp; Security</string>
+    <string name="settings_cat_nowplaying">Now Playing</string>
+    <string name="settings_cat_system">System &amp; About</string>
+
+    <!-- Home hero: labels the device name as the thing to choose on the phone. -->
+    <string name="home_pick_this">Select this on your device</string>
+
+    <!-- Home: last device that connected. Framed as reassurance ("this worked before") rather than
+         as a log line. -->
+    <string name="home_last_connected">Last connected · %1$s · %2$s</string>
+    <string name="home_ready">Ready to receive</string>
 </resources>

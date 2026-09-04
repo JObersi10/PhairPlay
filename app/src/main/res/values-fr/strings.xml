@@ -14,7 +14,6 @@
 
     <!-- ── HomeFragment ────────────────────────────────────────── -->
     <string name="home_title">Prêt pour les connexions</string>
-    <string name="home_device_visible_as">Visible sous le nom : %1$s</string>
 
     <!-- ── Protocol states ─────────────────────────────────────── -->
     <string name="protocol_state_disabled">Désactivé</string>

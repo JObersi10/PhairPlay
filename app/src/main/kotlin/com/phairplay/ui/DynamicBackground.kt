@@ -5,19 +5,20 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.Shader
-import android.os.Handler
-import android.os.Looper
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
+import android.view.Choreographer
 import androidx.palette.graphics.Palette
 import com.phairplay.settings.BackdropTheme
 import com.phairplay.util.Logger
+import kotlin.math.pow
 
 class DynamicBackground @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -47,50 +48,177 @@ class DynamicBackground @JvmOverloads constructor(
     private var energyTarget = 0f
 
     // 3 prime-period animators 0→1 REVERSE
-    private val t1 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 20_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
-    private val t2 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 27_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
-    private val t3 = ValueAnimator.ofFloat(0f, 1f).apply { duration = 34_000; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t1 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[0]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t2 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[1]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
+    private val t3 = ValueAnimator.ofFloat(0f, 1f).apply { duration = ORBIT_MS[2]; repeatCount = ValueAnimator.INFINITE; repeatMode = ValueAnimator.REVERSE; interpolator = LinearInterpolator() }
 
     private val colorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 1500
         addUpdateListener { colorFade = it.animatedValue as Float }
     }
 
-    private val handler = Handler(Looper.getMainLooper())
-    private val tick = object : Runnable {
-        override fun run() {
-            // These rates are PER FRAME, so halving the frame rate doubles every time constant.
-            // Scaled up to keep the same response in milliseconds as at 60fps -- without this the
-            // orbs get visibly mushier the moment the redraw slows down.
-            energy += (energyTarget - energy) * 0.36f
-            // Per-orb easing toward the latest band level. Asymmetric on purpose: a glow should
-            // arrive with the hit and fade out afterwards, so rising is quick and falling is slow.
-            // Symmetric easing looked like the orbs were breathing on a timer rather than reacting.
-            for (i in 0 until 3) {
-                val d = orbTarget[i] - orbEnergy[i]
-                val rate = if (d > 0f) ORB_ATTACK[i] else ORB_RELEASE[i]
-                orbEnergy[i] += d * rate
-            }
-            bandBass = orbEnergy[0]
-            bandVocal = orbEnergy[1]
-            bandTreble = orbEnergy[2]
-            invalidate()
-            // Half rate in a PiP window. The backdrop is then a few hundred pixels wide and nobody
-            // is studying it, but the full-rate redraw competes for CPU with the video decoder and
-            // the audio writer -- which is exactly when the hiccups were reported.
-            // 30fps, NOT 60. The band levels this is drawn from are emitted every 33ms, so half of
-            // a 60fps redraw was recomposing four screen-sized gradients to show data that had not
-            // changed. Nothing on screen moves faster than its source.
-            handler.postDelayed(this, if (lowPower) 50L else 33L)
+    private val choreographer: Choreographer = Choreographer.getInstance()
+    /** Frame time of the previous callback, for the elapsed-time smoothing below. 0 = first frame. */
+    private var lastFrameNs = 0L
+    /** Vsync counter for the fixed draw stride. */
+    private var frameCount = 0
+    private var frameLoopRunning = false
+
+    /**
+     * The redraw loop, driven by the display's own vsync rather than a fixed delay.
+     *
+     * It used to be `handler.postDelayed(this, 33L)`. Two things were wrong with that, and the
+     * visible one is not the frame rate:
+     *
+     * **A 33 ms period beats against a 16.67 ms refresh.** The orbs are drawn wherever the orbit
+     * animators happen to be when the Runnable fires, and that instant drifts through the vsync
+     * interval — so a frame is held for two refreshes, then three, then two, forever. The motion is
+     * mathematically perfectly smooth and looks like it is stuttering, which is exactly the
+     * complaint. Nothing about a fixed `postDelayed` can be in phase with the display; only a
+     * Choreographer callback is. (Apple's equivalent, and the reason Music's visuals look glued to
+     * the screen, is CADisplayLink.)
+     *
+     * **The orbs move continuously, even when the levels do not.** The old comment justified 30fps
+     * on the grounds that band levels only arrive every 33 ms, so a 60fps redraw would be showing
+     * data that had not changed. That is true of the *swell* and false of the *position*: t1/t2/t3
+     * run 20/27/34-second orbits that are a different value at every single vsync. Halving the
+     * sample rate of a continuous motion halves its smoothness no matter how slowly its brightness
+     * changes.
+     */
+    private val frameCallback = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            if (!frameLoopRunning) return
+
+            // Clamped: a GC pause or a backgrounded window can hand back an arbitrarily large gap,
+            // and letting that through would snap every orb straight to its target in one step.
+            val dtMs = if (lastFrameNs == 0L) REF_FRAME_MS
+                       else ((frameTimeNanos - lastFrameNs) / 1_000_000f).coerceIn(1f, 100f)
+            lastFrameNs = frameTimeNanos
+
+            advanceLevels(dtMs)
+
+            // A FIXED STRIDE, because a steady cadence is what reads as smooth — not a higher
+            // average rate. Skipping the DRAW while still advancing the levels above keeps the
+            // timing right: those are elapsed-time based now, so a skipped frame costs smoothness
+            // and never accuracy. (A PiP window strides further still — the backdrop is a few
+            // hundred pixels wide there and competes for CPU with the video decoder.)
+            //
+            // gfxinfo once measured ~19ms of GPU per frame here — ten-odd full-screen SCREEN passes
+            // at 1080p, with Slow UI thread and Missed Vsync both zero, i.e. a pure fill-rate wall
+            // that no amount of scheduling could get under 16.6ms. The stride was pinned to 2 then:
+            // a free-running loop alternated 1-2-1-2 refreshes per frame (~50fps, period always
+            // changing), and an exactly even 30 read as steadier than that flutter.
+            //
+            // The half-resolution composite buffer (see onDraw) quartered that fill and put the
+            // frame back inside 16.6ms, so FRAME_STRIDE is now 1 — a true, steady 60. The stride
+            // machinery is kept because it is still the one-line lever back to an even 30 if a
+            // future change re-inflates the per-frame cost, and because the PiP path below leans on
+            // it: there the backdrop is a few hundred pixels wide and competes with the video
+            // decoder, so it strides further regardless of the fill headroom.
+            frameCount++
+            val stride = if (lowPower) LOW_POWER_STRIDE else FRAME_STRIDE
+            if (frameCount % stride == 0) invalidate()
+            choreographer.postFrameCallback(this)
         }
+    }
+
+    private fun startFrameLoop() {
+        if (frameLoopRunning) return
+        frameLoopRunning = true
+        lastFrameNs = 0L
+        frameCount = 0
+        choreographer.postFrameCallback(frameCallback)
+    }
+
+    private fun stopFrameLoop() {
+        frameLoopRunning = false
+        choreographer.removeFrameCallback(frameCallback)
+    }
+
+    /**
+     * Advances every smoothed level by [dtMs] of real time.
+     *
+     * The rates are written as "fraction of the remaining gap closed in one [REF_FRAME_MS] frame",
+     * which is how they were originally tuned, and are converted here to the equivalent for however
+     * long this frame actually took. Applying a fixed per-frame fraction — which is what this did
+     * before — makes every time constant a function of the frame rate, so the orbs got mushier
+     * whenever the redraw slowed down and snappier whenever it sped up. Compounding it properly
+     * means a gap takes the same wall-clock time to close at 60fps, at 30fps, and while stuttering.
+     */
+    private fun advanceLevels(dtMs: Float) {
+        energy += (energyTarget - energy) * decay(ENERGY_RATE, dtMs)
+
+        // SPRINGS, NOT EXPONENTIAL EASING — this is what the orbs were missing.
+        //
+        // The band levels arrive as a STAIRCASE: one value every ~33ms from the analyser, held
+        // constant in between. Exponential easing has no memory, so each new step restarts a fresh
+        // decelerating ramp from a standstill; the result is thirty little ease-outs a second, and
+        // the eye reads that pattern of repeated starts and stops as stepping however fine the
+        // steps are. It is smooth in the sense of continuous and not smooth in the sense of
+        // *fluid*, which is exactly the complaint.
+        //
+        // A spring carries VELOCITY across the target changing. Arriving at a step with momentum,
+        // it keeps moving through it and bends toward the next one, so a staircase input comes out
+        // as one continuous curve rather than a chain of separate moves. This is also what Apple
+        // Music TV does — its orbs put a Compose spring on each band on top of the same kind of
+        // 33ms DSP output — and it is the real difference between the two, not the frame rate.
+        //
+        // Integrated in fixed sub-steps because explicit integration goes unstable once dt exceeds
+        // ~2/omega; a dropped frame would otherwise make the orbs detonate rather than lag.
+        var remaining = (dtMs / 1000f).coerceAtMost(0.1f)
+        while (remaining > 0f) {
+            val step = minOf(remaining, SPRING_MAX_STEP_S)
+            for (i in 0 until 3) {
+                val accel = -ORB_STIFFNESS * (orbEnergy[i] - orbTarget[i]) - ORB_DAMPING * orbVel[i]
+                orbVel[i] += accel * step
+                orbEnergy[i] = (orbEnergy[i] + orbVel[i] * step).coerceIn(0f, ORB_LEVEL_CEILING)
+            }
+            for (i in 0 until 3) {
+                val accel = -FIELD_STIFFNESS * (fieldEnergy[i] - orbTarget[i]) -
+                            FIELD_DAMPING * fieldVel[i]
+                fieldVel[i] += accel * step
+                fieldEnergy[i] = (fieldEnergy[i] + fieldVel[i] * step).coerceIn(0f, ORB_LEVEL_CEILING)
+            }
+            remaining -= step
+        }
+        bandBass = fieldEnergy[0]
+        bandVocal = fieldEnergy[1]
+        bandTreble = fieldEnergy[2]
+    }
+
+    /**
+     * The blob field's own spring state, separate from the orbs'.
+     *
+     * Both backdrops used to read `orbEnergy`, so the field inherited a spring tuned for three
+     * small bounded orbs on black — where overshoot is a flare you want. Four screen-sized blobs do
+     * not flare, they lumber: the same bloom that reads as a hit on an orb reads as the whole
+     * picture arriving late and soft, which is the field being "too smooth".
+     */
+    private val fieldVel = FloatArray(3)
+    private val fieldEnergy = FloatArray(3)
+
+    /** Per-orb spring velocity. The state that exponential easing did not have. */
+    private val orbVel = FloatArray(3)
+
+    /**
+     * The fraction of the remaining gap to close this frame, for a rate expressed per
+     * [REF_FRAME_MS]. Two half-length frames compose to exactly one full-length one.
+     */
+    private fun decay(ratePerRefFrame: Float, dtMs: Float): Float {
+        if (ratePerRefFrame >= 1f) return 1f
+        return 1f - (1f - ratePerRefFrame).toDouble().pow((dtMs / REF_FRAME_MS).toDouble()).toFloat()
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         t1.start(); t2.start(); t3.start()
-        if (backdropTheme != BackdropTheme.BLACK) handler.post(tick)
+        if (backdropTheme != BackdropTheme.BLACK) startFrameLoop()
     }
-    override fun onDetachedFromWindow() { super.onDetachedFromWindow(); t1.cancel(); t2.cancel(); t3.cancel(); handler.removeCallbacks(tick) }
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        t1.cancel(); t2.cancel(); t3.cancel()
+        stopFrameLoop()
+    }
 
     fun setEnergy(e: Float) {
         energyTarget = e
@@ -140,7 +268,11 @@ class DynamicBackground @JvmOverloads constructor(
     private var lowPower = false
 
     fun updateColors(bitmap: Bitmap) {
-        Palette.from(bitmap).maximumColorCount(16).generate { palette ->
+        // 32, not Palette's default 16. The finer quantisation is what surfaces SMALL accent
+        // regions -- a teal logo, a red jacket on an otherwise blue sleeve -- which at 16 get merged
+        // into the nearest large area and never reach the pool the hue filter picks from. Costs one
+        // more k-means pass on a 256px bitmap, once per track.
+        Palette.from(bitmap).maximumColorCount(32).generate { palette ->
             if (palette == null) return@generate
             // The six NAMED swatches plus every swatch Palette actually found.
             //
@@ -230,7 +362,52 @@ class DynamicBackground @JvmOverloads constructor(
         colorAnim.cancel(); colorAnim.start()
     }
 
-    override fun onDraw(canvas: Canvas) {
+    /**
+     * Composites the backdrop into a half-resolution buffer and scales it up.
+     *
+     * Measured on the Fire TV with `dumpsys gfxinfo`: 18 ms median frame, **19–20 ms of it on the
+     * GPU**, 71% of frames janky — while `Slow UI thread` and `Missed Vsync` were both zero. So the
+     * Kotlin costs nothing and the shortfall is pure fill rate: the field is an opaque base plus
+     * four full-screen blobs plus three orbs of two gradients each plus a vignette, every one of
+     * them SCREEN-blended across all 1920x1080. Ten-odd full-screen passes will not fit in 16.6 ms
+     * on this GPU no matter how the loop is scheduled, which is why vsync alignment alone left it
+     * at roughly 50fps.
+     *
+     * Quartering the pixels quarters all of that, at a cost of one bilinear upscale. It is close to
+     * free *visually* because every source here is a wide, soft radial gradient — there is no
+     * high-frequency detail for the half-resolution grid to lose. This is not a trick that would
+     * survive on text or on the artwork; it works because of what this particular view draws.
+     *
+     * The canvas is pre-scaled rather than the geometry, so every coordinate below stays in
+     * full-resolution space and the composition is identical — radii, centres and the vignette all
+     * keep their tuned values instead of needing a second set for the scaled buffer.
+     */
+    /**
+     * Draws straight onto the View's own hardware canvas.
+     *
+     * A HALF-RESOLUTION SCRATCH BITMAP USED TO SIT HERE, AND IT MADE THINGS MUCH WORSE. The idea
+     * was sound on paper — quarter the pixels of ten full-screen blended passes, pay one bilinear
+     * upscale — but `Canvas(bitmap)` is a SOFTWARE canvas. Every radial gradient was then
+     * rasterised by the CPU, on the UI thread, once per frame, and only the final blit reached the
+     * GPU.
+     *
+     * dumpsys gfxinfo on the device, backdrop running:
+     *
+     *     50th percentile: 46ms     90th: 81ms     99th: 200ms
+     *     50th gpu percentile: 4ms  90th gpu: 5ms
+     *     Slow UI thread: 3654 of 6186 frames
+     *
+     * A GPU sitting at 4ms behind 46ms frames is the whole diagnosis: the work did not get
+     * smaller, it moved onto the slower processor and off the one built for it. Direct drawing
+     * costs ~19ms of GPU and near-zero UI thread, which is worse in theory and twice as fast in
+     * fact.
+     *
+     * If this is attempted again it has to be a hardware layer, not a Bitmap — and the measurement
+     * to check is `gpu percentile` against the total, not the total alone.
+     */
+    override fun onDraw(canvas: Canvas) = drawBackdrop(canvas)
+
+    private fun drawBackdrop(canvas: Canvas) {
         // Nothing to compose: no palette, no beat, no edge treatment. Just the card on black.
         if (backdropTheme == BackdropTheme.BLACK) {
             canvas.drawColor(Color.BLACK)
@@ -247,7 +424,7 @@ class DynamicBackground @JvmOverloads constructor(
         // Levels stay 0..1; the intensity setting is applied to the RENDER below, never to the
         // level itself. See the note in drawOrb -- a pre-clip multiply pins the top of the range
         // flat and makes the highest settings indistinguishable from one another.
-        val amp = beatMultiplier
+        val amp = fieldMultiplier
         val e = energy.coerceIn(0f, 1f)
         // BAND ENVELOPES ONLY -- `energy` is deliberately not mixed in here any more.
         //
@@ -265,8 +442,16 @@ class DynamicBackground @JvmOverloads constructor(
         // on every kick. That is what read as "too sensitive" -- the response was not too large in
         // magnitude, it was applied to the one property that affects every pixel at once. The beat
         // now shows as size, which is local and reads correctly from across a room.
+        // ALPHA DOES NOT TAKE THE INTENSITY DIAL, and that is the fix for "Strong just saturates
+        // the colours".
+        //
+        // These blobs are SCREEN-blended, which is additive, and they cover the whole screen. Push
+        // their alpha up and overlapping colours sum toward white — so turning Beat Pulse up did
+        // not make the field react harder, it washed the picture out and slammed into
+        // FIELD_ALPHA_CAP on every beat, which is the sudden flash. Intensity belongs on SIZE,
+        // where it is local and where more of it reads as more movement rather than less colour.
         val beatAlpha =
-            (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA * amp).coerceAtMost(FIELD_ALPHA_CAP)
+            (FIELD_BASE_ALPHA + treble * FIELD_BEAT_ALPHA).coerceAtMost(FIELD_ALPHA_CAP)
 
         // Black base required for SCREEN blend. Projector mode uses TRUE black rather than the
         // near-black used on a TV: #050505 is a deliberate lift that stops OLED/LCD panels crushing
@@ -344,10 +529,21 @@ class DynamicBackground @JvmOverloads constructor(
         // composition still has one member that moves with everything.
         val mean = (bass + vocal + treble) / 3f
         val base = maxOf(w, h) * FIELD_BASE_RADIUS
-        blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp), cs[0], beatAlpha)
-        blob(canvas, 1, cx1, cy1, base * blobScale(vocal, amp), cs[1], beatAlpha)
-        blob(canvas, 2, cx2, cy2, base * blobScale(treble, amp), cs[2], beatAlpha)
-        blob(canvas, 3, cx3, cy3, base * blobScale(mean, amp), cs[3], beatAlpha)
+        // WEIGHTED TOWARD BASS, rather than each blob following its own band alone.
+        //
+        // Per-band motion is right for the projector orbs, which are small, separated and read
+        // individually. At screen size it is three rhythms competing across one picture, and the
+        // eye cannot attribute them to anything — it just reads as busy.
+        //
+        // Going all the way to bass-only would fix that and cost more than it is worth: four blobs
+        // moving identically are one shape, and the reason there are four is four palette colours
+        // drifting independently. Mixing most of the way to bass keeps them distinct while making
+        // the field read as ONE beat, which is the "leaner" part.
+        fun led(own: Float) = own + (bass - own) * FIELD_BASS_LEAD
+        blob(canvas, 0, cx0, cy0, base * blobScale(bass, amp, e), cs[0], beatAlpha)
+        blob(canvas, 1, cx1, cy1, base * blobScale(led(vocal), amp, e), cs[1], beatAlpha)
+        blob(canvas, 2, cx2, cy2, base * blobScale(led(treble), amp, e), cs[2], beatAlpha)
+        blob(canvas, 3, cx3, cy3, base * blobScale(led(mean), amp, e), cs[3], beatAlpha)
 
         // Darken only where the text actually sits, not a whole screen edge — enough contrast for
         // the title/artist/album to stay legible without muting the rest of the backdrop.
@@ -376,7 +572,51 @@ class DynamicBackground @JvmOverloads constructor(
     }
 
     /** Beat Pulse strength from Settings: Normal 1x, Strong 2x, Insane 3.5x. */
-    fun setBeatMultiplier(m: Float) { beatMultiplier = m }
+    /** Projector orbs. */
+    fun setOrbBeatMultiplier(m: Float) { beatMultiplier = m }
+
+    /**
+     * Dynamic blob field, kept separate from the orbs' multiplier.
+     *
+     * The two backdrops answer to the same music through completely different geometry — three
+     * bounded orbs on black against four screen-sized blobs SCREEN-blended over each other — so a
+     * setting that looks right on one is wrong on the other by construction. One dial could only
+     * ever suit whichever was tuned last.
+     */
+    fun setFieldBeatMultiplier(m: Float) { fieldMultiplier = m }
+
+    /**
+     * How fast the orbs travel their ellipses: 0 = Slow, 1 = Normal, 2 = Fast.
+     *
+     * Applied by rescaling the three orbit animators' durations rather than by multiplying their
+     * output, because their PERIODS are deliberately co-prime (20/27/34s) — that is what stops the
+     * composition repeating. Scaling all three by the same factor keeps them co-prime; scaling the
+     * values instead would have wrapped them against each other and produced a visible cycle.
+     *
+     * The current position is preserved across the change so the orbs do not jump when the setting
+     * is touched mid-track.
+     */
+    fun setOrbSpeed(level: Int) {
+        val factor = when (level) {
+            0 -> 0.6f
+            2 -> 1.7f
+            else -> 1f
+        }
+        if (factor == orbSpeedFactor) return
+        orbSpeedFactor = factor
+        listOf(t1 to ORBIT_MS[0], t2 to ORBIT_MS[1], t3 to ORBIT_MS[2]).forEach { (anim, base) ->
+            val wasRunning = anim.isStarted
+            val at = anim.animatedFraction
+            anim.cancel()
+            anim.duration = (base / factor).toLong().coerceAtLeast(1_000L)
+            if (wasRunning) {
+                anim.start()
+                anim.currentPlayTime = (anim.duration * at).toLong()
+            }
+        }
+    }
+
+    @Volatile private var orbSpeedFactor = 1f
 
 
     /**
@@ -393,7 +633,7 @@ class DynamicBackground @JvmOverloads constructor(
         // BLACK stops the redraw loop rather than merely drawing nothing. A 60fps invalidate that
         // paints one rectangle is still 60 frames a second of compositing on a device that has
         // little to spare, for a picture that cannot change. The loop restarts on the way out.
-        if (theme == BackdropTheme.BLACK) handler.removeCallbacks(tick) else handler.post(tick)
+        if (theme == BackdropTheme.BLACK) stopFrameLoop() else startFrameLoop()
         invalidate()
     }
 
@@ -528,80 +768,66 @@ class DynamicBackground @JvmOverloads constructor(
      * a visible outer ring where the gradient terminates; easing it out means the last of the light
      * approaches black asymptotically and the boundary cannot be located by eye.
      */
+    /**
+     * Projector mode — a direct port of Apple Music TV's implementation, so the two match.
+     *
+     * Three orbs on true black, one per band, each on its own slow circle. Every geometric and
+     * alpha figure below is AMTV's: anchors 0.52/0.62/0.72 across and 0.44/0.56/0.46 down, a
+     * 0.08w x 0.045h circle, base radii 0.26/0.21/0.16 of the short side, and a size ride of
+     * 0.75/0.85/1.05 capped at 2.2. Halo alpha runs 0.24 + level*0.42 (ceiling 0.9), the core is
+     * 0.34 of the radius at 0.12 + level*0.62 (ceiling 0.92), whitened 60% toward white.
+     *
+     * Two things are deliberately NOT copied verbatim, both because Compose can afford what a
+     * Canvas on this device cannot:
+     *
+     * - AMTV builds a Brush per orb per frame. Here the gradients stay cached and keyed on the
+     *   quantised tint, with alpha applied through the Paint instead of baked into the stops —
+     *   which is arithmetically the same result, since a 2-stop `[colour@a, colour@0]` ramp scaled
+     *   by paint alpha `a` is identical to baking `a` into the first stop.
+     * - The four edge fades are drawn over their own 10% strips rather than as four full-screen
+     *   rects. Outside its band each gradient has clamped to fully transparent and is contributing
+     *   nothing, so the visible result is identical while the fill cost drops from four whole
+     *   screens to about four tenths of one — and this GPU is already the binding constraint.
+     *
+     * The edge treatment is what lets the radius clamp go. The old code bounded each orb to the
+     * distance from its own centre to the nearest side, which is why the anchors had to be huddled
+     * in the middle and why a big swell could stop growing mid-beat. Dissolving the frame to black
+     * on all four sides means an orb running off the edge simply fades out, which is both what a
+     * projector needs and what frees the composition to spread out.
+     */
     private fun drawOrb(canvas: Canvas, w: Float, h: Float, energy: Float) {
         canvas.drawColor(Color.BLACK)
         if (w <= 0f || h <= 0f) return
 
-        // Three orbs, each carrying its own palette colour, orbiting slowly and breathing on the
-        // beat. SCREEN blending means where two overlap the light ADDS, the way two real glows
-        // would, instead of one occluding the other -- and against the true black already filling
-        // the canvas that needs no offscreen layer, for the reason documented in the field branch.
         val short = minOf(w, h)
-        val a1 = t1.animatedValue as Float
-        val a2 = t2.animatedValue as Float
-        val a3 = t3.animatedValue as Float
+        val amp = beatMultiplier
+        val cf = colorFade
+        val drifts = floatArrayOf(
+            t1.animatedValue as Float, t2.animatedValue as Float, t3.animatedValue as Float,
+        )
 
         for (k in 0 until ORB_COUNT) {
-            // ORBITS, not linear drift.
-            //
-            // The previous version moved each orb along a straight line (a triangle-wave animator
-            // scaled into an offset), which reads as sliding rather than floating and, worse, makes
-            // two orbs approach and retreat along the same axis so they never really pass through
-            // one another. Driving x with cos and y with sin -- from DIFFERENT animators per orb, on
-            // different phases -- puts each orb on its own slow ellipse. They wander into each
-            // other's halos from varying directions, fuse under the SCREEN blend into one brighter
-            // mass, and drift apart again, which is the "mixing" this mode is for.
-            val px = when (k) { 0 -> a1; 1 -> a2; else -> a3 }
-            val py = when (k) { 0 -> a2; 1 -> a3; else -> a1 }
-            val cx = w * ORB_X[k] +
-                Math.cos(((px * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_X * w
-            val cy = h * ORB_Y[k] +
-                Math.sin(((py * TWO_PI) + ORB_PHASE[k]).toDouble()).toFloat() * ORB_DRIFT_Y * h
+            // ONE animator drives both axes, unlike the old version which used a different one per
+            // axis. Same value into cos and sin is a circle; two independent ones is a Lissajous
+            // figure, which wanders more but never returns anywhere predictable.
+            val drift = drifts[k]
+            val ang = (drift * TWO_PI + ORB_PHASE[k]).toDouble()
+            val cx = ORB_X[k] * w + Math.cos(ang).toFloat() * ORB_DRIFT_X * w
+            val cy = ORB_Y[k] * h + Math.sin(ang).toFloat() * ORB_DRIFT_Y * h
 
-            // Each orb rides its own smoothed energy, so they swell out of step with one another.
-            //
-            // INTENSITY IS APPLIED HERE, TO THE RENDER, and never to the level. Multiplying the
-            // 0..1 level and re-clamping pins everything at the top: band levels already reach 0.9+
-            // on anything with a kick, so above 1.0 every loud hit draws identically and turning
-            // the setting up produces LESS visible movement, not more.
-            val amp = beatMultiplier
-            val oe = orbEnergy[k].coerceIn(0f, 1f)
-            // PER-BAND CHARACTER. One radius and one response for all three makes the trio read as
-            // a single thing blinking in triplicate. Bass is the big slow one; treble is small and
-            // punches hardest relative to its own size, which is what a hat sounds like.
-            var radius = short * ORB_BASE_RADIUS[k] * (1f + oe * ORB_BEAT_SWELL[k] * amp)
+            // Not clamped to 1: the spring is under-damped, and its overshoot is the flare on a
+            // hit. Clamping here would flatten exactly the peak that makes a beat read.
+            val lvl = orbEnergy[k].coerceAtLeast(0f)
+            val radius = short * ORB_BASE_RADIUS[k] *
+                (1f + softCap(lvl * ORB_SIZE_RIDE[k] * amp, ORB_SWELL_CAP))
+            if (radius <= 0f) continue
 
-            // THE EDGE GUARANTEE. Whatever the beat does, an orb is clamped to the distance from its
-            // own centre to the nearest side, less a margin. This is a hard geometric bound rather
-            // than a tuned constant, so it holds at any aspect ratio and at any beat strength.
-            //
-            // The margin is measured against the SHORT side while the tightest gap is usually on the
-            // long one, so a wide anchor could satisfy the clamp and still leave only a sliver of
-            // black -- geometrically legal, visually "it touches the edge". The anchors and orbit
-            // amplitudes above are therefore chosen so the clamp does not bite at 16:9 at all; it is
-            // the safety net for odd window shapes (PiP), not the thing doing the work.
-            val room = minOf(cx, cy, w - cx, h - cy) - short * ORB_EDGE_MARGIN
-            if (room <= 0f) continue
-            radius = radius.coerceAtMost(room)
-
-            // THE FIRST THREE palette slots, not every second one.
-            //
-            // This read colors[k * 2] -- slots 0, 2, 4. spreadByHue fills the low slots with
-            // genuinely hue-distinct colours and then TOPS UP the rest with whatever is left over,
-            // near-duplicates included. So on a blue-and-red cover the red landed in slot 1, which
-            // the orbs skipped, and slots 2 and 4 held second-rate blues: three blue orbs from a
-            // two-colour cover. Slots 0..2 are exactly the three most-separated hues available.
-            //
-            // Blended toward the incoming palette rather than read raw, so a track change moves the
-            // orbs' colour smoothly across the crossfade. Reading colors[] directly meant they held
-            // the old hue for the whole 1.5s fade and then snapped.
-            val cf = colorFade
+            // The first three palette slots, blended toward the incoming palette so a track change
+            // moves the orbs' colour across the crossfade instead of snapping at the end of it.
             val tint = blend(colors[k % PALETTE_SIZE], targets[k % PALETTE_SIZE], cf)
-            // Slot the orb's own drift into the hue too, so it travels between its colour and its
-            // neighbour's over minutes instead of sitting on one tone forever.
             val partner = blend(colors[(k + 1) % PALETTE_SIZE], targets[(k + 1) % PALETTE_SIZE], cf)
-            val mixed = blend(tint, partner, ORB_HUE_TRAVEL * (if (k == 0) a1 else if (k == 1) a2 else a3))
-            val key = mixed and 0xF8F8F8.toInt()
+            val mixed = blend(tint, partner, ORB_HUE_BASE + ORB_HUE_TRAVEL * drift)
+            val key = mixed and 0xF8F8F8
             if (orbGrads[k] == null || orbKeys[k] != key) {
                 orbKeys[k] = key
                 orbGrads[k] = RadialGradient(
@@ -617,34 +843,74 @@ class DynamicBackground @JvmOverloads constructor(
             blobMatrix.postTranslate(cx, cy)
             grad.setLocalMatrix(blobMatrix)
             orbPaint.shader = grad
-            // A SMALL beat ride, and small is the operative word. A halo covers most of the frame,
-            // so a generous one lifts the whole picture a shade on every kick -- on a projector
-            // that reads as the black itself pulsing, which is the one thing this mode must never
-            // do. Enough to make the orb feel alive at rest, with the real flare kept in the core
-            // pass below, where the area is small enough to punch without lifting anything.
-            orbPaint.alpha =
-                ((ORB_BASE_ALPHA + oe * ORB_BEAT_ALPHA * amp) * 255).toInt().coerceIn(0, ORB_ALPHA_CAP)
+            orbPaint.alpha = alpha255(ORB_BASE_ALPHA + lvl * ORB_BEAT_ALPHA * amp, ORB_ALPHA_CAP)
             canvas.drawCircle(cx, cy, radius, orbPaint)
 
-            // A second, much smaller pass gives the orb a bright heart instead of a flat disc of
-            // haze, so it reads as a light SOURCE with depth rather than a painted blur. This is
-            // where the beat's brightness goes: the core is a small fraction of the area, so it can
-            // punch hard without measurably lifting the black anywhere else.
+            // The bright heart. Small enough that its beat brightness stays local — the halo covers
+            // most of the frame, so putting the flare there would pulse the whole picture.
             val core = orbCoreGrads[k]
-            if (core != null) {
+            if (core != null && !lowPower) {
                 val cr = radius * ORB_CORE_FRAC
                 blobMatrix.setScale(cr, cr)
                 blobMatrix.postTranslate(cx, cy)
                 core.setLocalMatrix(blobMatrix)
                 orbPaint.shader = core
                 orbPaint.alpha =
-                    ((ORB_CORE_ALPHA + oe * ORB_CORE_BEAT_ALPHA * amp) * 255).toInt()
-                        .coerceIn(0, 255)
+                    alpha255(ORB_CORE_ALPHA + lvl * ORB_CORE_BEAT_ALPHA * amp, ORB_CORE_ALPHA_CAP)
                 canvas.drawCircle(cx, cy, cr, orbPaint)
             }
             orbPaint.shader = null
         }
+
+        drawProjectorEdges(canvas, w, h)
     }
+
+    private fun alpha255(value: Float, cap: Float): Int =
+        (value.coerceAtMost(cap) * 255f).toInt().coerceIn(0, 255)
+
+    /**
+     * Dissolves all four edges to black, then darkens the right where the text sits.
+     *
+     * A projector has no bezel: any lit rectangle reads as a grey panel hanging on the wall, and no
+     * amount of fading the ORBS fixes that, because the problem is the boundary rather than what is
+     * inside it. Fading the frame itself means the light simply runs out, the way a real glow does.
+     *
+     * Each strip is drawn over its own band. Beyond the gradient's end the shader has clamped to
+     * fully transparent, so painting the rest of the screen with it would be four extra full-screen
+     * passes that change no pixel.
+     */
+    private fun drawProjectorEdges(canvas: Canvas, w: Float, h: Float) {
+        if (edgeW != w || edgeH != h) {
+            edgeW = w; edgeH = h
+            val ev = h * ORB_EDGE_FADE
+            val eh = w * ORB_EDGE_FADE
+            edgeTop = LinearGradient(0f, 0f, 0f, ev, Color.BLACK, TRANSPARENT, Shader.TileMode.CLAMP)
+            edgeBottom = LinearGradient(0f, h - ev, 0f, h, TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
+            edgeLeft = LinearGradient(0f, 0f, eh, 0f, Color.BLACK, TRANSPARENT, Shader.TileMode.CLAMP)
+            edgeRight = LinearGradient(w - eh, 0f, w, 0f, TRANSPARENT, Color.BLACK, Shader.TileMode.CLAMP)
+            rightDim = LinearGradient(
+                w * RIGHT_DIM_START, 0f, w, 0f, TRANSPARENT, RIGHT_DIM_COLOR, Shader.TileMode.CLAMP,
+            )
+        }
+        val ev = h * ORB_EDGE_FADE
+        val eh = w * ORB_EDGE_FADE
+        edgePaint.shader = edgeTop;    canvas.drawRect(0f, 0f, w, ev, edgePaint)
+        edgePaint.shader = edgeBottom; canvas.drawRect(0f, h - ev, w, h, edgePaint)
+        edgePaint.shader = edgeLeft;   canvas.drawRect(0f, 0f, eh, h, edgePaint)
+        edgePaint.shader = edgeRight;  canvas.drawRect(w - eh, 0f, w, h, edgePaint)
+        edgePaint.shader = rightDim;   canvas.drawRect(w * RIGHT_DIM_START, 0f, w, h, edgePaint)
+        edgePaint.shader = null
+    }
+
+    /** Plain SRC_OVER — these paint black ON TOP, which is the opposite of the orbs' SCREEN. */
+    private val edgePaint = Paint()
+    private var edgeTop: LinearGradient? = null
+    private var edgeBottom: LinearGradient? = null
+    private var edgeLeft: LinearGradient? = null
+    private var edgeRight: LinearGradient? = null
+    private var rightDim: LinearGradient? = null
+    private var edgeW = -1f
+    private var edgeH = -1f
 
     /** SCREEN so overlapping orbs add their light rather than hiding one another. */
     private val orbPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -656,24 +922,23 @@ class DynamicBackground @JvmOverloads constructor(
 
     // Colour ramps, built only when an orb's quantised tint changes. Kept as helpers rather than
     // constants because each stop carries the orb's own colour in its low 24 bits.
+    /**
+     * Two stops: the orb's colour at full alpha, falling to fully transparent at the rim.
+     *
+     * AMTV's radial brush is exactly this pair, with the halo alpha baked into the first stop. Here
+     * the ramp stays cached and the alpha is applied through the Paint, which is the same result —
+     * scaling `[c@255, c@0]` by alpha a gives `[c@a, c@0]` — while letting one gradient serve every
+     * brightness the beat asks for instead of a fresh allocation per frame.
+     */
     private fun orbHaloColors(key: Int) = intArrayOf(
-        // Carries more of its brightness outward than the first version did. That ramp was tuned to
-        // rescue the black between orbs, and it worked -- but it also meant a 259px orb put almost
-        // all of its light inside ~140px, which on a 1080p capture read as a dot rather than a glow.
-        // The long near-zero tail is what keeps the black; the middle stops are what make it a glow.
         key or 0xFF000000.toInt(),
-        key or 0xA8000000.toInt(),
-        key or 0x42000000,
-        key or 0x0A000000,
         key and 0xFFFFFF,
     )
 
+    /** The core, whitened toward white the way a real glow's hottest point desaturates. */
     private fun orbCoreColors(key: Int) = intArrayOf(
-        // Whitened centre: a real glow's hottest point desaturates toward white. Straight tint at
-        // full alpha looks like flat paint.
         lighten(key, CORE_WHITEN) or 0xFF000000.toInt(),
-        key or 0xB3000000.toInt(),
-        key and 0xFFFFFF,
+        lighten(key, CORE_WHITEN) and 0xFFFFFF,
     )
 
     /** Scales a colour's brightness, leaving hue and saturation alone. */
@@ -735,7 +1000,24 @@ class DynamicBackground @JvmOverloads constructor(
     private val blobMatrix = android.graphics.Matrix()
 
     /** A blob's radius factor for its band level, with the intensity setting on the render. */
-    private fun blobScale(level: Float, amp: Float) = 1f + level * FIELD_BEAT_SCALE * amp
+    /**
+     * Blob size: its own band, plus a small shared nudge on the beat.
+     *
+     * The band term is continuous — it says how big the low end (or the voice, or the cymbals) is
+     * right now. The nudge is the onset envelope, which answers a different question: did something
+     * just HIT. Bass alone does not cover it, because a kick that lands while the bass is already
+     * loud barely moves the band at all, and that is exactly the moment the picture should
+     * acknowledge.
+     *
+     * DELIBERATELY SMALL, and deliberately size rather than brightness. These blobs cover the whole
+     * screen, so anything on alpha pulses every pixel at once — which is what read as "too
+     * sensitive" before, and why [beatAlpha] is all but constant. A few percent of radius on every
+     * blob together is a nudge you feel rather than a flash you notice, and it scales with Beat
+     * Pulse like everything else, so Calm barely shows it and Insane leans on it.
+     */
+    private fun blobScale(level: Float, amp: Float, onset: Float = 0f) =
+        1f + softCap(level * FIELD_BEAT_SCALE * amp + onset * FIELD_ONSET_NUDGE * amp,
+                     FIELD_SWELL_CAP)
 
     private fun blend(c1: Int, c2: Int, f: Float): Int {
         val i = 1f - f
@@ -749,6 +1031,7 @@ class DynamicBackground @JvmOverloads constructor(
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t
 
     @Volatile private var beatMultiplier = 1f
+    @Volatile private var fieldMultiplier = 1f
     private var textFocusX = 0f
     private var textFocusY = 0f
     private var textFocusRadius = 0f
@@ -788,6 +1071,49 @@ class DynamicBackground @JvmOverloads constructor(
         // the screen; per-blob it changes the composition rather than merely inflating it, so it
         // can be much larger without the whole picture pumping.
         private const val FIELD_BEAT_SCALE = 0.42f
+
+        /**
+         * How much the onset envelope adds to every blob at once, before Beat Pulse scales it.
+         *
+         * Small on purpose. This is the "something just hit" term and it moves all four blobs
+         * together, so it reads as the picture leaning in rather than as any one source growing.
+         * At 0.07 an ordinary beat is a couple of percent of radius on Calm and around a third of
+         * that of FIELD_BEAT_SCALE at Insane — present, never the main event.
+         */
+        private const val FIELD_ONSET_NUDGE = 0.07f
+
+        /**
+         * How far each non-bass blob is pulled toward the bass level. 0 = its own band only,
+         * 1 = bass-only.
+         *
+         * 0.7 leaves every blob visibly its own thing while the beat carries all four together.
+         * Raise it toward 1 for a field that pulses as a single unit; drop it to 0 to go back to
+         * three independent rhythms. This is the one number to move if the field feels either busy
+         * or monotonous — the bands themselves are correct and should not be re-tuned for it.
+         */
+        private const val FIELD_BASS_LEAD = 0.7f
+
+        /**
+         * Soft ceiling on how far a blob may grow, for the same reason the orbs have one.
+         *
+         * Four screen-sized sources that all swell together stop being four sources: they overlap
+         * everywhere, and SCREEN-blending overlapping colour sums toward white. So unbounded growth
+         * at a high Beat Pulse does not read as a bigger reaction, it reads as the picture losing
+         * its colour on every beat. Rolling off leaves the blobs distinct at any setting.
+         *
+         * RAISED from 0.55, which was so low it caused the failure it was meant to prevent — one
+         * step down the scale instead of at the top. A soft cap is only soft while the input is
+         * well under it; past that it flattens everything into the same value. At 0.55 a full hit
+         * came out at 0.43 on Normal and 0.54 on Insane, so a 2.75x difference in multiplier
+         * arrived as 1.25x on screen and the two settings were indistinguishable — which is exactly
+         * what was reported.
+         *
+         * At 1.2 the same hits land at 0.60 and 1.02: Insane is visibly bigger, and the roll-off
+         * still does its job above that. The number to keep in mind when changing it is that the
+         * cap must sit ABOVE the largest ordinary input (0.42 * 5.5 = 2.31 at Insane is beyond it,
+         * but the curve is still climbing there rather than pinned).
+         */
+        private const val FIELD_SWELL_CAP = 1.2f
 
         /**
          * Field brightness. Near-constant on purpose -- see the note at the call site.
@@ -881,7 +1207,12 @@ class DynamicBackground @JvmOverloads constructor(
         // every peak and simply stopped growing -- a big orb that never changed size, which is
         // exactly the "bass and vocals are maxed, only treble moves" report. The clamp is a safety
         // net for odd window shapes; when it is doing the work on a 16:9 TV, the radii are wrong.
-        private val ORB_BASE_RADIUS = floatArrayOf(0.20f, 0.165f, 0.13f)
+        // Trimmed again when the orbits were widened to 0.08 vertically. The clamp rule is
+        // anchor - orbit - radius >= margin, so every unit of extra travel has to come out of the
+        // radius: at 0.20 the bass orb's fully-swollen 0.324 of the short side would have exceeded
+        // the 0.29 of room left at the top of its new orbit and started clamping on peaks again --
+        // the same "big orb that never changes size" this line was written to fix.
+        private val ORB_BASE_RADIUS = floatArrayOf(0.26f, 0.21f, 0.16f)
 
         /**
          * Orbit anchors, as fractions of width and height.
@@ -896,15 +1227,32 @@ class DynamicBackground @JvmOverloads constructor(
          * still clears the [ORB_EDGE_MARGIN] on every side without the clamp ever engaging. Vertical
          * is the binding axis on a wide screen, which is why ORB_Y is the tighter of the two.
          */
-        // Left orb pulled in from 0.34: at 16:9 that anchor plus its orbit put it noticeably closer
-        // to the left edge than the right orb was to the right one, so the trio sat off-centre. 0.42
-        // makes the group symmetric about the middle.
-        private val ORB_X = floatArrayOf(0.42f, 0.54f, 0.66f)
-        private val ORB_Y = floatArrayOf(0.46f, 0.54f, 0.48f)
+        // MOVED RIGHT, AND OFF ONE LINE.
+        //
+        // Two problems with the old 0.42/0.54/0.66 on 0.46/0.54/0.48. First, the album art occupies
+        // roughly the left 43% of the screen, and the first orb's anchor of 0.42 put its CENTRE
+        // behind the tile — the brightest part of the orb was the part you could not see. Second,
+        // three anchors within 0.08 of each other vertically is effectively a straight horizontal
+        // line, so the orbs could only ever pass side-to-side through one another and spent much of
+        // the cycle piled up in the middle.
+        //
+        // Now every centre sits clear of the artwork's right edge, and the three are spread over
+        // 0.20 of the height so they orbit past each other from genuinely different directions.
+        // Halos still bleed left across the tile, which is wanted — light spilling behind the cover
+        // is the effect; a bright core hidden behind it is not.
+        private val ORB_X = floatArrayOf(0.52f, 0.62f, 0.72f)
+        private val ORB_Y = floatArrayOf(0.44f, 0.56f, 0.46f)
 
-        /** Orbit amplitude. Wider horizontally, because that is where the spare room is. */
-        private const val ORB_DRIFT_X = 0.09f
-        private const val ORB_DRIFT_Y = 0.04f
+        /**
+         * Orbit amplitude. Vertical was 0.04 — barely a wobble, and the reason the trio read as
+         * sliding left and right rather than moving around each other.
+         *
+         * The ceiling on this is [ORB_BASE_RADIUS]: anchor + orbit + a fully swollen radius has to
+         * stay inside [ORB_EDGE_MARGIN], and on 16:9 the height is what binds. Giving the orbs more
+         * room to travel therefore meant making them slightly smaller, which is the trade below.
+         */
+        private const val ORB_DRIFT_X = 0.08f
+        private const val ORB_DRIFT_Y = 0.045f
 
         /**
          * How far an orb's colour travels toward its neighbour's over one animator cycle. Enough to
@@ -924,8 +1272,83 @@ class DynamicBackground @JvmOverloads constructor(
          * Release is always slower than attack so the glow trails the hit instead of flickering off
          * with it. At 60fps a rate of 0.10 closes ~86% of a gap in a quarter second.
          */
-        private val ORB_ATTACK = floatArrayOf(0.37f, 0.49f, 0.66f)
-        private val ORB_RELEASE = floatArrayOf(0.052f, 0.077f, 0.127f)
+        /**
+         * The frame length the smoothing rates below were tuned against — the old fixed 33 ms
+         * loop. Keeping the constants in those units means the tuning survives the move to vsync;
+         * [decay] converts them to whatever this frame actually cost.
+         */
+        /**
+         * Orbit periods at Normal speed. Co-prime on purpose: 20/27/34 seconds do not line up
+         * again for long enough that the composition never visibly repeats. [setOrbSpeed] scales
+         * all three by one factor, which preserves that property.
+         */
+        private val ORBIT_MS = longArrayOf(20_000L, 27_000L, 34_000L)
+
+        private const val REF_FRAME_MS = 33.33f
+        /**
+         * Vsyncs per drawn frame. 1 = draw every vsync = a true 60fps.
+         *
+         * This was 2 (an exactly even 30fps) because the device could not hold 16.6ms: the note in
+         * the frame callback measured ~19ms of GPU on ten-odd full-screen SCREEN passes at 1080p,
+         * and a steady 30 beat a free-running ~50 whose period kept changing. The half-resolution
+         * composite buffer (see onDraw) quartered that fill, which is what put a frame back inside
+         * the budget and let this drop to 1. If a future change re-inflates the per-frame fill past
+         * 16.6ms, this is the one-line lever back to a steady 30.
+         */
+        private const val FRAME_STRIDE = 2
+        /** Same idea in a PiP window, where the backdrop is small and nobody is studying it. */
+        private const val LOW_POWER_STRIDE = 4
+        /** Overall loudness follow, used by the full-screen pulse. */
+        private const val ENERGY_RATE = 0.36f
+
+        /**
+         * The FIELD's spring: stiffer and better damped than the orbs'.
+         *
+         * omega = sqrt(2500) = 50 rad/s and zeta = 70 / (2 * 50) = 0.7, so its first peak lands at
+         * pi / (omega * sqrt(1 - zeta^2)) ≈ 88ms against the orbs' ~131ms, with noticeably less
+         * overshoot. Both numbers are deliberate: the field should track the music rather than
+         * bloom through it, because a blob that overshoots is a screen-sized brightness change
+         * whereas an orb that overshoots is a flare in one place.
+         *
+         * Still a spring, not exponential easing — the input is a 33ms staircase either way, and
+         * only a spring carries velocity across a step. This is a shorter, tighter one.
+         */
+        private const val FIELD_STIFFNESS = 2500f
+        private const val FIELD_DAMPING = 70f
+
+        /**
+         * Orb spring — MATCHED TO AMTV, which is the whole point of the feel.
+         *
+         * AMTV drives each band with a Compose `spring(dampingRatio = 0.6, stiffness =
+         * StiffnessMediumLow)`. StiffnessMediumLow is 400, mass 1, so omega = sqrt(400) = 20 rad/s
+         * and damping = 2 * zeta * omega = 2 * 0.6 * 20 = 24. Those two numbers ARE the smoothness
+         * and the thump: at omega 20 the spring carries real momentum through the ~33ms staircase of
+         * band levels, so a chain of steps comes out as one gliding curve rather than a stack of
+         * little ease-outs, and at zeta 0.6 it overshoots ~9% on a hit — a slow, visible bloom that
+         * peaks around pi / (omega*sqrt(1-zeta^2)) ~= 196ms and settles gently. That lingering bloom
+         * is what reads as "thumpy".
+         *
+         * This was briefly RAISED to 1200 (omega 34) to fight apparent lateness — but that snappier
+         * spring settles too fast to bloom and loses the glide, i.e. it stops feeling like AMTV,
+         * which is exactly the complaint. Lateness is not the spring's job to fix: it belongs to the
+         * output-latency compensation on the emit side (emitDelayed in AudioStreamServer). Shape and
+         * delay the signal there; follow it here with AMTV's own constants.
+         *
+         * zeta stays 0.6 (under-damped) deliberately — the overshoot is the flare, and
+         * ORB_LEVEL_CEILING below leaves room for it instead of clamping it flat.
+         */
+        private const val ORB_STIFFNESS = 900f
+        private const val ORB_DAMPING = 36f
+
+        /** Integration sub-step. Well inside the 2/omega = 100ms explicit-Euler stability bound. */
+        private const val SPRING_MAX_STEP_S = 0.008f
+
+        /**
+         * How far the spring may overshoot 1.0. AMTV's spring is under-damped (zeta 0.6) and its
+         * overshoot is the flare on a hit, so clamping at 1 would remove the very peak that makes a
+         * beat read. A ceiling still exists so a runaway cannot inflate an orb off the screen.
+         */
+        private const val ORB_LEVEL_CEILING = 1.6f
 
         /** Fallback smoothing for sources that report loudness but no bands. */
         private val ORB_FOLLOW = floatArrayOf(0.10f, 0.27f, 0.60f)
@@ -951,25 +1374,57 @@ class DynamicBackground @JvmOverloads constructor(
          * bass is already large, so the same figure there would collide with the edge clamp and
          * flatten the very peak it was meant to add.
          */
-        private val ORB_BEAT_SWELL = floatArrayOf(0.62f, 0.80f, 1.05f)
+        /** How hard each orb swells with its band. Treble punches biggest relative to its size. */
+        private val ORB_SIZE_RIDE = floatArrayOf(0.75f, 0.85f, 1.05f)
+
+        /** Ceiling on the swell term, so a high intensity cannot inflate an orb without limit. */
+        private const val ORB_SWELL_CAP = 2.2f
+
+        /**
+         * Soft ceiling: approaches [cap] asymptotically instead of stopping dead at it.
+         *
+         * `coerceAtMost` was here, and a hard clip is what made the higher Beat Pulse settings feel
+         * harsh rather than big. Once the multiplier pushes an ordinary hit past the cap, every hit
+         * above it renders at exactly the same size — so the loudest settings flatten the very
+         * differences they were turned up to exaggerate, and the orb spends its time pinned at one
+         * radius, snapping between there and wherever the music drops it.
+         *
+         * `cap * (1 - e^(-x/cap))` is linear for small x — so Calm and Normal are unchanged, to the
+         * pixel — and rolls off smoothly above it, so Insane keeps growing with the music instead
+         * of slamming into a wall. That roll-off is what makes a large multiplier read as powerful
+         * rather than broken.
+         */
+        private fun softCap(x: Float, cap: Float): Float =
+            if (x <= 0f) 0f else cap * (1f - Math.exp((-x / cap).toDouble()).toFloat())
 
         /** Halo alpha — constant on purpose; see the note in drawOrb about lifting the black. */
         // Lowered from 0.92. On a projector every bit of this is light thrown at a wall, and the
         // halo covers most of the frame, so the orbs were the brightest thing in a dark room.
-        private const val ORB_BASE_ALPHA = 0.52f
+        private const val ORB_BASE_ALPHA = 0.24f
 
         /** The bright heart of each orb: small, so its beat brightness stays local. */
         private const val ORB_CORE_FRAC = 0.34f
         /** How much the halo brightens at full level. Deliberately small -- see the note in drawOrb. */
-        private const val ORB_BEAT_ALPHA = 0.14f
+        private const val ORB_BEAT_ALPHA = 0.42f
 
         /** Ceiling on halo alpha, so a high intensity setting cannot wash the frame out. */
-        private const val ORB_ALPHA_CAP = 196
+        private const val ORB_ALPHA_CAP = 0.9f
 
         private const val ORB_CORE_ALPHA = 0.12f
         private const val ORB_CORE_BEAT_ALPHA = 0.62f
-        private const val CORE_WHITEN = 0.34f
-        private val ORB_CORE_STOPS = floatArrayOf(0f, 0.45f, 1f)
+        private const val ORB_CORE_ALPHA_CAP = 0.92f
+
+        /** Fraction of each side dissolved to black. A projector has no bezel; see drawProjectorEdges. */
+        private const val ORB_EDGE_FADE = 0.10f
+        /** Where the right-hand darkening starts, and how dark it gets under the text. */
+        private const val RIGHT_DIM_START = 0.30f
+        private const val RIGHT_DIM_COLOR = 0x9E000000.toInt()
+        private const val TRANSPARENT = 0x00000000
+
+        /** Base hue mix toward the neighbouring palette slot, before the drift term. */
+        private const val ORB_HUE_BASE = 0.05f
+        private const val CORE_WHITEN = 0.6f
+        private val ORB_CORE_STOPS = floatArrayOf(0f, 1f)
 
         /**
          * Falloff. Five stops, front-loaded: most of the light is gone by 55% of the radius and only
@@ -978,7 +1433,7 @@ class DynamicBackground @JvmOverloads constructor(
          * between the orbs -- they read as one lit haze rather than as separate glows on black. The
          * long, near-zero tail is still what stops a visible ring forming where the gradient ends.
          */
-        private val ORB_STOPS = floatArrayOf(0f, 0.34f, 0.62f, 0.85f, 1f)
+        private val ORB_STOPS = floatArrayOf(0f, 1f)
         private val TEXT_GRAD_COLORS =
             intArrayOf(TEXT_DARKEN_ARGB, TEXT_DARKEN_MID_ARGB, 0x00000000)
         // Three stops, not two. A linear ramp from full darkening to nothing puts the steepest part

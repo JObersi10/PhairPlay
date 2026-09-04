@@ -127,7 +127,15 @@ class SettingsRepository(private val context: Context) {
         audioBufferMs      = this[Keys.AUDIO_BUFFER_MS]          ?: AppSettings.DEFAULT_AUDIO_BUFFER_MS,
         pipEnabled         = this[Keys.PIP_ENABLED]              ?: true,
         beatPulse          = this[Keys.BEAT_PULSE]               ?: 0,
-        beatDelayMs        = this[Keys.BEAT_DELAY_MS]            ?: 0,
+        fieldPulse          = this[Keys.FIELD_PULSE]               ?: 0,
+        orbSpeed           = this[Keys.ORB_SPEED]                ?: 1,
+        multiScreen        = this[Keys.MULTI_SCREEN]             ?: false,
+        betaUpdates        = this[Keys.BETA_UPDATES]             ?: false,
+        autoUpdateCheck    = this[Keys.AUTO_UPDATE_CHECK]        ?: true,
+        lastUpdateCheckAtMs = this[Keys.LAST_UPDATE_CHECK]       ?: 0L,
+        pendingUpdateTag   = this[Keys.PENDING_UPDATE_TAG]       ?: "",
+        currentAudioRoute  = this[Keys.CURRENT_AUDIO_ROUTE]      ?: "",
+        currentRouteCompensationMs = this[Keys.CURRENT_ROUTE_COMPENSATION] ?: 0,
         forceHighResolution = this[Keys.FORCE_HIGH_RESOLUTION]  ?: false,
         // Stored as one delimited string rather than a DataStore string set, because slot ORDER is
         // the identity here — slot 2 is a different HomeKit input from slot 1 — and a set has none.
@@ -150,6 +158,8 @@ class SettingsRepository(private val context: Context) {
             ?: if (this[Keys.PROJECTOR_MODE] == true) BackdropTheme.PROJECTOR
                else BackdropTheme.DYNAMIC,
         artworkLookup      = this[Keys.ARTWORK_LOOKUP]          ?: false,
+        identifyTracks     = this[Keys.IDENTIFY_TRACKS]         ?: false,
+        identifyIntervalSec = this[Keys.IDENTIFY_INTERVAL]      ?: AppSettings.DEFAULT_IDENTIFY_INTERVAL_SEC,
         streamEndAction    = StreamEndAction.fromName(this[Keys.STREAM_END_ACTION])
     )
 
@@ -171,7 +181,15 @@ class SettingsRepository(private val context: Context) {
         this[Keys.AUDIO_BUFFER_MS]      = settings.audioBufferMs
         this[Keys.PIP_ENABLED]          = settings.pipEnabled
         this[Keys.BEAT_PULSE]           = settings.beatPulse
-        this[Keys.BEAT_DELAY_MS]        = settings.beatDelayMs
+        this[Keys.FIELD_PULSE]           = settings.fieldPulse
+        this[Keys.ORB_SPEED]            = settings.orbSpeed
+        this[Keys.MULTI_SCREEN]         = settings.multiScreen
+        this[Keys.BETA_UPDATES]         = settings.betaUpdates
+        this[Keys.AUTO_UPDATE_CHECK]    = settings.autoUpdateCheck
+        this[Keys.LAST_UPDATE_CHECK]    = settings.lastUpdateCheckAtMs
+        this[Keys.PENDING_UPDATE_TAG]   = settings.pendingUpdateTag
+        this[Keys.CURRENT_AUDIO_ROUTE]  = settings.currentAudioRoute
+        this[Keys.CURRENT_ROUTE_COMPENSATION] = settings.currentRouteCompensationMs
         this[Keys.FORCE_HIGH_RESOLUTION] = settings.forceHighResolution
         this[Keys.INPUT_APPS] = settings.inputApps.joinToString("\u0000")
         this[Keys.MIRROR_AUDIO_ENABLED] = settings.mirrorAudioEnabled
@@ -185,6 +203,8 @@ class SettingsRepository(private val context: Context) {
         this[Keys.REMOTE_ENABLED]       = settings.remoteEnabled
         this[Keys.BACKDROP_THEME]       = settings.backdropTheme.name
         this[Keys.ARTWORK_LOOKUP]       = settings.artworkLookup
+        this[Keys.IDENTIFY_TRACKS]      = settings.identifyTracks
+        this[Keys.IDENTIFY_INTERVAL]    = settings.identifyIntervalSec
         this[Keys.STREAM_END_ACTION]    = settings.streamEndAction.name
     }
 
@@ -210,6 +230,8 @@ class SettingsRepository(private val context: Context) {
         val PROJECTOR_MODE      = booleanPreferencesKey("projector_mode")
         val BACKDROP_THEME      = stringPreferencesKey("backdrop_theme")
         val ARTWORK_LOOKUP      = booleanPreferencesKey("artwork_lookup")
+        val IDENTIFY_TRACKS     = booleanPreferencesKey("identify_tracks")
+        val IDENTIFY_INTERVAL   = intPreferencesKey("identify_interval_sec")
         val STREAM_END_ACTION   = androidx.datastore.preferences.core.stringPreferencesKey("stream_end_action")
         val BACK_ACTION         = stringPreferencesKey("back_action")
         val AUDIO_DELAY_MS      = intPreferencesKey("audio_delay_ms")
@@ -217,7 +239,19 @@ class SettingsRepository(private val context: Context) {
         val BACK_GOES_HOME      = booleanPreferencesKey("back_goes_home")
         val PIP_ENABLED         = booleanPreferencesKey("pip_enabled")
         val BEAT_PULSE          = intPreferencesKey("beat_pulse")
-        val BEAT_DELAY_MS       = intPreferencesKey("beat_delay_ms")
+        val FIELD_PULSE = intPreferencesKey("field_pulse")
+        val ORB_SPEED           = intPreferencesKey("orb_speed")
+        val MULTI_SCREEN        = booleanPreferencesKey("multi_screen")
+        val BETA_UPDATES        = booleanPreferencesKey("beta_updates")
+        val AUTO_UPDATE_CHECK   = booleanPreferencesKey("auto_update_check")
+        val LAST_UPDATE_CHECK   = longPreferencesKey("last_update_check")
+        val PENDING_UPDATE_TAG  = stringPreferencesKey("pending_update_tag")
+        // beat_delay_ms and av_trim_profiles were briefly settings and are now neither read nor
+        // written: the Bluetooth compensation is a property of the transport, not a preference, so
+        // it is derived from the route every time rather than stored. Any leftover values sit
+        // harmlessly in the store.
+        val CURRENT_AUDIO_ROUTE = stringPreferencesKey("current_audio_route")
+        val CURRENT_ROUTE_COMPENSATION = intPreferencesKey("current_route_compensation_ms")
         val FORCE_HIGH_RESOLUTION = booleanPreferencesKey("force_high_resolution")
         val INPUT_APPS = stringPreferencesKey("input_apps")
         val MIRROR_AUDIO_ENABLED = booleanPreferencesKey("mirror_audio_enabled")

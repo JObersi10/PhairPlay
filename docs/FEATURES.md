@@ -30,6 +30,7 @@ The TV remote controls the **sender**, over DACP.
 ## Now Playing card
 
 - Artwork, title, artist, album, composer/year, progress with elapsed and remaining
+- Optional Shazam fingerprinting to name tracks a sender streams without metadata
 - Source pill — "Audio from <device>"
 - **MENU** cycles six layouts: full, small centred, and each of the four corners.
   Resets to full at the end of every session.
@@ -65,14 +66,39 @@ Three backdrops, selectable in Settings:
   a black rectangle sixty times a second.
 
 Visuals are delayed by the measured output latency so they land with the sound, not ahead of it.
-Beat Pulse strength (Calm / Normal / Strong / Insane) and a manual beat delay are in Settings, and
-apply to both Dynamic and Projector. Intensity is applied to the drawing rather than to the level,
+Beat Pulse strength (Calm / Normal / Strong / Insane) is in Settings and applies to both Dynamic
+and Projector. Timing follows Audio delay and the route compensation; there is no separate dial. Intensity is applied to the drawing rather than to the level,
 so turning it up keeps adding movement instead of flattening everything against the top of the range.
 
 Palette comes from the artwork, with greyscale covers detected and kept grey rather than having a
 hue invented for them. When a cover does not contain three separable colours, the shortfall is
 filled with lighter and darker shades of the accents it *does* have — never with a rotated hue,
 which is how an all-orange sleeve used to end up with blue and green orbs.
+
+## A/V sync
+
+**Audio delay** is the one dial, and it is the user's: it holds the audio back to meet the sender's
+timeline, and the beat visuals follow it automatically.
+
+Underneath it, `AudioRouteMonitor` watches which output is actually playing — HDMI, the TV's
+speakers, wired, or a named Bluetooth sink — and when it is Bluetooth the *visuals* are held back a
+further **350ms**, automatically. That figure is not shown and not settable. It is a property of the
+transport rather than a preference: a Bluetooth speaker is late by about this much whether or not
+anyone has an opinion, and it goes away the moment the speaker does. Audio delay still reads 0,
+because 0 extra is what the user chose. The row says which speaker is being compensated, so the
+adjustment is visible without being something to fiddle with.
+
+The visuals move rather than the audio because the audio is the side that is already late — delaying
+it further would only make it later.
+
+350ms was measured by ear on this hardware against an SBC speaker, which is the codec this Fire TV
+negotiates. Android exposes no API for the real figure: `AudioTrack.getTimestamp()`, which
+`AudioStreamServer.outputLatencyMs()` already consults, stops at the HAL — the point where audio
+leaves the box — and the encoder, the radio link and the speaker's own jitter buffer are all past it.
+
+The compensation applies to a stream already playing, so connecting a speaker mid-track works. The
+user's audio delay does not: it is pre-buffered as silence at stream start, so it lands on the next
+connect.
 
 ## Cover art
 
@@ -87,7 +113,7 @@ No API key required.
 ## Settings
 
 PIN pairing (off / remember senders / every time) · which receivers run · device name ·
-screensaver timeout · backdrop (Dynamic / Projector / Black) · Beat Pulse · beat delay · volume mode ·
+screensaver timeout · backdrop (Dynamic / Projector / Black) · Beat Pulse · audio delay · volume mode ·
 Back behaviour (stop stream / go home / exit) · stream-end behaviour · start on boot ·
 Picture-in-picture · online cover art · playback quality
 

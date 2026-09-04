@@ -28,10 +28,14 @@ import com.phairplay.airplay.AirPlayReceiver
 import com.phairplay.airplay.DacpClient
 import com.phairplay.dlna.DlnaServer
 import com.phairplay.miracast.MiracastReceiver
+import com.phairplay.media.AudioRouteMonitor
+import com.phairplay.media.DecoderCapacity
 import com.phairplay.media.DeviceVolumeController
 import com.phairplay.media.MediaButtonSession
 import com.phairplay.media.VolumeControlMode
 import com.phairplay.settings.AppSettings
+import com.phairplay.BuildConfig
+import com.phairplay.settings.AudioRoute
 import com.phairplay.settings.SettingsRepository
 import com.phairplay.diagnostic.DiagnosticServer
 import com.phairplay.diagnostic.LogBuffer
@@ -44,6 +48,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
@@ -84,6 +89,21 @@ class PhairPlayService : Service() {
     private val _airPlayState = MutableStateFlow(ProtocolState.DISABLED)
     val airPlayState: StateFlow<ProtocolState> = _airPlayState.asStateFlow()
 
+    private val _activeMirrorSlots = MutableStateFlow<Set<Int>>(emptySet())
+
+    /**
+     * Which mirroring tiles currently have a sender on them, so the Activity can lay out that many.
+     *
+     * A flow OWNED BY THE SERVICE, whose identity never changes.
+     *
+     * The first version delegated straight to the receiver's own flow. A `StateFlow` getter is
+     * evaluated once, when the collector starts — and the Activity binds before the receiver has
+     * been built, so it read the null branch, subscribed to a throwaway empty flow and listened to
+     * that forever. Every later slot change went to a different object. The tiles simply never
+     * appeared: the second sender connected, decoded, and drew into a Surface nobody had laid out.
+     */
+    val activeMirrorSlots: StateFlow<Set<Int>> = _activeMirrorSlots.asStateFlow()
+
     private val _miracastState = MutableStateFlow(ProtocolState.DISABLED)
     val miracastState: StateFlow<ProtocolState> = _miracastState.asStateFlow()
 
@@ -122,6 +142,239 @@ class PhairPlayService : Service() {
 
     /** Mirror of AppSettings.artworkLookup, read from the DLNA artwork thread. */
     @Volatile private var artworkLookup: Boolean = false
+
+    /**
+     * What the fingerprinter last identified, and which sender it was for.
+     *
+     * Held rather than merged straight into the flow because the identification arrives ten to
+     * fifteen seconds after the audio started, on its own thread, and the sender keeps pushing
+     * (still nameless) now-playing updates the whole time. Without somewhere to keep the answer, the
+     * very next push would overwrite it and the title would flash on screen and vanish.
+     */
+    @Volatile private var identifiedTitle: String? = null
+    @Volatile private var identifiedArtist: String? = null
+    @Volatile private var identifiedFor: String? = null
+
+    /**
+     * Cover art for the identified track, as BYTES rather than the URL Shazam returned.
+     *
+     * [NowPlayingInfo.artwork] is a ByteArray: every other path fills it from what the sender
+     * pushed, and the Now Playing card and the notification both read it directly. Handing either
+     * of them a URL instead would mean teaching both to fetch, on the main thread, for one case.
+     */
+    @Volatile private var identifiedArtwork: ByteArray? = null
+
+    /**
+     * Keeps the fingerprinter's switch in step with the setting, for as long as the service lives.
+     *
+     * A COLLECTOR, NOT A READ IN startReceivers(). Everything else in this service samples the
+     * settings once, with `settingsFlow.first()`, at the moment the receivers start -- which is
+     * correct for the things that are only consulted while BUILDING a receiver, and silently wrong
+     * for anything toggled during a session. Identification is exactly that: the switch is on the
+     * Now Playing settings page, so the natural moment to reach for it is while nameless audio is
+     * already playing, and a one-shot read means it does nothing until the receivers next restart.
+     * That failure is invisible -- the setting shows as on, and nothing happens, with nothing in the
+     * log to say why.
+     */
+    /**
+     * Keeps [artworkLookup] current, for the same reason [watchIdentifySetting] exists.
+     *
+     * `startReceivers()` samples settings once with `settingsFlow.first()`, which is right for
+     * anything consulted only while BUILDING a receiver and silently wrong for anything toggled
+     * during a session. Online cover lookup is consulted per track, so a one-shot read meant
+     * turning it on mid-session did nothing until the receivers next restarted -- the switch showed
+     * as on, no cover appeared, and nothing in the log said why. This is the same bug that hid in
+     * `TrackIdentifier.enabled`, in the one other place that had its shape.
+     */
+    private fun watchArtworkSetting() {
+        serviceScope.launch {
+            settingsRepository.settingsFlow.collect { settings ->
+                if (artworkLookup == settings.artworkLookup) return@collect
+                artworkLookup = settings.artworkLookup
+                Logger.i("Artwork lookup ${if (artworkLookup) "enabled" else "disabled"}")
+            }
+        }
+    }
+
+    private fun watchIdentifySetting() {
+        serviceScope.launch {
+            settingsRepository.settingsFlow.collect { settings ->
+                val was = com.phairplay.media.shazam.TrackIdentifier.enabled
+                com.phairplay.media.shazam.TrackIdentifier.enabled = settings.identifyTracks
+                com.phairplay.media.shazam.TrackIdentifier.intervalSec = identifyInterval(settings)
+                if (was == settings.identifyTracks) return@collect
+                Logger.i("Shazam: identification ${if (settings.identifyTracks) "enabled" else "disabled"}")
+                if (!settings.identifyTracks) {
+                    clearIdentification()
+                } else {
+                    // Switched on mid-session: the sender will not re-announce its lack of metadata,
+                    // so ask now rather than waiting for a track change that may never come.
+                    _nowPlaying.value?.let { if (!it.hasMetadata) com.phairplay.media.shazam.TrackIdentifier.request() }
+                }
+            }
+        }
+    }
+
+    /**
+     * The re-check interval to actually use, which is the user's choice unless the device is saving
+     * power.
+     *
+     * Fingerprinting is a burst of FFTs plus a network round trip, repeated on a timer -- precisely
+     * the sort of background work power-save mode exists to stop. The stored setting is left alone
+     * and only clamped here, so leaving power-save restores whatever was chosen without the user
+     * having to set it again.
+     */
+    private fun identifyInterval(settings: AppSettings): Int {
+        val chosen = settings.identifyIntervalSec
+        val saving = runCatching {
+            (getSystemService(Context.POWER_SERVICE) as PowerManager).isPowerSaveMode
+        }.getOrDefault(false)
+        if (!saving) return chosen
+        val floored = maxOf(chosen, AppSettings.LOW_POWER_IDENTIFY_INTERVAL_SEC)
+        if (floored != chosen) {
+            Logger.i("Shazam: power save is on — re-checking every ${floored}s instead of ${chosen}s")
+        }
+        return floored
+    }
+
+    /**
+     * The AudioTrack buffer to actually use, raised to a floor when the output is Bluetooth.
+     *
+     * The dial in Settings is calibrated for HDMI, where 100ms is comfortable. On A2DP it is thin --
+     * delivery is bursty, retransmits happen, and the radio is shared with the Wi-Fi carrying the
+     * stream -- so a hiccup drains the buffer and the audio stutters. Raising the floor to what the
+     * sender itself advertises as its minimum (250ms) fixes that without touching the setting, so
+     * the dial keeps meaning what it says the moment the speaker goes away.
+     *
+     * ONLY APPLIED WHEN THE TRACK IS CREATED. AudioTrack is sized once at construction, so a
+     * speaker connecting mid-session does not resize it -- that is the same reason changing the
+     * setting asks for a restart. The visual compensation IS live; this cannot be.
+     */
+    private fun effectiveAudioBufferMs(chosen: Int): Int {
+        if (routeCompensationMs <= 0) return chosen
+        val floored = maxOf(chosen, AudioRoute.BLUETOOTH_MIN_BUFFER_MS)
+        if (floored != chosen) {
+            Logger.i("Audio buffer raised ${chosen}ms → ${floored}ms for the Bluetooth route " +
+                "(the setting is unchanged)")
+        }
+        return floored
+    }
+
+    /** Forgets any identification and stops listening. Called wherever a session is torn down. */
+    private fun clearIdentification() {
+        com.phairplay.media.shazam.TrackIdentifier.cancel()
+        forgetIdentification()
+        identifiedFor = null
+    }
+
+    /** Drops the answer but not the listening state. */
+    private fun forgetIdentification() {
+        identifiedTitle = null
+        identifiedArtist = null
+        identifiedArtwork = null
+    }
+
+    /**
+     * Rewrites a cover URL to ask for a larger rendition.
+     *
+     * Shazam's `coverarthq` is 400x400, which is soft on a 1080p television because the Now Playing
+     * card draws artwork much larger than that. The URLs are Apple's mzstatic image service, where
+     * the size is a path segment (`400x400cc.jpg`) that the server will honour at other values, so
+     * asking for [ARTWORK_PIXELS] costs nothing but the larger download.
+     *
+     * Returns the URL unchanged when it does not match that shape -- Shazam does not promise this
+     * host, and a rewritten URL that 404s is why the caller keeps the original as a fallback rather
+     * than trusting this.
+     */
+    private fun upscaleArtworkUrl(url: String): String =
+        ARTWORK_SIZE_SEGMENT.replace(url) { m ->
+            "/${ARTWORK_PIXELS}x$ARTWORK_PIXELS${m.groupValues[3]}."
+        }
+
+    /**
+     * Downloads cover art for an identified track.
+     *
+     * Bounded read: the URL comes from a third party, so its size is not ours to trust. Shazam's
+     * covers are a few hundred kilobytes, and anything past the cap is abandoned rather than
+     * allowed to run a television out of memory.
+     *
+     * Called on the identifier's own worker thread, which is why it can block: it keeps
+     * [ShazamClient] a lookup rather than making it a downloader too.
+     */
+    private fun fetchArtwork(url: String): ByteArray? {
+        var conn: java.net.HttpURLConnection? = null
+        return try {
+            conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
+                instanceFollowRedirects = true
+                connectTimeout = ARTWORK_TIMEOUT_MS
+                readTimeout = ARTWORK_TIMEOUT_MS
+            }
+            if (conn.responseCode !in 200..299) {
+                Logger.i("Shazam: cover art HTTP ${conn.responseCode}")
+                return null
+            }
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(16 * 1024)
+            conn.inputStream.use { stream ->
+                while (true) {
+                    val n = stream.read(buf)
+                    if (n <= 0) break
+                    out.write(buf, 0, n)
+                    if (out.size() > MAX_ARTWORK_BYTES) {
+                        Logger.w("Shazam: cover art over ${MAX_ARTWORK_BYTES / 1024}KB — abandoned")
+                        return null
+                    }
+                }
+            }
+            out.toByteArray().takeIf { it.isNotEmpty() }
+                ?.also { Logger.i("Shazam: cover art ${it.size} bytes") }
+        } catch (e: Exception) {
+            Logger.i("Shazam: cover art failed (${e.javaClass.simpleName}: ${e.message})")
+            null
+        } finally {
+            runCatching { conn?.disconnect() }
+        }
+    }
+
+    /**
+     * Applies the sender's metadata, falling back to whatever the fingerprinter found.
+     *
+     * The sender ALWAYS wins. A track it names is authoritative and an identification is a guess, so
+     * the guess is only ever used to fill a hole -- and it is dropped outright as soon as the sender
+     * starts naming things, which is what happens when someone switches from a browser tab to Apple
+     * Music without ending the session.
+     */
+    private fun withIdentification(
+        info: com.phairplay.airplay.NowPlayingInfo,
+    ): com.phairplay.airplay.NowPlayingInfo {
+        // `&& !info.identified` is load-bearing. hasMetadata only means "has a title", and once an
+        // identification has been applied the value in _nowPlaying carries OUR title -- so without
+        // this the re-check's own result comes back through here, is mistaken for the sender naming
+        // the track, and clearIdentification() wipes it and cancels the identifier. That is why
+        // only the FIRST song was ever identified: the second match destroyed itself on arrival.
+        if (info.hasMetadata && !info.identified) {
+            clearIdentification()
+            return info
+        }
+        // Nameless audio: ask for an identification, unless one for this sender already landed.
+        if (identifiedFor != info.senderName) {
+            forgetIdentification()
+            com.phairplay.media.shazam.TrackIdentifier.request()
+            return info
+        }
+        val title = identifiedTitle ?: return info
+        // `info.identified` decides whose artwork this is. On a re-check the value coming in is one
+        // we already identified, so info.artwork is OUR PREVIOUS COVER rather than the sender's --
+        // and preferring it there froze the first song's art onto every song after it, even as the
+        // title updated correctly. The sender still wins when the artwork is genuinely the sender's.
+        val art = if (info.identified) identifiedArtwork ?: info.artwork else info.artwork ?: identifiedArtwork
+        return info.copy(
+            title = title,
+            artist = identifiedArtist,
+            artwork = art,
+            identified = true,
+        )
+    }
 
     private fun emitRemoteKey(keyCode: Int) {
         if (!remoteEnabled) {
@@ -203,10 +456,11 @@ class PhairPlayService : Service() {
     // Surface provider — supplied by MainActivity after binding (Sprint 5).
     // The lambda captures this field so it always uses the latest provider even if
     // setVideoSurfaceProvider() is called after startAirPlay().
-    @Volatile private var videoSurfaceProvider: (() -> Surface?)? = null
+    @Volatile private var videoSurfaceProvider: ((Int) -> Surface?)? = null
 
     // Receiver instances — null when not running
     private var airPlayReceiver: AirPlayReceiver? = null
+    private var audioRouteMonitor: AudioRouteMonitor? = null
     private var miracastReceiver: MiracastReceiver? = null
     private var dlnaServer: DlnaServer? = null
 
@@ -247,7 +501,11 @@ class PhairPlayService : Service() {
         // launches used to report, so switching apps with the physical remote left the Home app
         // showing whatever it last selected.
         PhairPlayAccessibilityService.onForegroundApp = { pkg -> reportForegroundApp(pkg) }
+        DiagnosticServer.statusProvider = ::diagnosticStatus
         DiagnosticServer.start(serviceScope)
+        watchIdentifySetting()
+        watchArtworkSetting()
+        startAudioRouteWatcher()
         // A BIND_AUTO_CREATE bind creates this service WITHOUT delivering onStartCommand, so nothing
         // starts the receivers and the service dies as soon as the last client unbinds — seen as
         // "created" then "destroying" 200ms later, with no "Starting receivers" between them. That
@@ -301,7 +559,14 @@ class PhairPlayService : Service() {
      *
      * @param provider Lambda that returns the current [Surface], or null if unavailable.
      */
-    fun setVideoSurfaceProvider(provider: () -> Surface?) {
+    /** Where per-tile decoded sizes go, so each tile letterboxes to its own stream. */
+    @Volatile private var videoSizeSink: ((Int, Int, Int) -> Unit)? = null
+
+    fun setVideoSizeSink(sink: (slot: Int, width: Int, height: Int) -> Unit) {
+        videoSizeSink = sink
+    }
+
+    fun setVideoSurfaceProvider(provider: (Int) -> Surface?) {
         videoSurfaceProvider = provider
     }
 
@@ -659,11 +924,96 @@ class PhairPlayService : Service() {
         Logger.i("PhairPlayService destroying")
         unregisterNetworkWatcher()
         unregisterDisplayWatcher()
+        DiagnosticServer.statusProvider = null
+        audioRouteMonitor?.stop()
+        audioRouteMonitor = null
         PhairPlayAccessibilityService.onForegroundApp = null
         stopAllReceiversInternal()
         DiagnosticServer.stop()
         serviceJob.cancel()
         super.onDestroy()
+    }
+
+    // ─── Audio route ─────────────────────────────────────────────────────────
+
+    /**
+     * Compensates for a Bluetooth speaker automatically, without making it the user's problem.
+     *
+     * A Bluetooth speaker is late by roughly [AudioRoute.BLUETOOTH_COMPENSATION_MS], and Android
+     * reports none of it — `AudioTrack.getTimestamp()`, which `AudioStreamServer.outputLatencyMs()`
+     * already consults, stops at the HAL, which is the moment audio leaves the box and well before
+     * the encoder, the radio link and the speaker's own jitter buffer. So it cannot be measured, and
+     * it does not need to be asked about either: it is a property of the transport, present whenever
+     * the transport is and gone the moment it isn't.
+     *
+     * It is therefore held entirely outside [AppSettings]. The user's Audio delay setting reads 0
+     * with a Bluetooth speaker connected, because 0 extra is what they have actually chosen; the 350
+     * underneath it is ours. Connect a speaker and the visuals slide back; disconnect and they
+     * snap forward, with nothing to tune and nothing to undo.
+     *
+     * The visuals move rather than the audio, because the audio is the side that is already late.
+     */
+    private fun startAudioRouteWatcher() {
+        val monitor = AudioRouteMonitor(applicationContext).also { audioRouteMonitor = it }
+        monitor.start()
+        serviceScope.launch {
+            monitor.route.collect { route ->
+                if (route.key == AudioRoute.UNKNOWN.key) return@collect
+                routeCompensationMs = route.compensationMs
+                // Live: the compensation has to follow a speaker that connects mid-track, not wait
+                // for the next session. Safe because it moves the beat callback only -- the audio
+                // trim is pre-buffered as silence at stream start and cannot move without a gap.
+                airPlayReceiver?.setBeatDelayMs(routeCompensationMs)
+                // Same number, second consumer. The compensation is a property of the OUTPUT, so
+                // everything the user perceives as "in sync with the sound" owes it -- the beat
+                // visuals and the mirrored picture alike. Only the audio itself is exempt, because
+                // the audio is the side that is already late.
+                airPlayReceiver?.setVideoDelayMs(routeCompensationMs)
+                Logger.i(
+                    "Audio route: ${route.label} — compensating ${routeCompensationMs}ms " +
+                        "(user audio delay is separate and unchanged)"
+                )
+                runCatching {
+                    settingsRepository.update {
+                        it.copy(
+                            currentAudioRoute = route.label,
+                            currentRouteCompensationMs = routeCompensationMs,
+                        )
+                    }
+                }
+                    .onFailure { Logger.w("Audio route: could not record the output name - ${it.message}") }
+            }
+        }
+    }
+
+    /**
+     * Milliseconds of visual delay owed to the current output. Not a setting, never persisted.
+     *
+     * Held here so a receiver built after the route was detected starts with the right value rather
+     * than at zero until the next route change — which, for a speaker that was already connected
+     * when the app launched, would be never.
+     */
+    @Volatile private var routeCompensationMs: Int = 0
+
+    /**
+     * The two facts worth having at the top of a dump: which build this is, and where the sound is
+     * actually going. Both otherwise scroll out of the ring buffer long before anyone reads it.
+     */
+    private fun diagnosticStatus(): String {
+        val route = audioRouteMonitor?.route?.value
+        val where = when {
+            route == null || route.key == AudioRoute.UNKNOWN.key -> "not yet detected"
+            routeCompensationMs > 0 -> "${route.label} (${route.key}) — compensating ${routeCompensationMs}ms"
+            else -> "${route.label} (${route.key}) — no compensation"
+        }
+        return buildString {
+            appendLine("---- PHAIRPLAY ----")
+            appendLine("build:  ${BuildConfig.VERSION_NAME} · ${BuildConfig.GIT_SHA} (${BuildConfig.BUILD_TYPE})")
+            appendLine("output: $where")
+            // The ceiling on multi-screen casting, and cheap enough to re-read that there is no
+            // reason to guess at it from a phone in another room.
+            append("decode: ${DecoderCapacity.maxConcurrentAvcDecoders()} concurrent H.264")
+        }
     }
 
     // ─── Service Control ─────────────────────────────────────────────────────
@@ -687,7 +1037,34 @@ class PhairPlayService : Service() {
 
         senderVolumeMode = settings.senderVolumeMode
         remoteEnabled = settings.remoteEnabled
-        artworkLookup = settings.artworkLookup
+        // `artworkLookup` is NOT set here either -- watchArtworkSetting() owns it, for the same
+        // reason as `enabled` below.
+        // `enabled` is NOT set here -- watchIdentifySetting() owns it, so that toggling the switch
+        // during a session takes effect immediately instead of at the next receiver restart.
+        com.phairplay.media.shazam.TrackIdentifier.onIdentified = { match ->
+            // Recorded against the sender that was playing when the lookup finished. If the session
+            // ended in the meantime the name is simply never used -- better than attaching a track
+            // to whoever connected next.
+            identifiedFor = _nowPlaying.value?.senderName
+            identifiedTitle = match.title
+            identifiedArtist = match.artist
+            identifiedArtwork = match.artworkUrl?.let { url ->
+                // Ask for a bigger rendition first. Shazam hands back a 400px cover, which is soft
+                // on a 1080p television -- the card draws it far larger than that.
+                fetchArtwork(upscaleArtworkUrl(url)) ?: fetchArtwork(url)
+            }
+            Logger.i("Shazam: naming this stream \"${match.title}\"" +
+                (match.artist?.let { " — $it" } ?: "") + " for sender ${identifiedFor ?: "(gone)"}")
+            _nowPlaying.value?.let { current -> _nowPlaying.value = withIdentification(current) }
+        }
+        com.phairplay.media.shazam.TrackIdentifier.onCleared = {
+            // The audio went quiet for long enough that whatever was named is over. Drop the name
+            // rather than leave it sitting under silence, and re-render so the card follows.
+            Logger.i("Shazam: dropping the identified name")
+            forgetIdentification()
+            identifiedFor = null
+            _nowPlaying.value?.let { current -> _nowPlaying.value = withIdentification(current) }
+        }
         // Switching the remote off must also clear what it drew and remembered, not just stop new
         // presses — otherwise a ring stays on screen over an app that never asked for one.
         if (!remoteEnabled) PhairPlayAccessibilityService.resetRemoteState()
@@ -902,7 +1279,7 @@ class PhairPlayService : Service() {
             pinAuthEnabled = settings.airPlayPinAuthEnabled,
             // Delegate to the current provider at call time — captures the field, not a fixed value.
             // When MainActivity calls setVideoSurfaceProvider(), future surface requests use it.
-            videoSurfaceProvider = { videoSurfaceProvider?.invoke() },
+            videoSurfaceProvider = { slot -> videoSurfaceProvider?.invoke(slot) },
             onSenderNameChanged = { name ->
                 pendingSenderName = name.ifEmpty { "AirPlay Sender" }
             },
@@ -939,7 +1316,8 @@ class PhairPlayService : Service() {
             },
             // Authoritative, straight from the receiver — see the guesses removed below.
             onVideoPlayingChanged = { playing -> _videoPlaying.value = playing },
-            onNowPlayingChanged = { info ->
+            onNowPlayingChanged = { rawInfo ->
+                val info = rawInfo?.let { withIdentification(it) }
                 _nowPlaying.value = info
                 if (info != null) {
                     val name = info.senderName.takeIf { it.isNotBlank() }
@@ -961,8 +1339,18 @@ class PhairPlayService : Service() {
             },
             rememberPinPairing = settings.rememberPinPairing,
             audioDelayMs = settings.audioDelayMs,
-            audioBufferMs = settings.audioBufferMs,
-            beatDelayMs = settings.beatDelayMs,
+            audioBufferMs = effectiveAudioBufferMs(settings.audioBufferMs),
+            beatDelayMs = routeCompensationMs,
+            // The FLAG opts in; the HARDWARE decides how far. Asking for more streams than the
+            // device can decode would hand a sender a session that negotiates cleanly and then
+            // never shows a picture — strictly worse than the immediate refusal it replaces.
+            onMirrorSlotsChanged = { slots -> _activeMirrorSlots.value = slots },
+            onMirrorSizeChanged = { slot, w, h -> videoSizeSink?.invoke(slot, w, h) },
+            maxSessions = if (settings.multiScreen) {
+                minOf(DecoderCapacity.maxConcurrentMirrors(), AirPlayReceiver.MAX_SLOTS)
+            } else {
+                1
+            },
             onVolumeRequest = { db -> applySenderVolume(db) },
             onStateChanged = { state ->
                 _airPlayState.value = state
@@ -970,6 +1358,12 @@ class PhairPlayService : Service() {
                 // PLAY/PAUSE to the active MediaSession rather than to the focused Activity, which
                 // is why the Activity's key handler never saw one.
                 updateMediaButtons(state == ProtocolState.CONNECTED)
+                // Only while a stream is up is there an AudioTrack to ask, and its answer beats
+                // the connected-device guess: this Fire TV reports HDMI and its built-in speaker as
+                // permanently present, so which of them is playing is otherwise an inference.
+                audioRouteMonitor?.setRoutedDevice(
+                    if (state == ProtocolState.CONNECTED) airPlayReceiver?.routedAudioDevice() else null
+                )
                 when (state) {
                     ProtocolState.CONNECTED   -> {
                         // See endOtherSession: AirPlay and DLNA share one audio output.
@@ -1015,6 +1409,7 @@ class PhairPlayService : Service() {
                         // switch". Whoever owns the connection owns the right to clear it.
                         if (_activeConnection.value?.protocol != Protocol.DLNA) {
                             _nowPlaying.value = null
+        clearIdentification()
                             _photoFrame.value = null
                             _activeConnection.value = null
                         }
@@ -1024,6 +1419,10 @@ class PhairPlayService : Service() {
                 }
             }
         ).also { it.start() }
+        // The route watcher's flow only re-emits when the ROUTE changes, so a receiver built while
+        // a Bluetooth speaker was already connected would have started uncompensated and stayed
+        // that way for the whole session. Seed it from the value we already hold.
+        airPlayReceiver?.setVideoDelayMs(routeCompensationMs)
         Logger.d("AirPlay receiver started (displayName='${settings.effectiveDisplayName}')")
     }
 
@@ -1104,9 +1503,12 @@ class PhairPlayService : Service() {
                     _activeConnection.value = ActiveConnection("DLNA", Protocol.DLNA)
                 } else {
                     _nowPlaying.value = null
+        clearIdentification()
                     _activeConnection.value = null
                 }
             },
+            // DLNA control points always name what they are playing, so there is nothing here for
+            // the fingerprinter to fill in.
             onNowPlayingChanged = { info -> _nowPlaying.value = info },
             artworkLookupEnabled = { artworkLookup },
         ).also {
@@ -1136,6 +1538,7 @@ class PhairPlayService : Service() {
         _dlnaState.value = ProtocolState.DISABLED
         _photoFrame.value = null
         _nowPlaying.value = null
+        clearIdentification()
         _pairingPin.value = null
         _videoPlaying.value = false
     }
@@ -1274,6 +1677,16 @@ class PhairPlayService : Service() {
     }
 
     companion object {
+        /** Cap on cover art fetched from Shazam. Its covers are a few hundred KB. */
+        private const val MAX_ARTWORK_BYTES = 4 * 1024 * 1024
+        private const val ARTWORK_TIMEOUT_MS = 8000
+
+        /** Rendition asked for in [upscaleArtworkUrl]. 800 is sharp at the card's drawn size. */
+        private const val ARTWORK_PIXELS = 800
+
+        /** `/400x400cc.` in an mzstatic URL — the size, and any suffix letters before the dot. */
+        private val ARTWORK_SIZE_SEGMENT = Regex("""/(\d{2,4})x(\d{2,4})([a-z-]*)\.""")
+
         const val CHANNEL_ID          = "phairplay_service_channel"
         const val CHANNEL_ID_INCOMING = "phairplay_incoming_channel"
         const val NOTIFICATION_ID          = 1001

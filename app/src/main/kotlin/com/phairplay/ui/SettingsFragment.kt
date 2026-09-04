@@ -46,14 +46,6 @@ class SettingsFragment : Fragment() {
     private lateinit var settingsRepository: SettingsRepository
 
     // Section header TextViews — set via include layout tag IDs
-    private lateinit var headerDisplay: TextView
-    private lateinit var headerProtocols: TextView
-    private lateinit var headerAirPlay: TextView
-    private lateinit var headerNowPlaying: TextView
-    private lateinit var headerService: TextView
-    private lateinit var headerDeveloper: TextView
-    private lateinit var headerAbout: TextView
-    private lateinit var headerPermissions: TextView
 
     // Settings rows
     private lateinit var rowDisplayName: LinearLayout
@@ -64,20 +56,28 @@ class SettingsFragment : Fragment() {
     private lateinit var rowHomeKit: View
     private lateinit var rowHomeKitReset: View
     private lateinit var rowMirrorAudio: View
+    private lateinit var rowMultiScreen: View
+    private lateinit var rowBetaUpdates: View
+    /** Cached so the update check does not have to suspend on DataStore to know its channel. */
+    private var betaUpdates = false
     private lateinit var rowPinAuth: View
     private lateinit var rowStartOnBoot: View
     private lateinit var rowDebugOverlay: View
     private lateinit var rowBackdropTheme: View
     private lateinit var textBackdropThemeValue: TextView
     private lateinit var rowArtworkLookup: View
+    private lateinit var rowIdentifyTracks: View
+    private lateinit var rowIdentifyInterval: LinearLayout
+    private lateinit var textIdentifyIntervalValue: TextView
     private lateinit var rowStreamEndAction: View
     private lateinit var rowBackAction: LinearLayout
     private lateinit var textBackActionValue: TextView
     private lateinit var rowPip: View
-    private lateinit var rowBeatDelay: LinearLayout
-    private lateinit var textBeatDelayValue: TextView
+    private lateinit var textAudioDelaySubtitle: TextView
     private lateinit var rowBeatPulse: LinearLayout
     private lateinit var textBeatPulseValue: TextView
+    private lateinit var rowOrbSpeed: LinearLayout
+    private lateinit var textOrbSpeedValue: TextView
     private lateinit var rowAudioDelay: LinearLayout
     private lateinit var textAudioDelayValue: TextView
     private lateinit var rowForceHighRes: View
@@ -112,25 +112,17 @@ class SettingsFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         settingsRepository = SettingsRepository(requireContext())
         bindViews(view)
-        setSectionTitles()
         setRowLabels()
         loadAndPopulate()
     }
 
+    private lateinit var paneScroll: android.widget.ScrollView
+    private lateinit var categories: List<Category>
+
     // ─── View Binding ────────────────────────────────────────────────────────
 
     private fun bindViews(view: View) {
-        // Each header is an <include> of settings_section_header.xml (a bare
-        // TextView). The include's android:id IS the TextView's id, so look it up
-        // directly — no nested lookup.
-        headerDisplay   = view.findViewById(R.id.header_display)
-        headerProtocols = view.findViewById(R.id.header_protocols)
-        headerPermissions = view.findViewById(R.id.header_permissions)
-        headerAirPlay   = view.findViewById(R.id.header_airplay)
-        headerNowPlaying = view.findViewById(R.id.header_now_playing)
-        headerService   = view.findViewById(R.id.header_service)
-        headerDeveloper = view.findViewById(R.id.header_developer)
-        headerAbout     = view.findViewById(R.id.header_about)
+        bindCategories(view)
 
         rowDisplayName      = view.findViewById(R.id.row_display_name)
         textDisplayNameValue = view.findViewById(R.id.text_display_name_value)
@@ -140,20 +132,26 @@ class SettingsFragment : Fragment() {
         rowHomeKit          = view.findViewById(R.id.row_homekit)
         rowHomeKitReset     = view.findViewById(R.id.row_homekit_reset)
         rowMirrorAudio      = view.findViewById(R.id.row_mirror_audio)
+        rowMultiScreen      = view.findViewById(R.id.row_multi_screen)
+        rowBetaUpdates      = view.findViewById(R.id.row_beta_updates)
         rowPinAuth          = view.findViewById(R.id.row_pin_auth)
         rowStartOnBoot      = view.findViewById(R.id.row_start_on_boot)
         rowDebugOverlay     = view.findViewById(R.id.row_debug_overlay)
         rowBackdropTheme    = view.findViewById(R.id.row_backdrop_theme)
         textBackdropThemeValue = view.findViewById(R.id.text_backdrop_theme_value)
         rowArtworkLookup    = view.findViewById(R.id.row_artwork_lookup)
+        rowIdentifyTracks   = view.findViewById(R.id.row_identify_tracks)
+        rowIdentifyInterval = view.findViewById(R.id.row_identify_interval)
+        textIdentifyIntervalValue = view.findViewById(R.id.text_identify_interval_value)
         rowStreamEndAction  = view.findViewById(R.id.row_stream_end_action)
         rowBackAction       = view.findViewById(R.id.row_back_action)
         textBackActionValue = view.findViewById(R.id.text_back_action_value)
         rowPip              = view.findViewById(R.id.row_pip)
-        rowBeatDelay        = view.findViewById(R.id.row_beat_delay)
-        textBeatDelayValue  = view.findViewById(R.id.text_beat_delay_value)
+        textAudioDelaySubtitle = view.findViewById(R.id.text_audio_delay_subtitle)
         rowBeatPulse        = view.findViewById(R.id.row_beat_pulse)
         textBeatPulseValue  = view.findViewById(R.id.text_beat_pulse_value)
+        rowOrbSpeed         = view.findViewById(R.id.row_orb_speed)
+        textOrbSpeedValue   = view.findViewById(R.id.text_orb_speed_value)
         rowAudioDelay       = view.findViewById(R.id.row_audio_delay)
         textAudioDelayValue = view.findViewById(R.id.text_audio_delay_value)
         rowForceHighRes     = view.findViewById(R.id.row_force_high_res)
@@ -182,17 +180,51 @@ class SettingsFragment : Fragment() {
         rowQuit             = view.findViewById(R.id.row_quit)
     }
 
-    /** Sets all section header titles from string resources. */
-    private fun setSectionTitles() {
-        headerDisplay.setText(R.string.settings_section_display)
-        headerProtocols.setText(R.string.settings_section_protocols)
-        headerAirPlay.setText(R.string.settings_section_airplay)
-        headerNowPlaying.setText(R.string.settings_section_now_playing)
-        headerService.setText(R.string.settings_section_service)
-        headerDeveloper.setText(R.string.settings_section_developer)
-        headerAbout.setText(R.string.settings_section_about)
-        headerPermissions.setText(R.string.settings_section_permissions)
+    /**
+     * Wires the shortcut list to the one continuous scroller.
+     *
+     * The shortcuts scroll; they do not hide anything. Focusing one glides the list to that
+     * section, so moving down the shortcuts previews the whole page, and moving RIGHT drops you
+     * into the rows exactly where you were looking.
+     */
+    private fun bindCategories(view: View) {
+        paneScroll = view.findViewById(R.id.settings_pane_scroll)
+        categories = CATEGORY_IDS.map { (navId, sectionId) ->
+            Category(view.findViewById(navId), view.findViewById(sectionId))
+        }
+        categories.forEach { category ->
+            category.nav.setOnFocusChangeListener { _, hasFocus ->
+                if (hasFocus) scrollTo(category)
+            }
+            category.nav.setOnClickListener {
+                scrollTo(category)
+                // OK jumps into the section's first row rather than doing nothing visible.
+                (category.section.parent as? ViewGroup)
+                    ?.let { parent -> parent.indexOfChild(category.section) }
+                    ?.let { idx -> (category.section.parent as ViewGroup).getChildAt(idx + 1) }
+                    ?.requestFocus()
+            }
+        }
+        // Focus motion on the shortcuts and on every row in the list.
+        (view.findViewById<ViewGroup>(R.id.settings_categories))?.let(FocusMotion::attachToChildren)
+        (view.findViewById<ViewGroup>(R.id.settings_content))?.let { content ->
+            for (i in 0 until content.childCount) {
+                (content.getChildAt(i) as? ViewGroup)?.let(FocusMotion::attachToChildren)
+            }
+        }
+        categories.firstOrNull()?.nav?.requestFocus()
     }
+
+    /** Glides the scroller so [category]'s heading sits at the top of the visible area. */
+    private fun scrollTo(category: Category) {
+        categories.forEach { it.nav.isSelected = it === category }
+        // smoothScrollTo, not scrollTo: the jump is what makes a shortcut list feel like it
+        // teleported you somewhere unrelated. The glide shows you how far you moved.
+        paneScroll.smoothScrollTo(0, (category.section.top - SECTION_TOP_GAP_PX).coerceAtLeast(0))
+    }
+
+    private data class Category(val nav: View, val section: View)
+
 
     /** Sets all row labels and subtitles from string resources. */
     private fun setRowLabels() {
@@ -211,6 +243,8 @@ class SettingsFragment : Fragment() {
         // has two independent on/off states.
         rowHomeKitReset.findViewById<SwitchCompat>(R.id.switch_setting)?.visibility = View.GONE
         configureToggleRow(rowMirrorAudio,  R.string.setting_mirror_audio,       R.string.setting_mirror_audio_subtitle)
+        configureToggleRow(rowMultiScreen,  R.string.setting_multi_screen,       R.string.setting_multi_screen_subtitle)
+        configureToggleRow(rowBetaUpdates,  R.string.setting_beta_updates,       R.string.setting_beta_updates_subtitle)
         configureToggleRow(rowPinAuth,      R.string.setting_pin_auth,           R.string.setting_pin_auth_subtitle)
         configureToggleRow(rowRememberPin,   R.string.setting_remember_pin,       R.string.setting_remember_pin_subtitle)
         configureToggleRow(rowRemoteEnabled, R.string.setting_remote,             R.string.setting_remote_subtitle)
@@ -218,6 +252,7 @@ class SettingsFragment : Fragment() {
         configureToggleRow(rowStartOnBoot,  R.string.setting_start_on_boot,      0)
         configureToggleRow(rowDebugOverlay, R.string.setting_debug_overlay,      R.string.setting_debug_overlay_subtitle)
         configureToggleRow(rowArtworkLookup, R.string.setting_artwork_lookup,    R.string.setting_artwork_lookup_subtitle)
+        configureToggleRow(rowIdentifyTracks, R.string.setting_identify_tracks,  R.string.setting_identify_tracks_subtitle)
         configureToggleRow(rowStreamEndAction, R.string.setting_stream_end,     R.string.setting_stream_end_subtitle)
         configureToggleRow(rowPip,         R.string.setting_pip,                R.string.setting_pip_subtitle)
         configureToggleRow(rowForceHighRes, R.string.setting_force_high_res,      R.string.setting_force_high_res_subtitle)
@@ -229,11 +264,10 @@ class SettingsFragment : Fragment() {
 
     private fun showNetworkInfo() {
         val ip = getWifiIp() ?: return
+        // One port now: / is the dump and /tail is the live stream.
         val port = com.phairplay.diagnostic.DiagnosticServer.PORT
-        val tailPort = com.phairplay.diagnostic.DiagnosticServer.TAIL_PORT
         textVersionValue.text =
-            getString(R.string.settings_version_logs,
-                BuildConfig.VERSION_NAME, ip, port.toString(), tailPort.toString())
+            getString(R.string.settings_version_logs, BuildConfig.VERSION_NAME, ip, port.toString())
     }
 
     private fun getWifiIp(): String? {
@@ -288,18 +322,33 @@ class SettingsFragment : Fragment() {
         setToggle(rowHomeKit,      settings.homeKitEnabled)
         renderHomeKitStatus(settings.homeKitEnabled)
         setToggle(rowMirrorAudio,  settings.mirrorAudioEnabled)
+        setToggle(rowMultiScreen,  settings.multiScreen)
+        setToggle(rowBetaUpdates,  settings.betaUpdates)
+        // What the background check last found, so a waiting update is visible without pressing
+        // anything. Blank clears it, which is what happens once the check says we are current.
+        textUpdateValue.text = settings.pendingUpdateTag.ifBlank { "" }
+        betaUpdates = settings.betaUpdates
         setToggle(rowPinAuth,      settings.airPlayPinAuthEnabled)
         setToggle(rowStartOnBoot,  settings.startOnBoot)
         setToggle(rowDebugOverlay, settings.showDebugOverlay)
         showBackdropTheme(settings.backdropTheme)
         setToggle(rowArtworkLookup, settings.artworkLookup)
+        setToggle(rowIdentifyTracks, settings.identifyTracks)
+        showIdentifyInterval(settings.identifyIntervalSec)
         setToggle(rowStreamEndAction, settings.streamEndAction == StreamEndAction.EXIT_APP)
         showBackAction(settings.backAction)
         setToggle(rowPip, settings.pipEnabled)
         showAudioDelay(settings.audioDelayMs)
+        showTrimOutput(settings.currentAudioRoute, settings.currentRouteCompensationMs)
         showAudioBuffer(settings.audioBufferMs)
-        showBeatPulse(settings.beatPulse)
-        showBeatDelay(settings.beatDelayMs)
+        // ONE ROW, FOLLOWING THE BACKDROP THAT IS ACTUALLY ON.
+        //
+        // The two backdrops keep separate Beat Pulse values, but showing two rows would mean one of
+        // them is always editing something the user cannot see. So the row edits whichever backdrop
+        // is selected, and its value reflects that one; Orb Speed is projector-only and simply goes
+        // away otherwise, rather than sitting there doing nothing. BLACK draws no motion at all, so
+        // neither applies.
+        showBackdropControls(settings)
         setToggle(rowForceHighRes, settings.forceHighResolution)
         textInputAppsValue.text = describeInputApps(settings.inputApps)
         setToggle(rowRememberPin,  settings.rememberPinPairing)
@@ -375,11 +424,19 @@ class SettingsFragment : Fragment() {
         }
         rowHomeKitReset.setOnClickListener { confirmResetHomeKit() }
         setToggleListener(rowMirrorAudio)  { enabled -> saveAndRestart { it.copy(mirrorAudioEnabled = enabled) } }
+        // Restart required: the session capacity is fixed when the RTSP handler is constructed.
+        setToggleListener(rowMultiScreen)  { enabled -> saveAndRestart { it.copy(multiScreen = enabled) } }
+        // No restart: this only changes which endpoint the next update check reads.
+        setToggleListener(rowBetaUpdates)  { enabled ->
+            betaUpdates = enabled
+            save { it.copy(betaUpdates = enabled) }
+        }
         setToggleListener(rowPinAuth)      { enabled -> saveAndRestart { it.copy(airPlayPinAuthEnabled = enabled) } }
         setToggleListener(rowStartOnBoot)  { enabled -> save { it.copy(startOnBoot = enabled) } }
         setToggleListener(rowDebugOverlay) { enabled -> save { it.copy(showDebugOverlay = enabled) } }
         rowBackdropTheme.setOnClickListener { pickBackdropTheme() }
         setToggleListener(rowArtworkLookup) { enabled -> save { it.copy(artworkLookup = enabled) } }
+        setToggleListener(rowIdentifyTracks) { enabled -> save { it.copy(identifyTracks = enabled) } }
         setToggleListener(rowStreamEndAction) { enabled ->
             save { it.copy(streamEndAction = if (enabled) StreamEndAction.EXIT_APP else StreamEndAction.STAY_IN_APP) }
         }
@@ -387,8 +444,9 @@ class SettingsFragment : Fragment() {
         setToggleListener(rowPip) { enabled -> save { it.copy(pipEnabled = enabled) } }
         rowAudioDelay.setOnClickListener { pickAudioDelay() }
         rowAudioBuffer.setOnClickListener { pickAudioBuffer() }
+        rowIdentifyInterval.setOnClickListener { pickIdentifyInterval() }
         rowBeatPulse.setOnClickListener { pickBeatPulse() }
-        rowBeatDelay.setOnClickListener { pickBeatDelay() }
+        rowOrbSpeed.setOnClickListener { pickOrbSpeed() }
         // Restart, not a plain save: the resolution is baked into the /info response and the mirror
         // video server at receiver startup, so a plain save left the toggle looking broken — it
         // flipped in the UI and nothing changed until the service happened to restart later.
@@ -527,46 +585,83 @@ class SettingsFragment : Fragment() {
 
     private fun showBeatPulse(level: Int) { textBeatPulseValue.text = beatPulseLabel(level) }
 
+    private fun orbSpeedLabel(level: Int): String = getString(when (level) {
+        0 -> R.string.setting_orb_speed_slow
+        2 -> R.string.setting_orb_speed_fast
+        else -> R.string.setting_orb_speed_normal
+    })
+
+    private fun showOrbSpeed(level: Int) { textOrbSpeedValue.text = orbSpeedLabel(level) }
+
+    private fun pickOrbSpeed() {
+        val labels = arrayOf(orbSpeedLabel(0), orbSpeedLabel(1), orbSpeedLabel(2))
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_orb_speed)
+            .setItems(labels) { _, which ->
+                save { it.copy(orbSpeed = which) }
+                showOrbSpeed(which)
+                Logger.i("Orb speed set to ${orbSpeedLabel(which)}")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    /** The backdrop the Beat Pulse row is currently editing. Projector unless the field is on. */
+    private var pulseTheme: BackdropTheme = BackdropTheme.DYNAMIC
+
+    /** Beat Pulse values as last known, so the row can switch backdrops without a store read. */
+    private var beatPulseProjector = 0
+    private var beatPulseField = 0
+
+    private fun showBackdropControls(settings: AppSettings) {
+        beatPulseProjector = settings.beatPulse
+        beatPulseField = settings.fieldPulse
+        showBackdropControls(settings.backdropTheme)
+        showOrbSpeed(settings.orbSpeed)
+    }
+
+    private fun showBackdropControls(theme: BackdropTheme) {
+        pulseTheme = theme
+        val level = if (pulseTheme == BackdropTheme.PROJECTOR) beatPulseProjector
+                    else beatPulseField
+        showBeatPulse(level)
+        rowBeatPulse.visibility =
+            if (pulseTheme == BackdropTheme.BLACK) View.GONE else View.VISIBLE
+        rowOrbSpeed.visibility =
+            if (pulseTheme == BackdropTheme.PROJECTOR) View.VISIBLE else View.GONE
+    }
+
     private fun pickBeatPulse() {
         val labels = arrayOf(beatPulseLabel(0), beatPulseLabel(1), beatPulseLabel(2), beatPulseLabel(3))
+        val projector = pulseTheme == BackdropTheme.PROJECTOR
         AlertDialog.Builder(requireContext())
             .setTitle(R.string.setting_beat_pulse)
             .setItems(labels) { _, which ->
                 val level = which
-                save { it.copy(beatPulse = level) }
+                save { if (projector) it.copy(beatPulse = level) else it.copy(fieldPulse = level) }
+                if (projector) beatPulseProjector = level else beatPulseField = level
                 showBeatPulse(level)
-                Logger.i("Beat pulse set to ${beatPulseLabel(level)}")
+                Logger.i("Beat pulse (${if (projector) "projector" else "dynamic"}) set to " +
+                    beatPulseLabel(level))
             }
             .setNegativeButton(android.R.string.cancel, null)
             .show()
-    }
-
-    private fun showBeatDelay(ms: Int) {
-        textBeatDelayValue.text = if (ms == 0) getString(R.string.setting_audio_delay_none) else "+$ms ms"
     }
 
     /**
-     * Shifts the beat animation later without touching audio timing.
+     * Says out loud that a Bluetooth speaker is already being compensated for.
      *
-     * A Bluetooth speaker's own output latency is invisible to AudioTrack's timestamp, so the beat
-     * fires when the PCM leaves the device rather than when the user hears it. Correcting that with
-     * the audio delay would push the audio itself out of sync with the sender, so it gets its own dial.
+     * The compensation is not a setting and the row above still reads whatever the user chose, so
+     * without this line the only evidence of it is that things happen to be in sync. Stating it is
+     * also what stops someone dialling in another 350ms by hand on top of it.
      */
-    private fun pickBeatDelay() {
-        val labels = BEAT_DELAY_CHOICES.map {
-            if (it == 0) getString(R.string.setting_audio_delay_none) else "+$it ms"
-        }.toTypedArray()
-        AlertDialog.Builder(requireContext())
-            .setTitle(R.string.setting_beat_delay)
-            .setItems(labels) { _, which ->
-                val ms = BEAT_DELAY_CHOICES[which]
-                save { it.copy(beatDelayMs = ms) }
-                showBeatDelay(ms)
-                Logger.i("Beat delay set to $ms ms — restarting receivers to apply")
-                ServiceController.restart(requireContext())
-            }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
+    private fun showTrimOutput(routeLabel: String, compensationMs: Int) {
+        if (routeLabel.isBlank() || compensationMs <= 0) {
+            textAudioDelaySubtitle.setText(R.string.setting_audio_delay_subtitle)
+            return
+        }
+        textAudioDelaySubtitle.text =
+            getString(R.string.setting_audio_delay_bluetooth, routeLabel, compensationMs)
     }
 
     private fun backActionLabel(action: BackAction): String = getString(when (action) {
@@ -616,6 +711,19 @@ class SettingsFragment : Fragment() {
                 val theme = options[which]
                 save { it.copy(backdropTheme = theme) }
                 showBackdropTheme(theme)
+                // AND RE-RUN THE ROWS THAT DEPEND ON IT, from the theme just chosen.
+                //
+                // populateUI runs once from settingsFlow.first(); the screen does not collect the
+                // flow, so every picker repaints what it changed. That is fine for a row showing
+                // only its own value, and wrong for this one, which decides whether Orb Speed
+                // exists at all and which backdrop's Beat Pulse is being edited.
+                //
+                // NOT BY RE-READING THE STORE. The first attempt launched a coroutine to read the
+                // settings back, which races the save that was launched a line earlier — two
+                // independent coroutines, and the read frequently won, so the rows repainted from
+                // the OLD theme and the split still appeared to do nothing. `theme` is already the
+                // answer; asking DataStore for it again can only be wrong or slow.
+                showBackdropControls(theme)
                 Logger.i("Backdrop set to $theme")
             }
             .setNegativeButton(android.R.string.cancel, null)
@@ -648,6 +756,36 @@ class SettingsFragment : Fragment() {
      * the sender, the codec and the output path — Bluetooth in particular adds its own delay that
      * no amount of protocol correctness can predict. A dial beats a guessed constant.
      */
+    private fun showIdentifyInterval(sec: Int) {
+        textIdentifyIntervalValue.text = identifyIntervalLabel(sec)
+    }
+
+    private fun identifyIntervalLabel(sec: Int): String =
+        if (sec <= AppSettings.IDENTIFY_INTERVAL_CHOICES.first())
+            getString(R.string.setting_identify_interval_continuous)
+        else getString(R.string.setting_identify_interval_seconds, "${sec}s")
+
+    /**
+     * How often the fingerprinter looks the track up again.
+     *
+     * No receiver restart, unlike the audio buffer: the interval is read live by the identifier, so
+     * a change takes effect at the next re-check rather than needing the session torn down.
+     */
+    private fun pickIdentifyInterval() {
+        val choices = AppSettings.IDENTIFY_INTERVAL_CHOICES
+        val labels = choices.map { identifyIntervalLabel(it) }.toTypedArray()
+        AlertDialog.Builder(requireContext())
+            .setTitle(R.string.setting_identify_interval)
+            .setItems(labels) { _, which ->
+                val sec = choices[which]
+                save { it.copy(identifyIntervalSec = sec) }
+                showIdentifyInterval(sec)
+                Logger.i("Shazam re-check interval set to ${sec}s")
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun showAudioBuffer(ms: Int) {
         textAudioBufferValue.text =
             if (ms == AppSettings.DEFAULT_AUDIO_BUFFER_MS) getString(R.string.setting_audio_buffer_default, ms)
@@ -854,6 +992,18 @@ class SettingsFragment : Fragment() {
     }
 
     private companion object {
+        /** Shortcut list order: the nav item and the section heading it scrolls to. */
+        val CATEGORY_IDS = listOf(
+            R.id.cat_connection   to R.id.section_connection,
+            R.id.cat_homekit      to R.id.section_homekit,
+            R.id.cat_mirroring    to R.id.section_mirroring,
+            R.id.cat_nowplaying   to R.id.section_nowplaying,
+            R.id.cat_system       to R.id.section_system,
+        )
+
+        /** Breathing room above a section heading once scrolled to, so it is not flush at the top. */
+        const val SECTION_TOP_GAP_PX = 24
+
         val SCREENSAVER_TIMEOUT_CHOICES = listOf(1, 2, 5, 10, 15, 30, 60)
 
         /** A/V sync trim options, in milliseconds added to the sender's requested latency. */
@@ -861,7 +1011,8 @@ class SettingsFragment : Fragment() {
 
         /** Connect and read timeout for the update download. */
         private const val UPDATE_TIMEOUT_MS = 15_000
-        val BEAT_DELAY_CHOICES = listOf(0, 50, 100, 150, 200, 300, 400, 500, 750, 1000)
+        // 350 is here because it is AvTrim.BLUETOOTH_SEED_BEAT_MS: a seeded value the picker cannot
+        // display as selected is a value the user cannot get back after changing it.
     }
 
     /**
@@ -1030,11 +1181,20 @@ class SettingsFragment : Fragment() {
         textUpdateValue.setText(R.string.setting_update_checking)
         rowUpdate.isEnabled = false
         viewLifecycleOwner.lifecycleScope.launch {
-            val result = com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            // The beta channel is compared by COMMIT, the stable one by version — see UpdateChecker.
+            val result = if (betaUpdates) {
+                com.phairplay.util.UpdateChecker.checkBeta(BuildConfig.GIT_SHA, BuildConfig.FLAVOR)
+            } else {
+                com.phairplay.util.UpdateChecker.check(BuildConfig.VERSION_NAME, BuildConfig.FLAVOR)
+            }
             rowUpdate.isEnabled = true
             when (result) {
                 is com.phairplay.util.UpdateChecker.Result.UpToDate ->
-                    textUpdateValue.text = getString(R.string.setting_update_uptodate, result.tag)
+                    // With the build SHA, not just the tag. The version name does not move between
+                    // dev builds, so "Up to date (1.0.0)" is true of every build ever made and tells
+                    // you nothing about which one is on the television.
+                    textUpdateValue.text =
+                        getString(R.string.setting_update_uptodate, result.tag, BuildConfig.GIT_SHA)
 
                 is com.phairplay.util.UpdateChecker.Result.Failed -> {
                     // Shown, not swallowed -- "Check failed" with no reason is what makes people
@@ -1048,10 +1208,11 @@ class SettingsFragment : Fragment() {
                 }
 
                 is com.phairplay.util.UpdateChecker.Result.Available -> {
-                    textUpdateValue.text = getString(R.string.setting_update_available, result.tag)
+                    textUpdateValue.text =
+                        getString(R.string.setting_update_available, result.tag, BuildConfig.GIT_SHA)
                     val asset = result.assetUrl
                     val dialog = AlertDialog.Builder(ctx)
-                        .setTitle(getString(R.string.setting_update_available, result.tag))
+                        .setTitle(getString(R.string.setting_update_available, result.tag, BuildConfig.GIT_SHA))
                         .setMessage(
                             if (asset == null) getString(R.string.setting_update_no_asset, result.tag)
                             else result.notes,
